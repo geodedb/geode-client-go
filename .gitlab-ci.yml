@@ -1,37 +1,26 @@
 # =============================================================================
 # Geode Go Client CI/CD Pipeline
+# Uses DevNW CI/CD Catalog components
 # =============================================================================
 
 include:
-  - component: gitlab.com/devnw/ci-catalog/go-format@v1.2.1
+  - component: gitlab.com/devnw/ci-catalog/go-lint@latest
+    inputs:
+      stage: lint
+      allow_failure: true
+
+  - component: gitlab.com/devnw/ci-catalog/go-build@latest
     inputs:
       go_version: "1.24"
-      paths: "."
-      stage: lint
+      stage: build
+
+  - component: gitlab.com/devnw/ci-catalog/go-test@latest
+    inputs:
+      go_version: "1.24"
+      stage: test
+      allow_failure: true  # Tests may require running Geode server
 
 stages:
   - lint
   - build
   - test
-
-variables:
-  GO_VERSION: "1.24"
-
-build:
-  stage: build
-  image: registry.gitlab.com/devnw/ci-catalog/go:${GO_VERSION}
-  script:
-    - go mod download
-    - go build ./...
-  rules:
-    - if: '$CI_COMMIT_BRANCH || $CI_COMMIT_TAG'
-
-test:
-  stage: test
-  image: registry.gitlab.com/devnw/ci-catalog/go:${GO_VERSION}
-  script:
-    - go mod download
-    - go test -v -race ./...
-  rules:
-    - if: '$CI_COMMIT_BRANCH || $CI_COMMIT_TAG'
-  allow_failure: true  # Tests may require running Geode server
