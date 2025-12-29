@@ -2,8 +2,9 @@ package main
 
 import (
 	"database/sql"
-	_ "geode/clients/go/geode"
 	"fmt"
+
+	_ "gitlab.com/devnw/geode/geode-client-go"
 )
 
 func main() {
