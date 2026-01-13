@@ -11,12 +11,12 @@ include:
 
   - component: gitlab.com/devnw/ci-catalog/go-build@latest
     inputs:
-      go_version: "1.23"
+      go_version: "1.24"
       stage: build
 
   - component: gitlab.com/devnw/ci-catalog/go-test@latest
     inputs:
-      go_version: "1.23"
+      go_version: "1.24"
       stage: test
       allow_failure: true  # Tests may require running Geode server
 
