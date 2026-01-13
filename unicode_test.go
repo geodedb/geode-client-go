@@ -1,4 +1,4 @@
-package geodesql
+package geode 
 
 import "testing"
 

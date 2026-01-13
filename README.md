@@ -1,45 +1,214 @@
-Geode Go Client (database/sql driver)
+# Geode Go Client Library
 
-Usage
+A Go `database/sql` driver for the [Geode](https://github.com/devnw/geode) graph database.
 
-- Install in your Go module by adding a replace to this path or copying into your project.
-- Connect using database/sql with driver name "geode".
-- The driver spawns the geoded process and communicates over its JSON line protocol (stdin/stdout).
+## Features
 
-Example
+- Full `database/sql` driver implementation
+- QUIC transport with TLS 1.3
+- Connection pooling via `database/sql`
+- Prepared statements
+- Transaction support
+- Context cancellation and timeouts
+- Rich error types with ISO/IEC 39075 status codes
 
+## Installation
+
+```bash
+go get go.codepros.org/geode
+```
+
+## Usage
+
+```go
 package main
 
 import (
-	"database/sql"
-	_ "geode/clients/go/geode"
-	"fmt"
+    "context"
+    "database/sql"
+    "log"
+    "time"
+
+    _ "go.codepros.org/geode"
 )
 
 func main() {
-	db, err := sql.Open("geode", "process:./zig-out/bin/geoded?page_size=10")
-	if err != nil { panic(err) }
-	defer db.Close()
-	rows, err := db.Query("RETURN 1 AS x ORDER BY x LIMIT 1")
-	if err != nil { panic(err) }
-	defer rows.Close()
-	for rows.Next() {
-		var x int64
-		if err := rows.Scan(&x); err != nil { panic(err) }
-		fmt.Println("x=", x)
-	}
+    // Connect to Geode server
+    db, err := sql.Open("geode", "localhost:3141?ca=/path/to/ca.crt")
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer db.Close()
+
+    // Configure connection pool
+    db.SetMaxOpenConns(10)
+    db.SetMaxIdleConns(5)
+
+    ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+    defer cancel()
+
+    // Execute a query
+    rows, err := db.QueryContext(ctx, "MATCH (n:Person) RETURN n.name LIMIT 10")
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer rows.Close()
+
+    for rows.Next() {
+        var name string
+        if err := rows.Scan(&name); err != nil {
+            log.Fatal(err)
+        }
+        log.Println(name)
+    }
+}
+```
+
+## DSN Format
+
+```
+geode://host:port?options
+host:port?options
+host:port
+host
+```
+
+### Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `page_size` | Results page size | 1000 |
+| `hello_name` | Client name for HELLO | geode-go |
+| `hello_ver` | Client version for HELLO | 0.1 |
+| `conformance` | GQL conformance level | min |
+| `ca` | Path to CA certificate | |
+| `cert` | Path to client certificate (mTLS) | |
+| `key` | Path to client key (mTLS) | |
+| `insecure` | Skip TLS verification (testing only) | false |
+
+### Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `GEODE_HOST` | Default host |
+| `GEODE_PORT` | Default port |
+| `GEODE_TLS_CA` | Default CA certificate path |
+
+## Transactions
+
+```go
+tx, err := db.BeginTx(ctx, nil)
+if err != nil {
+    log.Fatal(err)
 }
 
-DSN
+_, err = tx.ExecContext(ctx, "CREATE (n:Person {name: 'Alice'})")
+if err != nil {
+    tx.Rollback()
+    log.Fatal(err)
+}
 
-- process:<path>?page_size=N&format=(json|txt)&hello_name=&hello_ver=&conformance=
-- If DSN is empty, GEODE_SERVER_PATH env var may provide the server path; otherwise defaults to ./zig-out/bin/geoded
+if err := tx.Commit(); err != nil {
+    log.Fatal(err)
+}
+```
 
-Transactions
+## Prepared Statements
 
-- Use db.Begin / tx.Commit / tx.Rollback. The server supports single active transaction per connection.
+```go
+stmt, err := db.PrepareContext(ctx, "MATCH (n:Person {name: ?}) RETURN n")
+if err != nil {
+    log.Fatal(err)
+}
+defer stmt.Close()
 
-Notes
+rows, err := stmt.QueryContext(ctx, "Alice")
+// ...
+```
 
-- The server produces SCHEMA then BINDINGS pages; the driver handles paging by issuing PULL requests. It stops on final=true or NoResult.
-- PROFILE queries return SCHEMA then PROFILE; the driver exposes an empty result set for such statements.
+## Error Handling
+
+The driver provides rich error types:
+
+```go
+import "go.codepros.org/geode"
+
+rows, err := db.QueryContext(ctx, "INVALID QUERY")
+if err != nil {
+    var derr *geode.DriverError
+    if errors.As(err, &derr) {
+        log.Printf("Code: %s, Message: %s", derr.Code, derr.Message)
+        if derr.IsRetryable() {
+            // Retry the operation
+        }
+    }
+}
+```
+
+## Unicode Utilities
+
+Helper functions for Unicode conversion:
+
+```go
+import "go.codepros.org/geode"
+
+// UTF-8 to UTF-16
+utf16 := geode.Utf8ToUtf16("Hello 🌍")
+
+// UTF-16 to UTF-8
+utf8 := geode.Utf16ToUtf8(utf16)
+
+// WTF-8 lossy decode (replaces invalid sequences with U+FFFD)
+safe := geode.Wtf8Lossy([]byte{0x61, 0x80, 0x62})
+```
+
+## Testing
+
+```bash
+# Unit tests (no server required)
+go test -v -short ./...
+
+# Integration tests with manual server
+GEODE_TEST_DSN="localhost:3141?insecure=true" go test -v ./...
+
+# Docker-based integration tests (recommended)
+go test -v -tags=integration ./...
+
+# Docker integration tests with custom image
+GEODE_IMAGE="myregistry/geode:tag" go test -v -tags=integration ./...
+
+# Unit benchmarks (no server required)
+go test -bench=. -benchmem ./...
+
+# Docker-based benchmarks
+go test -tags=integration -bench=BenchmarkDocker -benchmem ./...
+
+# Fuzzing
+go test -fuzz=FuzzParseDSN -fuzztime=30s
+```
+
+### Docker Integration Tests
+
+The Docker-based integration tests provide comprehensive coverage using `testcontainers-go`. They automatically:
+
+- Pull and start a Geode container from `registry.gitlab.com/devnw/geode/geode:latest`
+- Run a full test suite covering CRUD operations, transactions, queries, and more
+- Clean up after tests complete
+
+Test categories include:
+
+- **Basic Operations**: Ping, simple queries, parameterized queries
+- **Node CRUD**: Create, read, update, delete operations
+- **Relationships**: Creating and traversing relationships
+- **Transactions**: Commit, rollback, multi-operation transactions
+- **Query Operations**: WHERE, ORDER BY, LIMIT, SKIP
+- **Aggregations**: COUNT, SUM, AVG, MIN, MAX
+- **Error Handling**: Syntax errors, non-existent properties
+- **Prepared Statements**: Parameterized query reuse
+- **Concurrent Access**: Connection pooling under load
+- **Data Types**: Null, lists, maps
+- **Social Network Fixtures**: Complex relationship queries
+
+## License
+
+See [LICENSE](LICENSE) for details.
