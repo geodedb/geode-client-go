@@ -191,7 +191,7 @@ go test -fuzz=FuzzParseDSN -fuzztime=30s
 
 The Docker-based integration tests provide comprehensive coverage using `testcontainers-go`. They automatically:
 
-- Pull and start a Geode container from `registry.gitlab.com/devnw/geode/geode:latest`
+- Pull and start a Geode container from `registry.gitlab.com/devnw/codepros/geode/geode:latest`
 - Run a full test suite covering CRUD operations, transactions, queries, and more
 - Clean up after tests complete
 

@@ -121,7 +121,7 @@ JSON line protocol over QUIC:
 ### Integration Tests
 
 Docker-based integration tests in `integration_test.go` use `testcontainers-go` to automatically:
-- Pull and start a Geode container (`registry.gitlab.com/devnw/geode/geode:latest`)
+- Pull and start a Geode container (`registry.gitlab.com/devnw/codepros/geode/geode:latest`)
 - Run comprehensive test suite
 - Clean up after tests
 
