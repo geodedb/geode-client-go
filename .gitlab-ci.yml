@@ -20,7 +20,18 @@ include:
       stage: test
       allow_failure: true  # Tests may require running Geode server
 
+  # Release creation
+  - component: gitlab.com/devnw/ci-catalog/release-semantic@latest
+    inputs:
+      stage: release
+
+default:
+  tags:
+    - company
+    - linux
+
 stages:
   - lint
   - build
   - test
+  - release
