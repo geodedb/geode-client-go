@@ -1,7 +1,13 @@
-// integration_test.go provides comprehensive integration tests using Docker.
+// integration_test.go provides comprehensive integration tests.
 //
-// Run with: go test -v -tags=integration ./...
-// Or with custom image: GEODE_IMAGE=myregistry/geode:tag go test -v -tags=integration ./...
+// Run with testcontainers (auto Docker):
+//   go test -v -tags=integration ./...
+//
+// Run with custom image:
+//   GEODE_IMAGE=myregistry/geode:tag go test -v -tags=integration ./...
+//
+// Run against manual server (no testcontainers):
+//   GEODE_TEST_DSN="localhost:3141?insecure=true" go test -v -tags=integration ./...
 
 //go:build integration
 
@@ -98,11 +104,22 @@ func startGeodeContainer(ctx context.Context) (*geodeContainer, error) {
 }
 
 // getSharedContainer returns a shared container for all tests.
+// If GEODE_TEST_DSN is set, uses that DSN instead of starting a testcontainer.
 func getSharedContainer(t *testing.T) *geodeContainer {
 	containerMu.Lock()
 	defer containerMu.Unlock()
 
 	if sharedContainer != nil {
+		return sharedContainer
+	}
+
+	// Check if manual DSN is provided (skip testcontainers)
+	if dsn := os.Getenv("GEODE_TEST_DSN"); dsn != "" {
+		t.Logf("Using manual server: %s", dsn)
+		sharedContainer = &geodeContainer{
+			Container: nil, // No container to manage
+			DSN:       dsn,
+		}
 		return sharedContainer
 	}
 
@@ -114,11 +131,11 @@ func getSharedContainer(t *testing.T) *geodeContainer {
 
 	sharedContainer = container
 
-	// Register cleanup
+	// Register cleanup (only if we started a container)
 	t.Cleanup(func() {
 		containerMu.Lock()
 		defer containerMu.Unlock()
-		if sharedContainer != nil {
+		if sharedContainer != nil && sharedContainer.Container != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			sharedContainer.Terminate(ctx)
