@@ -38,7 +38,7 @@ func getTestDSN(t *testing.T) string {
 	// Start a new container
 	ctx := context.Background()
 	req := testcontainers.ContainerRequest{
-		Image:        "registry.gitlab.com/devnw/codepros/geode/geode:latest",
+		Image:        "registry.gitlab.com/devnw/geode/geode:latest",
 		ExposedPorts: []string{"3141/udp"},
 		WaitingFor:   wait.ForLog("Server ready").WithStartupTimeout(60 * time.Second),
 		Cmd:          []string{"serve", "--listen", "0.0.0.0:3141", "--log-level", "info"},

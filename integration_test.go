@@ -24,7 +24,7 @@ import (
 )
 
 const (
-	defaultGeodeImage = "registry.gitlab.com/devnw/codepros/geode/geode:latest"
+	defaultGeodeImage = "registry.gitlab.com/devnw/geode/geode:latest"
 	defaultGeodePort  = "3141/udp"
 	startupTimeout    = 60 * time.Second
 	queryTimeout      = 30 * time.Second
