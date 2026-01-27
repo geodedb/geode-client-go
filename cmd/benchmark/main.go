@@ -69,6 +69,11 @@ func main() {
 			}
 			defer db.Close()
 
+			// Configure connection pool for benchmark - use single connection per worker
+			db.SetMaxOpenConns(1)
+			db.SetMaxIdleConns(1)
+			db.SetConnMaxLifetime(5 * time.Minute)
+
 			workerLatencies := make([]float64, 0, *queries)
 
 			for i := 0; i < *queries; i++ {

@@ -52,9 +52,16 @@ func NewQUICTransport(ctx context.Context, cfg *Config) (*QUICTransport, error) 
 	addr := cfg.Addr()
 
 	// Connect with context
+	// Configure flow control windows to prevent server write blocking under high load
+	// Default values (512KB initial, 6MB max stream, 15MB max connection) are too small
+	// for high-throughput benchmarks with many rapid queries
 	qConn, err := quic.DialAddr(ctx, addr, tlsCfg, &quic.Config{
-		MaxIdleTimeout:  30 * time.Second,
-		KeepAlivePeriod: 10 * time.Second,
+		MaxIdleTimeout:                 30 * time.Second,
+		KeepAlivePeriod:                10 * time.Second,
+		InitialStreamReceiveWindow:    4 * 1024 * 1024,  // 4MB initial stream window (was 512KB)
+		MaxStreamReceiveWindow:        16 * 1024 * 1024, // 16MB max stream window (was 6MB)
+		InitialConnectionReceiveWindow: 8 * 1024 * 1024, // 8MB initial connection window (was 512KB)
+		MaxConnectionReceiveWindow:    32 * 1024 * 1024, // 32MB max connection window (was 15MB)
 	})
 	if err != nil {
 		return nil, &TransportError{
@@ -138,7 +145,8 @@ func (t *QUICTransport) Send(ctx context.Context, msg map[string]any) error {
 	return nil
 }
 
-// Receive reads a JSON line from the server with proper context cancellation.
+// Receive reads a JSON line from the server.
+// Note: This is a blocking call. Use context deadline for timeout control.
 func (t *QUICTransport) Receive(ctx context.Context) ([]byte, error) {
 	t.mu.Lock()
 	if t.closed {
@@ -147,7 +155,7 @@ func (t *QUICTransport) Receive(ctx context.Context) ([]byte, error) {
 	}
 	t.mu.Unlock()
 
-	// Set read deadline from context
+	// Set read deadline from context if available
 	if deadline, ok := ctx.Deadline(); ok {
 		if err := t.stream.SetReadDeadline(deadline); err != nil {
 			return nil, &TransportError{
@@ -159,52 +167,31 @@ func (t *QUICTransport) Receive(ctx context.Context) ([]byte, error) {
 		defer t.stream.SetReadDeadline(time.Time{})
 	}
 
-	// Use a channel to coordinate the read with context cancellation
-	type result struct {
-		line []byte
-		err  error
-	}
-	ch := make(chan result, 1)
-
-	go func() {
-		line, err := t.br.ReadBytes('\n')
-		select {
-		case ch <- result{line: line, err: err}:
-		case <-ctx.Done():
-			// Context cancelled - goroutine will exit after sending to channel
-			// or when channel is garbage collected
-		}
-	}()
-
+	// Check context before read
 	select {
 	case <-ctx.Done():
-		// Cancel the read by setting an immediate deadline
-		// This will cause the ReadBytes to return with an error
-		_ = t.stream.SetReadDeadline(time.Now())
-		// Wait briefly for the goroutine to finish
-		select {
-		case <-ch:
-		case <-time.After(100 * time.Millisecond):
-		}
 		return nil, ctx.Err()
-
-	case r := <-ch:
-		if r.err != nil {
-			if r.err == io.EOF {
-				return nil, io.EOF
-			}
-			// Check if context was cancelled during read
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			return nil, &TransportError{
-				Op:    "read",
-				Addr:  t.addr,
-				cause: r.err,
-			}
-		}
-		return bytes.TrimSuffix(r.line, []byte{'\n'}), nil
+	default:
 	}
+
+	// Simple blocking read - no goroutines
+	line, err := t.br.ReadBytes('\n')
+	if err != nil {
+		if err == io.EOF {
+			return nil, io.EOF
+		}
+		// Check if context was cancelled during read
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, &TransportError{
+			Op:    "read",
+			Addr:  t.addr,
+			cause: err,
+		}
+	}
+
+	return bytes.TrimSuffix(line, []byte{'\n'}), nil
 }
 
 // Close closes the transport.
