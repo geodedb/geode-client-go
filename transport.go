@@ -20,6 +20,10 @@ type Transport interface {
 	// Receive reads a message from the server.
 	Receive(ctx context.Context) ([]byte, error)
 
+	// TryReceiveBuffered reads a message only if a full line is already buffered.
+	// Returns (nil, false, nil) when no complete line is buffered.
+	TryReceiveBuffered() ([]byte, bool, error)
+
 	// Close closes the transport.
 	Close() error
 
@@ -55,13 +59,23 @@ func NewQUICTransport(ctx context.Context, cfg *Config) (*QUICTransport, error) 
 	// Configure flow control windows to prevent server write blocking under high load
 	// Default values (512KB initial, 6MB max stream, 15MB max connection) are too small
 	// for high-throughput benchmarks with many rapid queries
+	//
+	// QUIC Performance Optimizations:
+	// - DisablePathMTUDiscovery: false (default) enables DPLPMTUD which probes for larger MTUs
+	//   to reduce per-packet overhead. Less than 10 probe packets sent over connection lifetime.
+	// - GSO (Generic Segmentation Offload) is automatically enabled on Linux 4.18+ by quic-go.
+	//   Set QUIC_GO_DISABLE_GSO=true to disable (not recommended).
+	// - For optimal throughput, increase host UDP buffer sizes:
+	//   sysctl -w net.core.rmem_max=7340032
+	//   sysctl -w net.core.wmem_max=7340032
 	qConn, err := quic.DialAddr(ctx, addr, tlsCfg, &quic.Config{
-		MaxIdleTimeout:                 30 * time.Second,
-		KeepAlivePeriod:                10 * time.Second,
-		InitialStreamReceiveWindow:    4 * 1024 * 1024,  // 4MB initial stream window (was 512KB)
-		MaxStreamReceiveWindow:        16 * 1024 * 1024, // 16MB max stream window (was 6MB)
-		InitialConnectionReceiveWindow: 8 * 1024 * 1024, // 8MB initial connection window (was 512KB)
-		MaxConnectionReceiveWindow:    32 * 1024 * 1024, // 32MB max connection window (was 15MB)
+		MaxIdleTimeout:                  30 * time.Second,
+		KeepAlivePeriod:                 10 * time.Second,
+		InitialStreamReceiveWindow:     4 * 1024 * 1024,  // 4MB initial stream window (was 512KB)
+		MaxStreamReceiveWindow:         16 * 1024 * 1024, // 16MB max stream window (was 6MB)
+		InitialConnectionReceiveWindow: 8 * 1024 * 1024,  // 8MB initial connection window (was 512KB)
+		MaxConnectionReceiveWindow:     32 * 1024 * 1024, // 32MB max connection window (was 15MB)
+		DisablePathMTUDiscovery:         false,           // Enable DPLPMTUD for optimal MTU detection
 	})
 	if err != nil {
 		return nil, &TransportError{
@@ -192,6 +206,47 @@ func (t *QUICTransport) Receive(ctx context.Context) ([]byte, error) {
 	}
 
 	return bytes.TrimSuffix(line, []byte{'\n'}), nil
+}
+
+// TryReceiveBuffered reads a complete buffered line without touching the network.
+// This avoids partial reads/timeouts when probing for inline frames.
+func (t *QUICTransport) TryReceiveBuffered() ([]byte, bool, error) {
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		return nil, false, ErrClosed
+	}
+	t.mu.Unlock()
+
+	buffered := t.br.Buffered()
+	if buffered == 0 {
+		return nil, false, nil
+	}
+
+	peeked, err := t.br.Peek(buffered)
+	if err != nil {
+		return nil, false, &TransportError{
+			Op:    "peek",
+			Addr:  t.addr,
+			cause: err,
+		}
+	}
+
+	idx := bytes.IndexByte(peeked, '\n')
+	if idx == -1 {
+		return nil, false, nil
+	}
+
+	line, err := t.br.ReadBytes('\n')
+	if err != nil {
+		return nil, false, &TransportError{
+			Op:    "read_buffered",
+			Addr:  t.addr,
+			cause: err,
+		}
+	}
+
+	return bytes.TrimSuffix(line, []byte{'\n'}), true, nil
 }
 
 // Close closes the transport.

@@ -48,10 +48,12 @@ func main() {
 		dsn += "?insecure=true"
 	}
 
-	// Collect latencies from all workers
+	// Collect latencies and error summaries from all workers
 	var mu sync.Mutex
 	var allLatencies []float64
 	var successful, failed int64
+	var errMu sync.Mutex
+	errCounts := make(map[string]int64)
 
 	var wg sync.WaitGroup
 	start := time.Now()
@@ -85,6 +87,9 @@ func main() {
 					if i < 3 && workerID == 0 {
 						fmt.Fprintf(os.Stderr, "Worker %d query %d failed: %v\n", workerID, i, err)
 					}
+					errMu.Lock()
+					errCounts[err.Error()]++
+					errMu.Unlock()
 					atomic.AddInt64(&failed, 1)
 					continue
 				}
@@ -146,7 +151,24 @@ func main() {
 	}
 
 	if *outputJSON {
-		json.NewEncoder(os.Stdout).Encode(result)
+		// Include error summary without changing existing fields
+		payload := map[string]any{
+			"timestamp":          result.Timestamp,
+			"duration_seconds":   result.DurationSeconds,
+			"total_queries":      result.TotalQueries,
+			"successful_queries": result.Successful,
+			"failed_queries":     result.Failed,
+			"throughput_qps":     result.ThroughputQPS,
+			"latency_p50_ms":     result.LatencyP50MS,
+			"latency_p95_ms":     result.LatencyP95MS,
+			"latency_p99_ms":     result.LatencyP99MS,
+			"latency_avg_ms":     result.LatencyAvgMS,
+			"workers":            result.Workers,
+			"queries_per_worker": result.QueriesPerWork,
+			"status":             result.Status,
+			"error_summary":      errCounts,
+		}
+		json.NewEncoder(os.Stdout).Encode(payload)
 	} else {
 		fmt.Println("======================================================================")
 		fmt.Println("GO CLIENT BENCHMARK RESULTS")

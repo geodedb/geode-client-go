@@ -209,6 +209,45 @@ Test categories include:
 - **Data Types**: Null, lists, maps
 - **Social Network Fixtures**: Complex relationship queries
 
+## QUIC Performance Tuning
+
+The Go client uses [quic-go](https://github.com/quic-go/quic-go) for QUIC transport. For optimal throughput on high-bandwidth connections, configure the following system-level optimizations.
+
+### UDP Buffer Sizes
+
+Increase the maximum UDP buffer size to ~7MB for high-throughput transfers:
+
+**Linux:**
+```bash
+sudo sysctl -w net.core.rmem_max=7340032
+sudo sysctl -w net.core.wmem_max=7340032
+
+# Persist across reboots
+echo "net.core.rmem_max=7340032" | sudo tee -a /etc/sysctl.d/99-geode-quic.conf
+echo "net.core.wmem_max=7340032" | sudo tee -a /etc/sysctl.d/99-geode-quic.conf
+```
+
+**BSD/macOS:**
+```bash
+sudo sysctl -w kern.ipc.maxsockbuf=8441037
+```
+
+### Generic Segmentation Offload (GSO)
+
+GSO batches UDP packets to reduce syscall overhead. It's automatically enabled on Linux 4.18+.
+
+- **No configuration required** - enabled automatically
+- **To disable** (not recommended): Set `QUIC_GO_DISABLE_GSO=true` environment variable
+- **Requirements**: Linux kernel 4.18+
+
+### Path MTU Discovery (DPLPMTUD)
+
+DPLPMTUD probes for optimal MTU size, reducing per-packet overhead. It's enabled by default in the client.
+
+- Sends fewer than 10 probe packets over a connection's lifetime
+- Particularly beneficial on paths supporting MTUs larger than 1200 bytes
+- Configured via `quic.Config.DisablePathMTUDiscovery` (default: false)
+
 ## License
 
 See [LICENSE](LICENSE) for details.

@@ -21,6 +21,23 @@ type Conn struct {
 	activeRows *Rows
 }
 
+// tryReceiveInlineFrame attempts to read an extra frame already buffered (e.g., inline RUN+PULL).
+// Returns nil if no buffered frame is available within a short timeout.
+func (c *Conn) tryReceiveInlineFrame(ctx context.Context) (*Frame, error) {
+	// Prefer a non-blocking buffered read to avoid partial line timeouts.
+	if data, ok, err := c.transport.TryReceiveBuffered(); err != nil {
+		return nil, err
+	} else if ok {
+		frame, err := ParseFrame(data)
+		if err != nil {
+			return nil, err
+		}
+		return frame, nil
+	}
+
+	return nil, nil
+}
+
 // Compile-time interface checks.
 var (
 	_ driver.Conn               = (*Conn)(nil)
@@ -235,6 +252,17 @@ func (c *Conn) ExecContext(ctx context.Context, query string, args []driver.Name
 		return nil, frame.ToError()
 	}
 
+	// Drain any inline BINDINGS frame to keep the stream in sync.
+	if frame.IsSchema() {
+		inlineFrame, err := c.tryReceiveInlineFrame(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if inlineFrame != nil && inlineFrame.IsError() {
+			return nil, inlineFrame.ToError()
+		}
+	}
+
 	return &Result{}, nil
 }
 
@@ -301,6 +329,42 @@ func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.Nam
 			Name: col.Name,
 			Type: ParseGQLType(col.Type),
 		}
+	}
+
+	// Check for inline BINDINGS frame sent with RUN_GQL.
+	if inlineFrame, err := c.tryReceiveInlineFrame(ctx); err != nil {
+		c.mu.Unlock()
+		return nil, err
+	} else if inlineFrame != nil {
+		if inlineFrame.IsError() {
+			c.mu.Unlock()
+			return nil, inlineFrame.ToError()
+		}
+
+		rows := &Rows{
+			conn:      c,
+			ctx:       ctx,
+			columns:   columns,
+			pageSize:  c.cfg.PageSize,
+			ordered:   inlineFrame.Result.Ordered,
+			orderKeys: inlineFrame.Result.OrderKeys,
+		}
+
+		switch inlineFrame.Result.Type {
+		case RespBindings:
+			rows.buffer = inlineFrame.Result.Rows
+			// Inline frames represent full results; treat as final by default.
+			rows.final = true
+		case RespProfile, RespResult, RespStatus:
+			rows.final = true
+		default:
+			c.mu.Unlock()
+			return nil, fmt.Errorf("geode: unexpected inline frame type: %s", inlineFrame.Result.Type)
+		}
+
+		c.activeRows = rows
+		c.state = StateFetching
+		return rows, nil
 	}
 
 	// Send first PULL
