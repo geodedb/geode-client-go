@@ -3,7 +3,7 @@ package geode
 import (
 	"testing"
 
-	"go.codepros.org/geode/internal/validate"
+	"geodedb.com/geode/internal/validate"
 )
 
 func BenchmarkParseDSN_Simple(b *testing.B) {

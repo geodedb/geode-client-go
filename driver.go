@@ -9,7 +9,7 @@
 //
 //	import (
 //	    "database/sql"
-//	    _ "go.codepros.org/geode"
+//	    _ "geodedb.com/geode"
 //	)
 //
 //	db, err := sql.Open("geode", "localhost:3141")

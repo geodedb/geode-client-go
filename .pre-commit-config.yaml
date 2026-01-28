@@ -1,0 +1,204 @@
+# Pre-commit configuration for Geode Go Client
+# https://pre-commit.com/
+#
+# Install: pip install pre-commit && pre-commit install
+# Run manually: pre-commit run --all-files
+# Update hooks: pre-commit autoupdate
+
+default_stages: [pre-commit]
+fail_fast: false
+
+repos:
+  # =============================================================================
+  # Standard pre-commit hooks (best practices)
+  # =============================================================================
+- repo: https://github.com/pre-commit/pre-commit-hooks
+  rev: v6.0.0
+  hooks:
+      # Formatting
+  - id: trailing-whitespace
+    args: [--markdown-linebreak-ext=md]
+    exclude: ^(vendor/|dist/)
+  - id: end-of-file-fixer
+    exclude: ^(vendor/|dist/|.*\.bin$|.*\.der$|.*\.pem$)
+  - id: mixed-line-ending
+    args: [--fix=lf]
+    exclude: ^(vendor/|dist/)
+
+      # Syntax validation
+  - id: check-yaml
+    args: [--unsafe]      # Allow custom tags
+    exclude: ^(vendor/|dist/)
+  - id: check-json
+    exclude: ^(vendor/|dist/)
+  - id: check-toml
+
+      # Security
+  - id: detect-private-key
+    exclude: ^(certs/|test.*certs/|.*test.*\.pem$)
+  - id: check-added-large-files
+    args: [--maxkb=1024]
+    exclude: ^(vendor/|dist/)
+
+      # Git hygiene
+  - id: check-merge-conflict
+  - id: check-case-conflict
+  - id: check-symlinks
+  - id: destroyed-symlinks
+
+      # Code quality
+  - id: check-executables-have-shebangs
+    exclude: ^(vendor/|dist/)
+  - id: check-shebang-scripts-are-executable
+    exclude: ^(vendor/|dist/)
+
+  # =============================================================================
+  # Shell script linting
+  # =============================================================================
+- repo: https://github.com/shellcheck-py/shellcheck-py
+  rev: v0.11.0.1
+  hooks:
+  - id: shellcheck
+    args: [--severity=warning]
+    exclude: ^(vendor/|dist/)
+
+  # =============================================================================
+  # Markdown linting
+  # =============================================================================
+- repo: https://github.com/igorshubovych/markdownlint-cli
+  rev: v0.47.0
+  hooks:
+  - id: markdownlint
+    args: [--fix, --disable, MD013, MD033, MD041, MD024, --]
+    exclude: ^(vendor/|dist/|CHANGELOG\.md)
+
+  # =============================================================================
+  # YAML formatting
+  # =============================================================================
+- repo: https://github.com/macisamuele/language-formatters-pre-commit-hooks
+  rev: v2.16.0
+  hooks:
+  - id: pretty-format-yaml
+    args: [--autofix, --indent, '2']
+    exclude: ^(vendor/|dist/|\.gitlab-ci\.yml)
+
+  # =============================================================================
+  # Go linting and formatting
+  # =============================================================================
+- repo: https://github.com/golangci/golangci-lint
+  rev: v2.1.6
+  hooks:
+  - id: golangci-lint
+    args: [--fix]
+
+  # =============================================================================
+  # Commit message validation (Conventional Commits)
+  # =============================================================================
+- repo: https://github.com/commitizen-tools/commitizen
+  rev: v4.12.1
+  hooks:
+  - id: commitizen
+    stages: [commit-msg]
+
+  # =============================================================================
+  # Local/Custom hooks for Go
+  # =============================================================================
+- repo: local
+  hooks:
+      # Go formatting check
+  - id: go-fmt
+    name: go fmt (check)
+    entry: bash
+    args:
+    - -c
+    - |
+      unformatted=$(gofmt -l .)
+      if [ -n "$unformatted" ]; then
+        echo "Files not formatted:"
+        echo "$unformatted"
+        echo ""
+        echo "Run 'gofmt -w .' or 'make fmt' to fix"
+        exit 1
+      fi
+    language: system
+    files: \.go$
+    exclude: ^(vendor/|dist/)
+    pass_filenames: false
+
+      # Go vet
+  - id: go-vet
+    name: go vet
+    entry: go vet ./...
+    language: system
+    files: \.go$
+    exclude: ^(vendor/|dist/)
+    pass_filenames: false
+
+      # Go mod tidy check
+  - id: go-mod-tidy
+    name: go mod tidy (check)
+    entry: bash
+    args:
+    - -c
+    - |
+      cp go.mod go.mod.bak
+      cp go.sum go.sum.bak
+      go mod tidy
+      if ! diff -q go.mod go.mod.bak > /dev/null 2>&1 || ! diff -q go.sum go.sum.bak > /dev/null 2>&1; then
+        mv go.mod.bak go.mod
+        mv go.sum.bak go.sum
+        echo "go.mod or go.sum is not tidy"
+        echo "Run 'go mod tidy' to fix"
+        exit 1
+      fi
+      rm -f go.mod.bak go.sum.bak
+    language: system
+    files: (\.go$|go\.mod$|go\.sum$)
+    exclude: ^(vendor/|dist/)
+    pass_filenames: false
+
+      # Go build check
+  - id: go-build
+    name: go build (compilation check)
+    entry: go build ./...
+    language: system
+    files: \.go$
+    exclude: ^(vendor/|dist/)
+    pass_filenames: false
+
+      # Go unit tests (pre-push only, may be slow)
+  - id: go-test
+    name: go test (unit tests)
+    entry: go test -short ./...
+    language: system
+    files: \.go$
+    exclude: ^(vendor/|dist/)
+    pass_filenames: false
+    stages: [pre-push]
+
+      # Check for TODO/FIXME in committed code (warning only)
+  - id: check-todos
+    name: check for TODOs/FIXMEs
+    entry: bash
+    args:
+    - -c
+    - |
+      git diff --cached --name-only | xargs grep -l -E "(TODO|FIXME|XXX|HACK)" 2>/dev/null && echo "Warning: Found TODO/FIXME markers in staged files" && exit 0 || exit 0
+    language: system
+    pass_filenames: false
+    verbose: true
+
+# =============================================================================
+# CI configuration
+# =============================================================================
+ci:
+  autofix_prs: true
+  autofix_commit_msg: |
+    [pre-commit.ci] auto fixes from pre-commit hooks
+
+    For more info see https://pre-commit.ci
+  autoupdate_branch: ''
+  autoupdate_commit_msg: '[pre-commit.ci] pre-commit autoupdate'
+  autoupdate_schedule: weekly
+  skip: [go-fmt, go-vet, go-mod-tidy, go-build, go-test, golangci-lint]
+  submodules: false

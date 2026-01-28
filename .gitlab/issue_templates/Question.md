@@ -8,11 +8,13 @@
 <!-- Describe what you've already attempted -->
 
 ## Code Example
+
 ```go
 // Relevant code if applicable
 ```
 
 ## Environment
+
 - **Go Version**:
 - **Library Version/Commit**:
 

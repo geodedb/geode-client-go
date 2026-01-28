@@ -65,6 +65,7 @@ geode-client-go/
 ### Key Interfaces Implemented
 
 The driver implements all recommended `database/sql/driver` interfaces:
+
 - `driver.Driver`, `driver.DriverContext`
 - `driver.Connector`
 - `driver.Conn`, `driver.ConnBeginTx`, `driver.ConnPrepareContext`
@@ -100,6 +101,7 @@ Environment variables: `GEODE_HOST`, `GEODE_PORT`, `GEODE_TLS_CA`
 ### Wire Protocol
 
 JSON line protocol over QUIC:
+
 - Client messages: `HELLO`, `RUN_GQL`, `PULL`, `BEGIN`, `COMMIT`, `ROLLBACK`, `PING`
 - Server responses: `SCHEMA`, `BINDINGS`, `ERROR`, `EXPLAIN`, `PROFILE`
 
@@ -121,11 +123,13 @@ JSON line protocol over QUIC:
 ### Integration Tests
 
 Docker-based integration tests in `integration_test.go` use `testcontainers-go` to automatically:
+
 - Pull and start a Geode container (`registry.gitlab.com/devnw/codepros/geode/geode:latest`)
 - Run comprehensive test suite
 - Clean up after tests
 
 Test categories:
+
 - Basic Operations (ping, queries, parameters)
 - Node CRUD (create, update, delete)
 - Relationships (create, traverse)

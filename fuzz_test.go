@@ -3,7 +3,7 @@ package geode
 import (
 	"testing"
 
-	"go.codepros.org/geode/internal/validate"
+	"geodedb.com/geode/internal/validate"
 )
 
 func FuzzParseDSN(f *testing.F) {

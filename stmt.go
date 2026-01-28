@@ -21,8 +21,8 @@ type Stmt struct {
 
 // Compile-time interface checks.
 var (
-	_ driver.Stmt            = (*Stmt)(nil)
-	_ driver.StmtExecContext = (*Stmt)(nil)
+	_ driver.Stmt             = (*Stmt)(nil)
+	_ driver.StmtExecContext  = (*Stmt)(nil)
 	_ driver.StmtQueryContext = (*Stmt)(nil)
 )
 

@@ -15,7 +15,7 @@ A Go `database/sql` driver for the [Geode](https://github.com/devnw/geode) graph
 ## Installation
 
 ```bash
-go get go.codepros.org/geode
+go get geodedb.com/geode
 ```
 
 ## Usage
@@ -29,7 +29,7 @@ import (
     "log"
     "time"
 
-    _ "go.codepros.org/geode"
+    _ "geodedb.com/geode"
 )
 
 func main() {
@@ -131,7 +131,7 @@ rows, err := stmt.QueryContext(ctx, "Alice")
 The driver provides rich error types:
 
 ```go
-import "go.codepros.org/geode"
+import "geodedb.com/geode"
 
 rows, err := db.QueryContext(ctx, "INVALID QUERY")
 if err != nil {
@@ -150,7 +150,7 @@ if err != nil {
 Helper functions for Unicode conversion:
 
 ```go
-import "go.codepros.org/geode"
+import "geodedb.com/geode"
 
 // UTF-8 to UTF-16
 utf16 := geode.Utf8ToUtf16("Hello 🌍")
@@ -218,6 +218,7 @@ The Go client uses [quic-go](https://github.com/quic-go/quic-go) for QUIC transp
 Increase the maximum UDP buffer size to ~7MB for high-throughput transfers:
 
 **Linux:**
+
 ```bash
 sudo sysctl -w net.core.rmem_max=7340032
 sudo sysctl -w net.core.wmem_max=7340032
@@ -228,6 +229,7 @@ echo "net.core.wmem_max=7340032" | sudo tee -a /etc/sysctl.d/99-geode-quic.conf
 ```
 
 **BSD/macOS:**
+
 ```bash
 sudo sysctl -w kern.ipc.maxsockbuf=8441037
 ```
@@ -247,6 +249,73 @@ DPLPMTUD probes for optimal MTU size, reducing per-packet overhead. It's enabled
 - Sends fewer than 10 probe packets over a connection's lifetime
 - Particularly beneficial on paths supporting MTUs larger than 1200 bytes
 - Configured via `quic.Config.DisablePathMTUDiscovery` (default: false)
+
+## Go Module Configuration
+
+This module uses a vanity import path (`geodedb.com/geode`) that redirects to the GitLab repository. The standard `go get` command works out of the box:
+
+```bash
+go get geodedb.com/geode
+```
+
+### Private/Self-Hosted GitLab
+
+If you're using a private GitLab instance or need to configure authentication:
+
+```bash
+# Configure Git to use SSH for GitLab
+git config --global url."git@gitlab.com:".insteadOf "https://gitlab.com/"
+
+# Or use a personal access token
+git config --global url."https://oauth2:${GITLAB_TOKEN}@gitlab.com/".insteadOf "https://gitlab.com/"
+```
+
+### GOPROXY Configuration
+
+The module works with the default Go proxy (`proxy.golang.org`). For air-gapped environments or private proxies:
+
+```bash
+# Use direct fetching (bypasses proxy)
+GOPROXY=direct go get geodedb.com/geode
+
+# Use a private proxy
+GOPROXY=https://your-proxy.example.com,direct go get geodedb.com/geode
+```
+
+### GOPRIVATE / GONOSUMDB
+
+If you need to bypass the checksum database or proxy for this module:
+
+```bash
+# Add to your shell profile or CI environment
+export GOPRIVATE=geodedb.com
+export GONOSUMDB=geodedb.com
+
+# Or configure globally
+go env -w GOPRIVATE=geodedb.com
+go env -w GONOSUMDB=geodedb.com
+```
+
+### GitLab Go Proxy (Self-Hosted)
+
+GitLab Premium includes a built-in Go proxy. To use it:
+
+1. Enable the Go proxy in GitLab Admin > Settings > CI/CD
+2. Configure your Go environment:
+
+```bash
+export GOPROXY="https://gitlab.example.com/api/v4/projects/${PROJECT_ID}/packages/go,https://proxy.golang.org,direct"
+export GONOSUMDB="gitlab.example.com/*"
+```
+
+### Verifying Installation
+
+After installation, verify the module:
+
+```bash
+go list -m geodedb.com/geode
+# Should output: geodedb.com/geode v0.x.x
+```
 
 ## License
 

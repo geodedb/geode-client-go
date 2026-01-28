@@ -7,7 +7,7 @@ import (
 	"strings"
 	"sync"
 
-	"go.codepros.org/geode/internal/validate"
+	"geodedb.com/geode/internal/validate"
 )
 
 // Conn represents a connection to a Geode database.

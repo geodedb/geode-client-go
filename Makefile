@@ -21,6 +21,7 @@ FUZZ_TIME ?= 30s
         bench bench-integration lint fmt fmt-check vet doc coverage ci ci-quick ci-full \
         fuzz fuzz-dsn fuzz-frame fuzz-query fuzz-param fuzz-value fuzz-type \
         docker-start docker-stop docker-logs docker-status docker-pull docker-wait \
+        pre-commit pre-commit-install pre-commit-run pre-commit-update \
         help deps update tidy
 
 # Default target - run everything (except integration tests which require server)
@@ -87,6 +88,11 @@ help:
 	@echo "  make ci             - Run full CI pipeline"
 	@echo "  make ci-quick       - Run quick CI (no integration tests)"
 	@echo "  make ci-full        - Run CI with Docker integration tests"
+	@echo ""
+	@echo "Pre-commit targets:"
+	@echo "  make pre-commit-install - Install pre-commit hooks"
+	@echo "  make pre-commit         - Run pre-commit on all files"
+	@echo "  make pre-commit-update  - Update pre-commit hooks"
 	@echo ""
 	@echo "Other targets:"
 	@echo "  make coverage       - Generate coverage report"
@@ -357,7 +363,7 @@ coverage:
 
 doc:
 	@echo "Package documentation available at:"
-	@echo "  https://pkg.go.dev/go.codepros.org/geode"
+	@echo "  https://pkg.go.dev/geodedb.com/geode"
 	@echo ""
 	@echo "Local documentation:"
 	@echo "  - README.md"
@@ -366,3 +372,27 @@ doc:
 	@echo "To view Go docs locally:"
 	@echo "  go doc -all"
 	@echo "  godoc -http=:6060  # then visit http://localhost:6060"
+
+# =============================================================================
+# Pre-commit Targets
+# =============================================================================
+
+pre-commit-install:
+	@echo "Installing pre-commit hooks..."
+	@command -v pre-commit >/dev/null 2>&1 || { echo "Installing pre-commit..."; pip install pre-commit; }
+	pre-commit install
+	pre-commit install --hook-type commit-msg
+	pre-commit install --hook-type pre-push
+	@echo "✓ Pre-commit hooks installed"
+
+pre-commit: pre-commit-run
+
+pre-commit-run:
+	@echo "Running pre-commit on all files..."
+	pre-commit run --all-files
+	@echo "✓ Pre-commit checks complete"
+
+pre-commit-update:
+	@echo "Updating pre-commit hooks..."
+	pre-commit autoupdate
+	@echo "✓ Pre-commit hooks updated"

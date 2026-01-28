@@ -1,4 +1,4 @@
-module go.codepros.org/geode
+module geodedb.com/geode
 
 go 1.24.0
 

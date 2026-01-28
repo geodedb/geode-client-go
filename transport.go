@@ -69,13 +69,13 @@ func NewQUICTransport(ctx context.Context, cfg *Config) (*QUICTransport, error) 
 	//   sysctl -w net.core.rmem_max=7340032
 	//   sysctl -w net.core.wmem_max=7340032
 	qConn, err := quic.DialAddr(ctx, addr, tlsCfg, &quic.Config{
-		MaxIdleTimeout:                  30 * time.Second,
-		KeepAlivePeriod:                 10 * time.Second,
+		MaxIdleTimeout:                 30 * time.Second,
+		KeepAlivePeriod:                10 * time.Second,
 		InitialStreamReceiveWindow:     4 * 1024 * 1024,  // 4MB initial stream window (was 512KB)
 		MaxStreamReceiveWindow:         16 * 1024 * 1024, // 16MB max stream window (was 6MB)
 		InitialConnectionReceiveWindow: 8 * 1024 * 1024,  // 8MB initial connection window (was 512KB)
 		MaxConnectionReceiveWindow:     32 * 1024 * 1024, // 32MB max connection window (was 15MB)
-		DisablePathMTUDiscovery:         false,           // Enable DPLPMTUD for optimal MTU detection
+		DisablePathMTUDiscovery:        false,            // Enable DPLPMTUD for optimal MTU detection
 	})
 	if err != nil {
 		return nil, &TransportError{

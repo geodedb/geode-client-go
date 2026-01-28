@@ -15,7 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	_ "go.codepros.org/geode"
+	_ "geodedb.com/geode"
 )
 
 type Result struct {
