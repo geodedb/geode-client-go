@@ -45,6 +45,7 @@ func (s *Stmt) NumInput() int {
 }
 
 // Exec executes a query that doesn't return rows.
+//
 // Deprecated: Use ExecContext instead.
 func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 	return s.ExecContext(context.Background(), valuesToNamedValues(args))
@@ -63,6 +64,7 @@ func (s *Stmt) ExecContext(ctx context.Context, args []driver.NamedValue) (drive
 }
 
 // Query executes a query that returns rows.
+//
 // Deprecated: Use QueryContext instead.
 func (s *Stmt) Query(args []driver.Value) (driver.Rows, error) {
 	return s.QueryContext(context.Background(), valuesToNamedValues(args))

@@ -147,7 +147,7 @@ func (r *Rows) ColumnTypeDatabaseTypeName(index int) string {
 }
 
 // ColumnTypeNullable reports whether a column may be null.
-func (r *Rows) ColumnTypeNullable(index int) (nullable, ok bool) {
+func (r *Rows) ColumnTypeNullable(_ int) (nullable, ok bool) {
 	// All columns in GQL can be null
 	return true, true
 }

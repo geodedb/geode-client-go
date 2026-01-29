@@ -19,7 +19,7 @@ func FuzzParseDSN(f *testing.F) {
 	f.Add("localhost:3141?ca=/path/to/ca.crt")
 	f.Add("localhost:3141?cert=/path/to/cert&key=/path/to/key")
 
-	f.Fuzz(func(t *testing.T, dsn string) {
+	f.Fuzz(func(_ *testing.T, dsn string) {
 		// ParseDSN should never panic
 		cfg, err := ParseDSN(dsn)
 		if err != nil {
@@ -46,7 +46,7 @@ func FuzzParseFrame(f *testing.F) {
 	f.Add([]byte(`{"result":{}}`))
 	f.Add([]byte(`{"status_class":"00000","result":{"type":"BINDINGS","rows":[{"x":1}]}}`))
 
-	f.Fuzz(func(t *testing.T, data []byte) {
+	f.Fuzz(func(_ *testing.T, data []byte) {
 		// ParseFrame should never panic
 		frame, err := ParseFrame(data)
 		if err != nil {
@@ -70,7 +70,7 @@ func FuzzValidateQuery(f *testing.F) {
 	f.Add("")
 	f.Add("SELECT * FROM users") // Not GQL, but should not panic
 
-	f.Fuzz(func(t *testing.T, query string) {
+	f.Fuzz(func(_ *testing.T, query string) {
 		// Should never panic
 		_ = validate.Query(query)
 	})
@@ -85,7 +85,7 @@ func FuzzValidateParamName(f *testing.F) {
 	f.Add("1invalid")
 	f.Add("with space")
 
-	f.Fuzz(func(t *testing.T, name string) {
+	f.Fuzz(func(_ *testing.T, name string) {
 		// Should never panic
 		_ = validate.ParamName(name)
 	})
@@ -95,7 +95,7 @@ func FuzzConvertValue(f *testing.F) {
 	// Note: Go's fuzzer only supports basic types
 	// We can only fuzz with strings here
 
-	f.Fuzz(func(t *testing.T, s string) {
+	f.Fuzz(func(_ *testing.T, s string) {
 		// Should never panic
 		_ = ConvertValue(s)
 		_ = ConvertValue(nil)
@@ -111,7 +111,7 @@ func FuzzParseGQLType(f *testing.F) {
 	f.Add("")
 	f.Add("UNKNOWN_TYPE")
 
-	f.Fuzz(func(t *testing.T, typeStr string) {
+	f.Fuzz(func(_ *testing.T, typeStr string) {
 		// Should never panic
 		gqlType := ParseGQLType(typeStr)
 		_ = gqlType.GoType()

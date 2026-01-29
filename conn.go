@@ -22,8 +22,8 @@ type Conn struct {
 }
 
 // tryReceiveInlineFrame attempts to read an extra frame already buffered (e.g., inline RUN+PULL).
-// Returns nil if no buffered frame is available within a short timeout.
-func (c *Conn) tryReceiveInlineFrame(ctx context.Context) (*Frame, error) {
+// Returns nil, nil if no buffered frame is available (this is not an error condition).
+func (c *Conn) tryReceiveInlineFrame(_ context.Context) (*Frame, error) {
 	// Prefer a non-blocking buffered read to avoid partial line timeouts.
 	if data, ok, err := c.transport.TryReceiveBuffered(); err != nil {
 		return nil, err
@@ -35,7 +35,7 @@ func (c *Conn) tryReceiveInlineFrame(ctx context.Context) (*Frame, error) {
 		return frame, nil
 	}
 
-	return nil, nil
+	return nil, nil //nolint:nilnil // nil, nil indicates no frame available - this is expected
 }
 
 // Compile-time interface checks.
@@ -117,7 +117,7 @@ func (c *Conn) Prepare(query string) (driver.Stmt, error) {
 }
 
 // PrepareContext returns a prepared statement with context.
-func (c *Conn) PrepareContext(ctx context.Context, query string) (driver.Stmt, error) {
+func (c *Conn) PrepareContext(_ context.Context, query string) (driver.Stmt, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -166,7 +166,7 @@ func (c *Conn) Begin() (driver.Tx, error) {
 }
 
 // BeginTx starts a transaction with context and options.
-func (c *Conn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
+func (c *Conn) BeginTx(ctx context.Context, _ driver.TxOptions) (driver.Tx, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -267,6 +267,8 @@ func (c *Conn) ExecContext(ctx context.Context, query string, args []driver.Name
 }
 
 // QueryContext executes a query that returns rows.
+//
+//nolint:funlen // Complex query lifecycle requires handling many protocol states
 func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
 	c.mu.Lock()
 	// Note: We don't defer unlock here because we transfer lock ownership to Rows

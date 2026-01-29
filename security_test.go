@@ -81,7 +81,7 @@ func TestValidate_Hostname(t *testing.T) {
 	}
 }
 
-func TestNewTLSConfig_RequiresCertificates(t *testing.T) {
+func TestNewTLSConfig_RequiresCertificates(_ *testing.T) {
 	cfg := &Config{
 		Host: "localhost",
 		Port: "3141",

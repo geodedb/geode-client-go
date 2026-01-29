@@ -12,6 +12,17 @@ import (
 	"github.com/quic-go/quic-go"
 )
 
+// QUIC transport configuration constants.
+const (
+	quicMaxIdleTimeout                 = 30 * time.Second
+	quicKeepAlivePeriod                = 10 * time.Second
+	quicInitialStreamReceiveWindow     = 4 * 1024 * 1024  // 4MB initial stream window
+	quicMaxStreamReceiveWindow         = 16 * 1024 * 1024 // 16MB max stream window
+	quicInitialConnectionReceiveWindow = 8 * 1024 * 1024  // 8MB initial connection window
+	quicMaxConnectionReceiveWindow     = 32 * 1024 * 1024 // 32MB max connection window
+	quicReadBufferSize                 = 64 * 1024        // 64KB buffer
+)
+
 // Transport defines the interface for communication with a Geode server.
 type Transport interface {
 	// Send writes a message to the server.
@@ -69,13 +80,13 @@ func NewQUICTransport(ctx context.Context, cfg *Config) (*QUICTransport, error) 
 	//   sysctl -w net.core.rmem_max=7340032
 	//   sysctl -w net.core.wmem_max=7340032
 	qConn, err := quic.DialAddr(ctx, addr, tlsCfg, &quic.Config{
-		MaxIdleTimeout:                 30 * time.Second,
-		KeepAlivePeriod:                10 * time.Second,
-		InitialStreamReceiveWindow:     4 * 1024 * 1024,  // 4MB initial stream window (was 512KB)
-		MaxStreamReceiveWindow:         16 * 1024 * 1024, // 16MB max stream window (was 6MB)
-		InitialConnectionReceiveWindow: 8 * 1024 * 1024,  // 8MB initial connection window (was 512KB)
-		MaxConnectionReceiveWindow:     32 * 1024 * 1024, // 32MB max connection window (was 15MB)
-		DisablePathMTUDiscovery:        false,            // Enable DPLPMTUD for optimal MTU detection
+		MaxIdleTimeout:                 quicMaxIdleTimeout,
+		KeepAlivePeriod:                quicKeepAlivePeriod,
+		InitialStreamReceiveWindow:     quicInitialStreamReceiveWindow,
+		MaxStreamReceiveWindow:         quicMaxStreamReceiveWindow,
+		InitialConnectionReceiveWindow: quicInitialConnectionReceiveWindow,
+		MaxConnectionReceiveWindow:     quicMaxConnectionReceiveWindow,
+		DisablePathMTUDiscovery:        false, // Enable DPLPMTUD for optimal MTU detection
 	})
 	if err != nil {
 		return nil, &TransportError{
@@ -99,7 +110,7 @@ func NewQUICTransport(ctx context.Context, cfg *Config) (*QUICTransport, error) 
 	t := &QUICTransport{
 		conn:   qConn,
 		stream: stream,
-		br:     bufio.NewReaderSize(stream, 64<<10), // 64KB buffer
+		br:     bufio.NewReaderSize(stream, quicReadBufferSize),
 		addr:   addr,
 	}
 
@@ -134,7 +145,7 @@ func (t *QUICTransport) Send(ctx context.Context, msg map[string]any) error {
 				cause: err,
 			}
 		}
-		defer t.stream.SetWriteDeadline(time.Time{})
+		defer func() { _ = t.stream.SetWriteDeadline(time.Time{}) }()
 	}
 
 	// Check context before write
@@ -178,7 +189,7 @@ func (t *QUICTransport) Receive(ctx context.Context) ([]byte, error) {
 				cause: err,
 			}
 		}
-		defer t.stream.SetReadDeadline(time.Time{})
+		defer func() { _ = t.stream.SetReadDeadline(time.Time{}) }()
 	}
 
 	// Check context before read
@@ -263,7 +274,7 @@ func (t *QUICTransport) Close() error {
 
 	// Close the stream first
 	if t.stream != nil {
-		if err := t.stream.Close(); err != nil && firstErr == nil {
+		if err := t.stream.Close(); err != nil {
 			firstErr = err
 		}
 	}

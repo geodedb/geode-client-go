@@ -94,6 +94,10 @@ func TestIntegration_QueryWithParams(t *testing.T) {
 	if x != 42 {
 		t.Errorf("expected x=42, got x=%d", x)
 	}
+
+	if err := rows.Err(); err != nil {
+		t.Errorf("rows error: %v", err)
+	}
 }
 
 func TestIntegration_Transaction(t *testing.T) {
@@ -117,10 +121,15 @@ func TestIntegration_Transaction(t *testing.T) {
 	// Execute query in transaction
 	rows, err := tx.QueryContext(ctx, "RETURN 1 AS x")
 	if err != nil {
-		tx.Rollback()
+		_ = tx.Rollback()
 		t.Fatalf("failed to execute query: %v", err)
 	}
-	rows.Close()
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		_ = tx.Rollback()
+		t.Errorf("rows error: %v", err)
+	}
+	_ = rows.Close()
 
 	// Commit
 	if err := tx.Commit(); err != nil {
@@ -194,13 +203,13 @@ func TestIntegration_PreparedStatement(t *testing.T) {
 		}
 
 		if !rows.Next() {
-			rows.Close()
+			_ = rows.Close()
 			t.Fatal("expected at least one row")
 		}
 
 		var x int64
 		if err := rows.Scan(&x); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			t.Fatalf("failed to scan: %v", err)
 		}
 
@@ -208,7 +217,10 @@ func TestIntegration_PreparedStatement(t *testing.T) {
 			t.Errorf("expected x=%d, got x=%d", i, x)
 		}
 
-		rows.Close()
+		if err := rows.Err(); err != nil {
+			t.Errorf("rows error: %v", err)
+		}
+		_ = rows.Close()
 	}
 }
 
@@ -225,9 +237,12 @@ func TestIntegration_ErrorHandling(t *testing.T) {
 	defer cancel()
 
 	// Execute an invalid query that should return an error
-	_, err = db.QueryContext(ctx, "MATCH (n RETURN n")
+	rows, err := db.QueryContext(ctx, "MATCH (n RETURN n")
 	if err == nil {
 		// Some queries might be accepted by the server
+		if rows != nil {
+			_ = rows.Close()
+		}
 		t.Skip("Query accepted by server, skipping error handling test")
 	}
 
@@ -264,6 +279,10 @@ func TestIntegration_MultipleRows(t *testing.T) {
 			t.Fatalf("failed to scan: %v", err)
 		}
 		count++
+	}
+
+	if err := rows.Err(); err != nil {
+		t.Errorf("rows error: %v", err)
 	}
 
 	if count != 3 {
@@ -315,6 +334,10 @@ func TestIntegration_ColumnTypes(t *testing.T) {
 				}
 				return "unknown"
 			}())
+	}
+
+	if err := rows.Err(); err != nil {
+		t.Errorf("rows error: %v", err)
 	}
 }
 

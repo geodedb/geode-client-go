@@ -78,7 +78,7 @@ func loadCACertificates(cfg *Config) (*x509.CertPool, error) {
 	}
 
 	if len(paths) == 0 {
-		return nil, nil // Will use system pool
+		return nil, nil //nolint:nilnil // nil pool signals to use system pool
 	}
 
 	pool := x509.NewCertPool()
@@ -107,7 +107,7 @@ func loadCACertificates(cfg *Config) (*x509.CertPool, error) {
 	}
 
 	if !loaded {
-		return nil, nil
+		return nil, nil //nolint:nilnil // nil pool signals to use system pool
 	}
 
 	return pool, nil
@@ -119,7 +119,7 @@ func loadClientCertificate(certPath, keyPath string) (tls.Certificate, error) {
 	if err != nil {
 		return tls.Certificate{}, &SecurityError{
 			Type:    "tls",
-			Message: fmt.Sprintf("failed to load client certificate"),
+			Message: "failed to load client certificate",
 			cause:   err,
 		}
 	}

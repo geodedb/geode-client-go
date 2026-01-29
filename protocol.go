@@ -269,9 +269,10 @@ func (t GQLType) GoType() reflect.Type {
 		return reflect.TypeOf([]any{})
 	case GQLTypeMap, GQLTypeNode, GQLTypeEdge, GQLTypePath:
 		return reflect.TypeOf(map[string]any{})
-	default:
+	case GQLTypeUnknown:
 		return reflect.TypeOf((*any)(nil)).Elem()
 	}
+	return reflect.TypeOf((*any)(nil)).Elem()
 }
 
 // ParseGQLType parses a GQL type string.
