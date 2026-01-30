@@ -81,7 +81,7 @@ host
 | `hello_name` | Client name for HELLO | geode-go |
 | `hello_ver` | Client version for HELLO | 0.1 |
 | `conformance` | GQL conformance level | min |
-| `ca` | Path to CA certificate | |
+| `ca` | Path to CA certificate (must exist; no fallback) | |
 | `cert` | Path to client certificate (mTLS) | |
 | `key` | Path to client key (mTLS) | |
 | `insecure` | Skip TLS verification (testing only) | false |
@@ -144,6 +144,10 @@ if err != nil {
     }
 }
 ```
+
+## Security Limits
+
+- Inbound protocol frames are capped at 32MB to prevent memory exhaustion. Oversized frames are rejected.
 
 ## Unicode Utilities
 

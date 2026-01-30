@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"io"
 	"os"
 )
 
@@ -72,13 +73,16 @@ func NewTLSConfig(cfg *Config) (*tls.Config, error) {
 func loadCACertificates(cfg *Config) (*x509.CertPool, error) {
 	// Collect candidate paths
 	var paths []string
+	explicit := false
 
 	if cfg.TLSCA != "" {
 		paths = append(paths, cfg.TLSCA)
+		explicit = true
 	}
 
 	if env := os.Getenv("GEODE_TLS_CA"); env != "" && cfg.TLSCA == "" {
 		paths = append(paths, env)
+		explicit = true
 	}
 
 	if len(paths) == 0 {
@@ -89,35 +93,12 @@ func loadCACertificates(cfg *Config) (*x509.CertPool, error) {
 	var loaded bool
 
 	for _, path := range paths {
-		// Check file size before reading to prevent memory exhaustion
-		info, err := os.Stat(path)
+		data, err := readLimitedFile(path, "CA certificate")
 		if err != nil {
-			if os.IsNotExist(err) {
+			if os.IsNotExist(err) && !explicit {
 				continue
 			}
-			return nil, &SecurityError{
-				Type:    "tls",
-				Message: fmt.Sprintf("failed to stat CA certificate: %s", path),
-				cause:   err,
-			}
-		}
-		if info.Size() > maxCertFileSize {
-			return nil, &SecurityError{
-				Type:    "tls",
-				Message: fmt.Sprintf("CA certificate file too large: %s (%d bytes, max %d)", path, info.Size(), maxCertFileSize),
-			}
-		}
-
-		data, err := os.ReadFile(path)
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			return nil, &SecurityError{
-				Type:    "tls",
-				Message: fmt.Sprintf("failed to read CA certificate: %s", path),
-				cause:   err,
-			}
+			return nil, err
 		}
 
 		if !pool.AppendCertsFromPEM(data) {
@@ -130,6 +111,12 @@ func loadCACertificates(cfg *Config) (*x509.CertPool, error) {
 	}
 
 	if !loaded {
+		if explicit {
+			return nil, &SecurityError{
+				Type:    "tls",
+				Message: "no valid CA certificates found in configured path",
+			}
+		}
 		return nil, nil //nolint:nilnil // nil pool signals to use system pool
 	}
 
@@ -139,41 +126,17 @@ func loadCACertificates(cfg *Config) (*x509.CertPool, error) {
 // loadClientCertificate loads a client certificate and key for mTLS.
 // Both files are checked against maxCertFileSize to prevent memory exhaustion.
 func loadClientCertificate(certPath, keyPath string) (tls.Certificate, error) {
-	// Check certificate file size
-	certInfo, err := os.Stat(certPath)
+	certData, err := readLimitedFile(certPath, "client certificate")
 	if err != nil {
-		return tls.Certificate{}, &SecurityError{
-			Type:    "tls",
-			Message: fmt.Sprintf("failed to stat client certificate: %s", certPath),
-			cause:   err,
-		}
-	}
-	if certInfo.Size() > maxCertFileSize {
-		return tls.Certificate{}, &SecurityError{
-			Type: "tls",
-			Message: fmt.Sprintf(
-				"client certificate file too large: %s (%d bytes, max %d)",
-				certPath, certInfo.Size(), maxCertFileSize),
-		}
+		return tls.Certificate{}, err
 	}
 
-	// Check key file size
-	keyInfo, err := os.Stat(keyPath)
+	keyData, err := readLimitedFile(keyPath, "client key")
 	if err != nil {
-		return tls.Certificate{}, &SecurityError{
-			Type:    "tls",
-			Message: fmt.Sprintf("failed to stat client key: %s", keyPath),
-			cause:   err,
-		}
-	}
-	if keyInfo.Size() > maxCertFileSize {
-		return tls.Certificate{}, &SecurityError{
-			Type:    "tls",
-			Message: fmt.Sprintf("client key file too large: %s (%d bytes, max %d)", keyPath, keyInfo.Size(), maxCertFileSize),
-		}
+		return tls.Certificate{}, err
 	}
 
-	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	cert, err := tls.X509KeyPair(certData, keyData)
 	if err != nil {
 		return tls.Certificate{}, &SecurityError{
 			Type:    "tls",
@@ -182,4 +145,54 @@ func loadClientCertificate(certPath, keyPath string) (tls.Certificate, error) {
 		}
 	}
 	return cert, nil
+}
+
+func readLimitedFile(path, label string) ([]byte, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, &SecurityError{
+			Type:    "tls",
+			Message: fmt.Sprintf("failed to stat %s: %s", label, path),
+			cause:   err,
+		}
+	}
+	if !info.Mode().IsRegular() {
+		return nil, &SecurityError{
+			Type:    "tls",
+			Message: fmt.Sprintf("%s must be a regular file: %s", label, path),
+		}
+	}
+	if info.Size() > maxCertFileSize {
+		return nil, &SecurityError{
+			Type:    "tls",
+			Message: fmt.Sprintf("%s file too large: %s (%d bytes, max %d)", label, path, info.Size(), maxCertFileSize),
+		}
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, &SecurityError{
+			Type:    "tls",
+			Message: fmt.Sprintf("failed to read %s: %s", label, path),
+			cause:   err,
+		}
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(io.LimitReader(f, maxCertFileSize+1))
+	if err != nil {
+		return nil, &SecurityError{
+			Type:    "tls",
+			Message: fmt.Sprintf("failed to read %s: %s", label, path),
+			cause:   err,
+		}
+	}
+	if int64(len(data)) > maxCertFileSize {
+		return nil, &SecurityError{
+			Type:    "tls",
+			Message: fmt.Sprintf("%s file too large: %s (max %d)", label, path, maxCertFileSize),
+		}
+	}
+
+	return data, nil
 }

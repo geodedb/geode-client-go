@@ -1,6 +1,6 @@
 module geodedb.com/geode
 
-go 1.24.0
+go 1.24.12
 
 require (
 	github.com/quic-go/quic-go v0.55.0

@@ -3,6 +3,7 @@ package geode
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -217,6 +218,122 @@ func TestNewTLSConfig_ValidCertFile(t *testing.T) {
 		t.Errorf("expected *SecurityError, got %T", err)
 	} else if strings.Contains(se.Message, "too large") {
 		t.Errorf("error should not be about size: %q", se.Message)
+	}
+}
+
+func TestNewTLSConfig_ExplicitCAPathMissingFailsClosed(t *testing.T) {
+	cfg := &Config{
+		Host:               "localhost",
+		Port:               "3141",
+		TLSCA:              "/nonexistent/ca.pem",
+		InsecureSkipVerify: true,
+	}
+
+	_, err := NewTLSConfig(cfg)
+	if err == nil {
+		t.Fatal("expected error for missing CA file")
+	}
+
+	se, ok := err.(*SecurityError)
+	if !ok {
+		t.Fatalf("expected *SecurityError, got %T", err)
+	}
+	if se.Type != "tls" {
+		t.Fatalf("expected security error type 'tls', got %q", se.Type)
+	}
+}
+
+func TestNewTLSConfig_EnvCAPathMissingFailsClosed(t *testing.T) {
+	t.Setenv("GEODE_TLS_CA", "/nonexistent/env-ca.pem")
+
+	cfg := &Config{
+		Host:               "localhost",
+		Port:               "3141",
+		InsecureSkipVerify: true,
+	}
+
+	_, err := NewTLSConfig(cfg)
+	if err == nil {
+		t.Fatal("expected error for missing CA file in env")
+	}
+
+	se, ok := err.(*SecurityError)
+	if !ok {
+		t.Fatalf("expected *SecurityError, got %T", err)
+	}
+	if se.Type != "tls" {
+		t.Fatalf("expected security error type 'tls', got %q", se.Type)
+	}
+}
+
+func TestNewTLSConfig_CANonRegularFileRejected(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("device files not available on windows")
+	}
+
+	path := "/dev/zero"
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().IsRegular() {
+		t.Skip("non-regular device file not available")
+	}
+
+	cfg := &Config{
+		Host:               "localhost",
+		Port:               "3141",
+		TLSCA:              path,
+		InsecureSkipVerify: true,
+	}
+
+	_, err = NewTLSConfig(cfg)
+	if err == nil {
+		t.Fatal("expected error for non-regular CA file")
+	}
+
+	se, ok := err.(*SecurityError)
+	if !ok {
+		t.Fatalf("expected *SecurityError, got %T", err)
+	}
+	if !strings.Contains(se.Message, "regular file") {
+		t.Fatalf("unexpected error message: %q", se.Message)
+	}
+}
+
+func TestNewTLSConfig_ClientKeyNonRegularFileRejected(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("device files not available on windows")
+	}
+
+	path := "/dev/zero"
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().IsRegular() {
+		t.Skip("non-regular device file not available")
+	}
+
+	tmpDir := t.TempDir()
+	certPath := filepath.Join(tmpDir, "cert.pem")
+	if err := os.WriteFile(certPath, []byte("dummy"), 0600); err != nil {
+		t.Fatalf("failed to create cert file: %v", err)
+	}
+
+	cfg := &Config{
+		Host:               "localhost",
+		Port:               "3141",
+		TLSCert:            certPath,
+		TLSKey:             path,
+		InsecureSkipVerify: true,
+	}
+
+	_, err = NewTLSConfig(cfg)
+	if err == nil {
+		t.Fatal("expected error for non-regular key file")
+	}
+
+	se, ok := err.(*SecurityError)
+	if !ok {
+		t.Fatalf("expected *SecurityError, got %T", err)
+	}
+	if !strings.Contains(se.Message, "regular file") {
+		t.Fatalf("unexpected error message: %q", se.Message)
 	}
 }
 

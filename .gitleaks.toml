@@ -14,8 +14,6 @@ description = "Global allowlist"
 # Test files (.*_test\.go$) are intentionally NOT allowlisted to catch
 # hardcoded credentials that might be accidentally committed in tests.
 paths = [
-  '''testdata''',
-  '''tests/.*''',
   '''vendor''',
   '''.*\.log$''',
   '''go\.sum$''',

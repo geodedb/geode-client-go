@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"sync"
 	"time"
@@ -21,6 +23,7 @@ const (
 	quicInitialConnectionReceiveWindow = 8 * 1024 * 1024  // 8MB initial connection window
 	quicMaxConnectionReceiveWindow     = 32 * 1024 * 1024 // 32MB max connection window
 	quicReadBufferSize                 = 64 * 1024        // 64KB buffer
+	maxFrameSize                       = 32 * 1024 * 1024 // 32MB max frame size (JSON line)
 )
 
 // Transport defines the interface for communication with a Geode server.
@@ -199,8 +202,8 @@ func (t *QUICTransport) Receive(ctx context.Context) ([]byte, error) {
 	default:
 	}
 
-	// Simple blocking read - no goroutines
-	line, err := t.br.ReadBytes('\n')
+	// Simple blocking read with frame size limit
+	line, err := readLineLimited(t.br, maxFrameSize)
 	if err != nil {
 		if err == io.EOF {
 			return nil, io.EOF
@@ -216,7 +219,7 @@ func (t *QUICTransport) Receive(ctx context.Context) ([]byte, error) {
 		}
 	}
 
-	return bytes.TrimSuffix(line, []byte{'\n'}), nil
+	return line, nil
 }
 
 // TryReceiveBuffered reads a complete buffered line without touching the network.
@@ -248,7 +251,7 @@ func (t *QUICTransport) TryReceiveBuffered() ([]byte, bool, error) {
 		return nil, false, nil
 	}
 
-	line, err := t.br.ReadBytes('\n')
+	line, err := readLineLimited(t.br, maxFrameSize)
 	if err != nil {
 		return nil, false, &TransportError{
 			Op:    "read_buffered",
@@ -257,7 +260,59 @@ func (t *QUICTransport) TryReceiveBuffered() ([]byte, bool, error) {
 		}
 	}
 
-	return bytes.TrimSuffix(line, []byte{'\n'}), true, nil
+	return line, true, nil
+}
+
+// readLineLimited reads a single newline-delimited frame with a hard size limit.
+// The returned slice does not include the trailing newline.
+func readLineLimited(br *bufio.Reader, limit int) ([]byte, error) {
+	var buf bytes.Buffer
+	total := 0
+
+	for {
+		frag, err := br.ReadSlice('\n')
+		total += len(frag)
+		if total > limit+1 {
+			if errors.Is(err, bufio.ErrBufferFull) {
+				if derr := discardUntilNewline(br); derr != nil {
+					return nil, derr
+				}
+			}
+			return nil, &SecurityError{
+				Type:    "transport",
+				Message: fmt.Sprintf("frame exceeds maximum size of %d bytes", limit),
+			}
+		}
+
+		buf.Write(frag)
+
+		if err == nil {
+			break
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		return nil, err
+	}
+
+	line := buf.Bytes()
+	if len(line) > 0 && line[len(line)-1] == '\n' {
+		line = line[:len(line)-1]
+	}
+	return line, nil
+}
+
+func discardUntilNewline(br *bufio.Reader) error {
+	for {
+		_, err := br.ReadSlice('\n')
+		if err == nil {
+			return nil
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		return err
+	}
 }
 
 // Close closes the transport.
