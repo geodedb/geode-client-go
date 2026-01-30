@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"geodedb.com/geode/internal/validate"
 )
@@ -65,6 +66,13 @@ func connect(ctx context.Context, cfg *Config) (*Conn, error) {
 	// Validate config
 	if err := cfg.Validate(); err != nil {
 		return nil, err
+	}
+
+	// Apply connect timeout if configured
+	if cfg.ConnectTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(cfg.ConnectTimeout)*time.Second)
+		defer cancel()
 	}
 
 	// Create transport

@@ -241,6 +241,79 @@ func TestConfig_Clone(t *testing.T) {
 	}
 }
 
+func TestParseDSN_HostnameValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		dsn     string
+		wantErr bool
+	}{
+		{"valid hostname", "localhost:3141", false},
+		{"valid IP", "192.168.1.1:3141", false},
+		{"valid URL hostname", "geode://myhost:3141", false},
+		{"null byte in simple DSN", "host\x00name:3141", true},
+		{"null byte in URL DSN", "geode://host\x00name:3141", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ParseDSN(tt.dsn)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ParseDSN() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestParseDSN_ConnectTimeout(t *testing.T) {
+	tests := []struct {
+		name        string
+		dsn         string
+		wantTimeout int
+		wantErr     bool
+	}{
+		{"default no timeout", "localhost:3141", 0, false},
+		{"explicit timeout", "localhost:3141?connect_timeout=30", 30, false},
+		{"zero timeout", "localhost:3141?connect_timeout=0", 0, false},
+		{"invalid timeout", "localhost:3141?connect_timeout=abc", 0, true},
+		{"negative timeout", "localhost:3141?connect_timeout=-1", 0, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := ParseDSN(tt.dsn)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ParseDSN() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if !tt.wantErr && cfg.ConnectTimeout != tt.wantTimeout {
+				t.Errorf("ConnectTimeout = %d, want %d", cfg.ConnectTimeout, tt.wantTimeout)
+			}
+		})
+	}
+}
+
+func TestConfig_Validate_HostnameValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		host    string
+		wantErr bool
+	}{
+		{"valid", "localhost", false},
+		{"valid IP", "192.168.1.1", false},
+		{"null byte", "host\x00name", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{Host: tt.host, Port: "3141", PageSize: 100}
+			err := cfg.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func isConfigError(err error, target **ConfigError) bool {
 	if ce, ok := err.(*ConfigError); ok {
 		*target = ce

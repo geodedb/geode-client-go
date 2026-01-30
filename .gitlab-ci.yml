@@ -2,12 +2,17 @@
 # Geode Go Client CI/CD Pipeline
 # Uses DevNW CI/CD Catalog components
 # =============================================================================
+#
+# Security Note: Unit tests and lint checks MUST NOT allow failure to prevent
+# security regressions from being merged. Only optional stages (integration
+# tests requiring external services, SBOM scanning) may allow failure.
 
 include:
   - component: gitlab.com/devnw/ci-catalog/go-lint@latest
     inputs:
       stage: lint
-      allow_failure: true
+      # Lint includes gosec security checks - must not allow failure
+      allow_failure: false
 
   - component: gitlab.com/devnw/ci-catalog/go-build@latest
     inputs:
@@ -18,7 +23,9 @@ include:
     inputs:
       go_version: "1.24"
       stage: test
-      allow_failure: true  # Tests may require running Geode server
+      # Unit tests (with -short flag) must pass. Integration tests that
+      # require a running Geode server are skipped with -short.
+      allow_failure: false
 
   # Security scanning
   - component: gitlab.com/devnw/ci-catalog/security-sast@latest

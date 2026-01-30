@@ -13,7 +13,19 @@ import (
 func main() {
 	// Connect to Geode server
 	// DSN format: host:port?options or geode://host:port?options
-	// Use insecure=true only for development/testing
+	//
+	// PRODUCTION (recommended): Use proper TLS certificates
+	//   db, err := sql.Open("geode", "localhost:3141?ca=/path/to/ca.crt")
+	//
+	// For mTLS (mutual TLS):
+	//   db, err := sql.Open("geode", "localhost:3141?ca=/path/to/ca.crt&cert=/path/to/client.crt&key=/path/to/client.key")
+	//
+	// ============================================================================
+	// WARNING: The line below uses insecure=true which DISABLES TLS verification.
+	// This makes connections vulnerable to man-in-the-middle attacks.
+	// NEVER use insecure=true in production environments!
+	// This is ONLY acceptable for local development with self-signed certificates.
+	// ============================================================================
 	db, err := sql.Open("geode", "localhost:3141?insecure=true")
 	if err != nil {
 		log.Fatalf("Failed to open database: %v", err)

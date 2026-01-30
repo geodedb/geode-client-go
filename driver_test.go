@@ -383,3 +383,43 @@ func TestDriver_OpenConnectorInvalidDSN(t *testing.T) {
 		t.Error("expected error for invalid DSN")
 	}
 }
+
+// TestConn_ConcurrentAccess tests that concurrent access to the connection
+// state is properly synchronized. Run with -race to detect data races.
+func TestConn_ConcurrentAccess(t *testing.T) {
+	// This test verifies the lock management in Conn by testing
+	// concurrent operations on the same connector/config.
+	// The actual concurrency test against a live server is in
+	// integration_test.go (TestDocker_ConcurrentConnections).
+	//
+	// Here we just verify that the unit test infrastructure doesn't race
+	// when creating multiple connectors/configs concurrently.
+
+	d := &Driver{}
+	done := make(chan struct{})
+
+	// Spawn multiple goroutines that create connectors concurrently
+	for i := 0; i < 10; i++ {
+		go func(id int) {
+			defer func() { done <- struct{}{} }()
+
+			dsn := "localhost:3141?page_size=100"
+			connector, err := d.OpenConnector(dsn)
+			if err != nil {
+				t.Errorf("goroutine %d: unexpected error: %v", id, err)
+				return
+			}
+
+			// Access Config() concurrently (tests Clone() which should be safe)
+			c := connector.(*Connector)
+			for j := 0; j < 100; j++ {
+				_ = c.Config()
+			}
+		}(i)
+	}
+
+	// Wait for all goroutines to complete
+	for i := 0; i < 10; i++ {
+		<-done
+	}
+}

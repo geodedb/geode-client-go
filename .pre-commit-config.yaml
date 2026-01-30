@@ -189,8 +189,16 @@ repos:
     verbose: true
 
 # =============================================================================
-# CI configuration
+# CI configuration for pre-commit.ci service
 # =============================================================================
+# Note: Go-specific hooks are skipped in pre-commit.ci because it doesn't have
+# the Go toolchain installed. These checks are instead run by GitLab CI which:
+# - Runs golangci-lint (includes gosec security linter) with allow_failure: false
+# - Runs go-test with -short flag for unit tests
+# - Runs security-sast and security-dependency-scanning stages
+#
+# IMPORTANT: Developers MUST run `pre-commit run --all-files` locally before
+# pushing to ensure all Go checks pass, especially golangci-lint for security.
 ci:
   autofix_prs: true
   autofix_commit_msg: |
@@ -200,5 +208,6 @@ ci:
   autoupdate_branch: ''
   autoupdate_commit_msg: '[pre-commit.ci] pre-commit autoupdate'
   autoupdate_schedule: weekly
+  # Go hooks skipped in pre-commit.ci (no Go toolchain) - handled by GitLab CI
   skip: [go-fmt, go-vet, go-mod-tidy, go-build, go-test, golangci-lint]
   submodules: false

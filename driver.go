@@ -32,6 +32,7 @@
 //   - cert: Path to client certificate (for mTLS)
 //   - key: Path to client key (for mTLS)
 //   - insecure: Skip TLS verification (testing only)
+//   - connect_timeout: Connection timeout in seconds (default: 0 = no timeout)
 //
 // Environment variables:
 //   - GEODE_HOST: Default host if DSN is empty

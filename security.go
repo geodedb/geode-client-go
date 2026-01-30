@@ -7,6 +7,10 @@ import (
 	"os"
 )
 
+// maxCertFileSize is the maximum size for certificate files (1MB).
+// This prevents DoS through memory exhaustion with large files.
+const maxCertFileSize = 1 << 20 // 1MB
+
 // NewTLSConfig creates a TLS configuration for connecting to a Geode server.
 //
 // The configuration enforces TLS 1.3 minimum and uses the ALPN protocol "geode/1".
@@ -85,6 +89,25 @@ func loadCACertificates(cfg *Config) (*x509.CertPool, error) {
 	var loaded bool
 
 	for _, path := range paths {
+		// Check file size before reading to prevent memory exhaustion
+		info, err := os.Stat(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, &SecurityError{
+				Type:    "tls",
+				Message: fmt.Sprintf("failed to stat CA certificate: %s", path),
+				cause:   err,
+			}
+		}
+		if info.Size() > maxCertFileSize {
+			return nil, &SecurityError{
+				Type:    "tls",
+				Message: fmt.Sprintf("CA certificate file too large: %s (%d bytes, max %d)", path, info.Size(), maxCertFileSize),
+			}
+		}
+
 		data, err := os.ReadFile(path)
 		if err != nil {
 			if os.IsNotExist(err) {

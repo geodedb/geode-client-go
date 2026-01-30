@@ -1,6 +1,9 @@
 package geode
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"geodedb.com/geode/internal/validate"
@@ -146,5 +149,73 @@ func TestNewTLSConfig_MTLSRequiresBothCertAndKey(t *testing.T) {
 		t.Errorf("expected *SecurityError, got %T", err)
 	} else if se.Type != "tls" {
 		t.Errorf("expected security error type 'tls', got %q", se.Type)
+	}
+}
+
+func TestNewTLSConfig_CertFileSizeLimit(t *testing.T) {
+	// Create a temporary file that exceeds the max cert file size
+	tmpDir := t.TempDir()
+	largeCertPath := filepath.Join(tmpDir, "large_cert.pem")
+
+	// Create a file larger than maxCertFileSize (1MB)
+	largeContent := strings.Repeat("a", maxCertFileSize+1)
+	if err := os.WriteFile(largeCertPath, []byte(largeContent), 0600); err != nil {
+		t.Fatalf("failed to create large test file: %v", err)
+	}
+
+	cfg := &Config{
+		Host:               "localhost",
+		Port:               "3141",
+		TLSCA:              largeCertPath,
+		InsecureSkipVerify: true,
+	}
+
+	_, err := NewTLSConfig(cfg)
+	if err == nil {
+		t.Error("expected error for oversized certificate file")
+	}
+
+	se, ok := err.(*SecurityError)
+	if !ok {
+		t.Errorf("expected *SecurityError, got %T", err)
+	} else {
+		if se.Type != "tls" {
+			t.Errorf("expected security error type 'tls', got %q", se.Type)
+		}
+		if !strings.Contains(se.Message, "too large") {
+			t.Errorf("expected error message to contain 'too large', got %q", se.Message)
+		}
+	}
+}
+
+func TestNewTLSConfig_ValidCertFile(t *testing.T) {
+	// Create a small valid-sized file (content doesn't need to be valid PEM for this test)
+	tmpDir := t.TempDir()
+	smallCertPath := filepath.Join(tmpDir, "small_cert.pem")
+
+	smallContent := "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----"
+	if err := os.WriteFile(smallCertPath, []byte(smallContent), 0600); err != nil {
+		t.Fatalf("failed to create small test file: %v", err)
+	}
+
+	cfg := &Config{
+		Host:               "localhost",
+		Port:               "3141",
+		TLSCA:              smallCertPath,
+		InsecureSkipVerify: true,
+	}
+
+	// This will fail because the PEM is invalid, but it should get past the size check
+	_, err := NewTLSConfig(cfg)
+	if err == nil {
+		t.Error("expected error for invalid PEM content")
+	}
+
+	// The error should be about parsing, not about size
+	se, ok := err.(*SecurityError)
+	if !ok {
+		t.Errorf("expected *SecurityError, got %T", err)
+	} else if strings.Contains(se.Message, "too large") {
+		t.Errorf("error should not be about size: %q", se.Message)
 	}
 }

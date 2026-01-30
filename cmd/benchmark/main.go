@@ -39,9 +39,18 @@ func main() {
 	port := flag.Int("port", 3141, "Server port")
 	workers := flag.Int("workers", 10, "Number of concurrent workers")
 	queries := flag.Int("queries", 1000, "Queries per worker")
-	insecure := flag.Bool("insecure", true, "Skip TLS verification")
+	insecure := flag.Bool("insecure", false, "Skip TLS verification (TESTING ONLY - never use in production)")
 	outputJSON := flag.Bool("json", false, "Output results as JSON")
 	flag.Parse()
+
+	// Security warning when insecure mode is enabled
+	if *insecure {
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "WARNING: TLS certificate verification is DISABLED.")
+		fmt.Fprintln(os.Stderr, "         This is insecure and should NEVER be used in production.")
+		fmt.Fprintln(os.Stderr, "         Connections are vulnerable to man-in-the-middle attacks.")
+		fmt.Fprintln(os.Stderr, "")
+	}
 
 	dsn := fmt.Sprintf("%s:%d", *host, *port)
 	if *insecure {

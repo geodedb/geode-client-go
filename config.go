@@ -6,6 +6,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"geodedb.com/geode/internal/validate"
 )
 
 const (
@@ -56,6 +58,15 @@ type Config struct {
 	// InsecureSkipVerify allows skipping TLS verification (for testing only).
 	// This should never be used in production.
 	InsecureSkipVerify bool
+
+	// ConnectTimeout is the maximum time to wait for a connection.
+	// Zero means no timeout. This helps prevent connection storms.
+	// For rate limiting, use database/sql's connection pool settings:
+	//   db.SetMaxOpenConns(n) - limits concurrent connections
+	//   db.SetMaxIdleConns(n) - limits idle connections
+	//   db.SetConnMaxLifetime(d) - limits connection age
+	//   db.SetConnMaxIdleTime(d) - limits idle time
+	ConnectTimeout int // in seconds, 0 = no timeout
 }
 
 // Addr returns the server address in host:port format.
@@ -161,6 +172,15 @@ func parseURLDSN(dsn string, cfg *Config) (*Config, error) {
 		}
 	}
 
+	// Validate hostname for security (null bytes, length limits)
+	if err := validate.Hostname(host); err != nil {
+		return nil, &ConfigError{
+			Field:   "host",
+			Value:   host,
+			Message: err.Error(),
+		}
+	}
+
 	cfg.Host = host
 	cfg.Port = port
 
@@ -194,6 +214,15 @@ func parseSimpleDSN(dsn string, cfg *Config) (*Config, error) {
 			return nil, &ConfigError{
 				Field:   "host",
 				Message: "host is required",
+			}
+		}
+
+		// Validate hostname for security (null bytes, length limits)
+		if err := validate.Hostname(host); err != nil {
+			return nil, &ConfigError{
+				Field:   "host",
+				Value:   host,
+				Message: err.Error(),
 			}
 		}
 
@@ -272,6 +301,17 @@ func applyQueryParams(params url.Values, cfg *Config) error {
 		case "insecure":
 			cfg.InsecureSkipVerify = val == "true" || val == "1"
 
+		case "connect_timeout":
+			n, err := strconv.Atoi(val)
+			if err != nil || n < 0 {
+				return &ConfigError{
+					Field:   "connect_timeout",
+					Value:   val,
+					Message: "must be a non-negative integer (seconds)",
+				}
+			}
+			cfg.ConnectTimeout = n
+
 		default:
 			// Ignore unknown parameters for forward compatibility
 		}
@@ -294,6 +334,15 @@ func (c *Config) Validate() error {
 		return &ConfigError{
 			Field:   "host",
 			Message: "host is required",
+		}
+	}
+
+	// Validate hostname for security (null bytes, length limits)
+	if err := validate.Hostname(c.Host); err != nil {
+		return &ConfigError{
+			Field:   "host",
+			Value:   c.Host,
+			Message: err.Error(),
 		}
 	}
 
