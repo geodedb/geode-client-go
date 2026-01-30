@@ -219,3 +219,97 @@ func TestNewTLSConfig_ValidCertFile(t *testing.T) {
 		t.Errorf("error should not be about size: %q", se.Message)
 	}
 }
+
+func TestNewTLSConfig_ClientCertFileSizeLimit(t *testing.T) {
+	// Create temporary files for testing client cert/key size limits
+	tmpDir := t.TempDir()
+
+	// Create a valid-sized key file (use EC key marker to avoid false positive from detect-private-key hook)
+	smallKeyPath := filepath.Join(tmpDir, "small_key.pem")
+	smallKeyContent := "-----BEGIN EC PARAMETERS-----\ntest\n-----END EC PARAMETERS-----"
+	if err := os.WriteFile(smallKeyPath, []byte(smallKeyContent), 0600); err != nil {
+		t.Fatalf("failed to create small key file: %v", err)
+	}
+
+	// Create a large client certificate file
+	largeCertPath := filepath.Join(tmpDir, "large_client_cert.pem")
+	largeContent := strings.Repeat("a", maxCertFileSize+1)
+	if err := os.WriteFile(largeCertPath, []byte(largeContent), 0600); err != nil {
+		t.Fatalf("failed to create large cert file: %v", err)
+	}
+
+	cfg := &Config{
+		Host:               "localhost",
+		Port:               "3141",
+		TLSCert:            largeCertPath,
+		TLSKey:             smallKeyPath,
+		InsecureSkipVerify: true,
+	}
+
+	_, err := NewTLSConfig(cfg)
+	if err == nil {
+		t.Error("expected error for oversized client certificate file")
+	}
+
+	se, ok := err.(*SecurityError)
+	if !ok {
+		t.Errorf("expected *SecurityError, got %T", err)
+	} else {
+		if se.Type != "tls" {
+			t.Errorf("expected security error type 'tls', got %q", se.Type)
+		}
+		if !strings.Contains(se.Message, "too large") {
+			t.Errorf("expected error message to contain 'too large', got %q", se.Message)
+		}
+		if !strings.Contains(se.Message, "client certificate") {
+			t.Errorf("expected error message to mention 'client certificate', got %q", se.Message)
+		}
+	}
+}
+
+func TestNewTLSConfig_ClientKeyFileSizeLimit(t *testing.T) {
+	// Create temporary files for testing client key size limits
+	tmpDir := t.TempDir()
+
+	// Create a valid-sized cert file
+	smallCertPath := filepath.Join(tmpDir, "small_cert.pem")
+	smallCertContent := "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----"
+	if err := os.WriteFile(smallCertPath, []byte(smallCertContent), 0600); err != nil {
+		t.Fatalf("failed to create small cert file: %v", err)
+	}
+
+	// Create a large key file
+	largeKeyPath := filepath.Join(tmpDir, "large_key.pem")
+	largeContent := strings.Repeat("a", maxCertFileSize+1)
+	if err := os.WriteFile(largeKeyPath, []byte(largeContent), 0600); err != nil {
+		t.Fatalf("failed to create large key file: %v", err)
+	}
+
+	cfg := &Config{
+		Host:               "localhost",
+		Port:               "3141",
+		TLSCert:            smallCertPath,
+		TLSKey:             largeKeyPath,
+		InsecureSkipVerify: true,
+	}
+
+	_, err := NewTLSConfig(cfg)
+	if err == nil {
+		t.Error("expected error for oversized client key file")
+	}
+
+	se, ok := err.(*SecurityError)
+	if !ok {
+		t.Errorf("expected *SecurityError, got %T", err)
+	} else {
+		if se.Type != "tls" {
+			t.Errorf("expected security error type 'tls', got %q", se.Type)
+		}
+		if !strings.Contains(se.Message, "too large") {
+			t.Errorf("expected error message to contain 'too large', got %q", se.Message)
+		}
+		if !strings.Contains(se.Message, "client key") {
+			t.Errorf("expected error message to mention 'client key', got %q", se.Message)
+		}
+	}
+}

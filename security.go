@@ -137,7 +137,42 @@ func loadCACertificates(cfg *Config) (*x509.CertPool, error) {
 }
 
 // loadClientCertificate loads a client certificate and key for mTLS.
+// Both files are checked against maxCertFileSize to prevent memory exhaustion.
 func loadClientCertificate(certPath, keyPath string) (tls.Certificate, error) {
+	// Check certificate file size
+	certInfo, err := os.Stat(certPath)
+	if err != nil {
+		return tls.Certificate{}, &SecurityError{
+			Type:    "tls",
+			Message: fmt.Sprintf("failed to stat client certificate: %s", certPath),
+			cause:   err,
+		}
+	}
+	if certInfo.Size() > maxCertFileSize {
+		return tls.Certificate{}, &SecurityError{
+			Type: "tls",
+			Message: fmt.Sprintf(
+				"client certificate file too large: %s (%d bytes, max %d)",
+				certPath, certInfo.Size(), maxCertFileSize),
+		}
+	}
+
+	// Check key file size
+	keyInfo, err := os.Stat(keyPath)
+	if err != nil {
+		return tls.Certificate{}, &SecurityError{
+			Type:    "tls",
+			Message: fmt.Sprintf("failed to stat client key: %s", keyPath),
+			cause:   err,
+		}
+	}
+	if keyInfo.Size() > maxCertFileSize {
+		return tls.Certificate{}, &SecurityError{
+			Type:    "tls",
+			Message: fmt.Sprintf("client key file too large: %s (%d bytes, max %d)", keyPath, keyInfo.Size(), maxCertFileSize),
+		}
+	}
+
 	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
 	if err != nil {
 		return tls.Certificate{}, &SecurityError{

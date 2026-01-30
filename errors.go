@@ -99,9 +99,15 @@ func (e *DriverError) Is(target error) bool {
 }
 
 // TransportError represents transport-layer failures.
+//
+// Security Note: The Addr field contains the remote server address for
+// diagnostic purposes. When logging errors to public locations (e.g., client
+// telemetry, user-facing UI), callers should sanitize or omit this field
+// to prevent internal network topology disclosure. For internal logs and
+// debugging, the full address is valuable for troubleshooting.
 type TransportError struct {
 	Op    string // Operation that failed
-	Addr  string // Remote address (if applicable)
+	Addr  string // Remote address (if applicable) - see Security Note above
 	cause error  // Underlying cause
 }
 

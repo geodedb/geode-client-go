@@ -150,7 +150,6 @@ linters:
       - gochecknoglobals
       - goconst
       - gocyclo
-      - gosec
       - lll
       - mnd
       - noctx
@@ -158,6 +157,8 @@ linters:
       - sqlclosecheck
       - wrapcheck
       path: _test\.go
+      # Note: gosec intentionally NOT excluded from test files to detect
+      # security issues like hardcoded credentials in test code.
     paths:
     - testdata
     - third_party$

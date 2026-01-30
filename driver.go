@@ -83,12 +83,17 @@ var (
 
 // Open opens a new connection to the database.
 // The name is a DSN (data source name) in the format described above.
+//
+// Deprecated: Use OpenConnector and Connector.Connect with an explicit context
+// for timeout control. This method uses defaultDeprecatedMethodTimeout (30s).
 func (d *Driver) Open(name string) (driver.Conn, error) {
 	connector, err := d.OpenConnector(name)
 	if err != nil {
 		return nil, err
 	}
-	return connector.Connect(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), defaultDeprecatedMethodTimeout)
+	defer cancel()
+	return connector.Connect(ctx)
 }
 
 // OpenConnector returns a Connector for the given DSN.

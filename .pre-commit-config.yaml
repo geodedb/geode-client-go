@@ -26,8 +26,14 @@ repos:
     exclude: ^(vendor/|dist/)
 
       # Syntax validation
+      # --unsafe flag rationale: Required for GitLab CI files which use custom
+      # YAML tags like !reference. Without --unsafe, the YAML parser rejects
+      # these tags as potential code execution vectors. This is safe because:
+      # 1. We only validate YAML syntax, not execute it
+      # 2. GitLab CI files require these tags for template inheritance
+      # 3. The check runs locally, not on untrusted input
   - id: check-yaml
-    args: [--unsafe]      # Allow custom tags
+    args: [--unsafe]
     exclude: ^(vendor/|dist/)
   - id: check-json
     exclude: ^(vendor/|dist/)

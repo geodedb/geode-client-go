@@ -46,9 +46,12 @@ func (s *Stmt) NumInput() int {
 
 // Exec executes a query that doesn't return rows.
 //
-// Deprecated: Use ExecContext instead.
+// Deprecated: Use ExecContext instead for explicit timeout control.
+// This method uses a default 30-second timeout.
 func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
-	return s.ExecContext(context.Background(), valuesToNamedValues(args))
+	ctx, cancel := context.WithTimeout(context.Background(), defaultDeprecatedMethodTimeout)
+	defer cancel()
+	return s.ExecContext(ctx, valuesToNamedValues(args))
 }
 
 // ExecContext executes a query that doesn't return rows.
@@ -65,9 +68,12 @@ func (s *Stmt) ExecContext(ctx context.Context, args []driver.NamedValue) (drive
 
 // Query executes a query that returns rows.
 //
-// Deprecated: Use QueryContext instead.
+// Deprecated: Use QueryContext instead for explicit timeout control.
+// This method uses a default 30-second timeout.
 func (s *Stmt) Query(args []driver.Value) (driver.Rows, error) {
-	return s.QueryContext(context.Background(), valuesToNamedValues(args))
+	ctx, cancel := context.WithTimeout(context.Background(), defaultDeprecatedMethodTimeout)
+	defer cancel()
+	return s.QueryContext(ctx, valuesToNamedValues(args))
 }
 
 // QueryContext executes a query that returns rows.

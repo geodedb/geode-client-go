@@ -11,11 +11,12 @@ useDefault = true
 description = "Global allowlist"
 # Note: Only allowlist paths that genuinely cannot contain secrets.
 # Do NOT allowlist all .go or .md files - this disables security scanning.
+# Test files (.*_test\.go$) are intentionally NOT allowlisted to catch
+# hardcoded credentials that might be accidentally committed in tests.
 paths = [
   '''testdata''',
   '''tests/.*''',
   '''vendor''',
-  '''.*_test\.go$''',
   '''.*\.log$''',
   '''go\.sum$''',
 ]

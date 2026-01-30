@@ -11,6 +11,11 @@ import (
 	"geodedb.com/geode/internal/validate"
 )
 
+// defaultDeprecatedMethodTimeout is the default timeout for deprecated methods
+// (Prepare, Begin, Exec, Query) that use context.Background(). This prevents
+// operations from hanging indefinitely. Use the Context variants for custom timeouts.
+const defaultDeprecatedMethodTimeout = 30 * time.Second
+
 // Conn represents a connection to a Geode database.
 type Conn struct {
 	cfg       *Config
@@ -120,8 +125,13 @@ func (c *Conn) hello(ctx context.Context) error {
 // Prepare returns a prepared statement.
 // Note: Geode doesn't have server-side prepared statements,
 // so this is a client-side implementation.
+//
+// Deprecated: Use PrepareContext instead for explicit timeout control.
+// This method uses a default 30-second timeout.
 func (c *Conn) Prepare(query string) (driver.Stmt, error) {
-	return c.PrepareContext(context.Background(), query)
+	ctx, cancel := context.WithTimeout(context.Background(), defaultDeprecatedMethodTimeout)
+	defer cancel()
+	return c.PrepareContext(ctx, query)
 }
 
 // PrepareContext returns a prepared statement with context.
@@ -169,8 +179,13 @@ func (c *Conn) Close() error {
 }
 
 // Begin starts a transaction.
+//
+// Deprecated: Use BeginTx instead for explicit timeout control.
+// This method uses a default 30-second timeout.
 func (c *Conn) Begin() (driver.Tx, error) {
-	return c.BeginTx(context.Background(), driver.TxOptions{})
+	ctx, cancel := context.WithTimeout(context.Background(), defaultDeprecatedMethodTimeout)
+	defer cancel()
+	return c.BeginTx(ctx, driver.TxOptions{})
 }
 
 // BeginTx starts a transaction with context and options.

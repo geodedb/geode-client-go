@@ -6,20 +6,25 @@
 # Security Note: Unit tests and lint checks MUST NOT allow failure to prevent
 # security regressions from being merged. Only optional stages (integration
 # tests requiring external services, SBOM scanning) may allow failure.
+#
+# Supply Chain Security: All CI components are pinned to major version tags
+# (e.g., @v1) to prevent automatic adoption of potentially compromised updates.
+# Review and update versions periodically. For maximum security, use commit SHAs.
 
 include:
-  - component: gitlab.com/devnw/ci-catalog/go-lint@latest
+  # Pinned to v1 - update periodically after security review
+  - component: gitlab.com/devnw/ci-catalog/go-lint@v1
     inputs:
       stage: lint
       # Lint includes gosec security checks - must not allow failure
       allow_failure: false
 
-  - component: gitlab.com/devnw/ci-catalog/go-build@latest
+  - component: gitlab.com/devnw/ci-catalog/go-build@v1
     inputs:
       go_version: "1.24"
       stage: build
 
-  - component: gitlab.com/devnw/ci-catalog/go-test@latest
+  - component: gitlab.com/devnw/ci-catalog/go-test@v1
     inputs:
       go_version: "1.24"
       stage: test
@@ -27,30 +32,30 @@ include:
       # require a running Geode server are skipped with -short.
       allow_failure: false
 
-  # Security scanning
-  - component: gitlab.com/devnw/ci-catalog/security-sast@latest
+  # Security scanning - pinned to v1
+  - component: gitlab.com/devnw/ci-catalog/security-sast@v1
     inputs:
       stage: security
 
-  - component: gitlab.com/devnw/ci-catalog/security-dependency-scanning@latest
+  - component: gitlab.com/devnw/ci-catalog/security-dependency-scanning@v1
     inputs:
       stage: security
 
-  - component: gitlab.com/devnw/ci-catalog/security-secrets@latest
+  - component: gitlab.com/devnw/ci-catalog/security-secrets@v1
     inputs:
       stage: security
 
-  - component: gitlab.com/devnw/ci-catalog/security-gitleaks@latest
+  - component: gitlab.com/devnw/ci-catalog/security-gitleaks@v1
 
-  # SBOM generation and scanning
-  - component: gitlab.com/devnw/ci-catalog/sbom-generate@latest
+  # SBOM generation and scanning - pinned to v1
+  - component: gitlab.com/devnw/ci-catalog/sbom-generate@v1
 
-  - component: gitlab.com/devnw/ci-catalog/sbom-scan@latest
+  - component: gitlab.com/devnw/ci-catalog/sbom-scan@v1
     inputs:
       allow_failure: true
 
-  # Release creation
-  - component: gitlab.com/devnw/ci-catalog/release-semantic@latest
+  # Release creation - pinned to v1
+  - component: gitlab.com/devnw/ci-catalog/release-semantic@v1
     inputs:
       stage: release
 
