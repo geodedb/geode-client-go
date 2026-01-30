@@ -5,11 +5,25 @@
 # Default owners for everything
 *       @maintainers
 
-# Security-sensitive files require security team review
+# Security policy and CI/CD configuration require security team review
 SECURITY.md         @security-team @maintainers
 .gitlab-ci.yml      @security-team @maintainers
 .gitleaks.toml      @security-team @maintainers
+.golangci.yml       @security-team @maintainers
+.pre-commit-config.yaml @security-team @maintainers
+
+# Security-sensitive source code requires security team review
+# TLS/authentication, transport layer, connection handling, configuration parsing, error handling
+security.go         @security-team @maintainers
+transport.go        @security-team @maintainers
+conn.go             @security-team @maintainers
+config.go           @security-team @maintainers
+errors.go           @security-team @maintainers
+
+# Input validation is security-critical
+internal/validate/  @security-team @maintainers
 
 # Build configuration
 go.mod              @maintainers
 go.sum              @maintainers
+Makefile            @maintainers

@@ -18,6 +18,15 @@ import (
 	_ "geodedb.com/geode"
 )
 
+const (
+	// defaultQueryTimeoutSec is the default per-query timeout in seconds.
+	defaultQueryTimeoutSec = 30
+
+	// maxFallbackTimeoutMin is the maximum timeout used when no timeout is specified.
+	// This prevents indefinite hangs even when timeout=0.
+	maxFallbackTimeoutMin = 10
+)
+
 type Result struct {
 	Timestamp       string  `json:"timestamp"`
 	DurationSeconds float64 `json:"duration_seconds"`
@@ -39,9 +48,19 @@ func main() {
 	port := flag.Int("port", 3141, "Server port")
 	workers := flag.Int("workers", 10, "Number of concurrent workers")
 	queries := flag.Int("queries", 1000, "Queries per worker")
+	queryTimeout := flag.Int("query-timeout", defaultQueryTimeoutSec, "Per-query timeout in seconds (0 for no timeout)")
 	insecure := flag.Bool("insecure", false, "Skip TLS verification (TESTING ONLY - never use in production)")
 	outputJSON := flag.Bool("json", false, "Output results as JSON")
 	flag.Parse()
+
+	// Convert timeout to duration (0 means use a very long timeout to avoid unbounded contexts)
+	var queryTimeoutDuration time.Duration
+	if *queryTimeout > 0 {
+		queryTimeoutDuration = time.Duration(*queryTimeout) * time.Second
+	} else {
+		// Use max fallback timeout even when "no timeout" specified to prevent indefinite hangs
+		queryTimeoutDuration = maxFallbackTimeoutMin * time.Minute
+	}
 
 	// Security warning when insecure mode is enabled
 	if *insecure {
@@ -89,8 +108,10 @@ func main() {
 
 			for i := 0; i < *queries; i++ {
 				qstart := time.Now()
-				rows, err := db.QueryContext(context.Background(), "RETURN 1")
+				ctx, cancel := context.WithTimeout(context.Background(), queryTimeoutDuration)
+				rows, err := db.QueryContext(ctx, "RETURN 1")
 				latency := float64(time.Since(qstart).Microseconds()) / 1000.0
+				cancel() // Always cancel to release resources
 
 				if err != nil {
 					if i < 3 && workerID == 0 {
@@ -103,6 +124,13 @@ func main() {
 					continue
 				}
 				rows.Close()
+				if rowErr := rows.Err(); rowErr != nil {
+					errMu.Lock()
+					errCounts[rowErr.Error()]++
+					errMu.Unlock()
+					atomic.AddInt64(&failed, 1)
+					continue
+				}
 
 				atomic.AddInt64(&successful, 1)
 				workerLatencies = append(workerLatencies, latency)

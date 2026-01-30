@@ -133,6 +133,38 @@ func TestParseDSN_InvalidPageSize(t *testing.T) {
 	}
 }
 
+func TestParseDSN_PageSizeUpperBound(t *testing.T) {
+	// Test page_size at max boundary
+	dsn := "localhost:3141?page_size=100000"
+	cfg, err := ParseDSN(dsn)
+	if err != nil {
+		t.Fatalf("unexpected error for page_size at max: %v", err)
+	}
+	if cfg.PageSize != MaxPageSize {
+		t.Errorf("expected page_size %d, got %d", MaxPageSize, cfg.PageSize)
+	}
+
+	// Test page_size exceeding max
+	dsn = "localhost:3141?page_size=100001"
+	_, err = ParseDSN(dsn)
+	if err == nil {
+		t.Error("expected error for page_size exceeding max")
+	}
+	var cfgErr *ConfigError
+	if !isConfigError(err, &cfgErr) {
+		t.Errorf("expected ConfigError, got %T", err)
+	} else if cfgErr.Field != "page_size" {
+		t.Errorf("expected field 'page_size', got %q", cfgErr.Field)
+	}
+
+	// Test extremely large page_size
+	dsn = "localhost:3141?page_size=999999999"
+	_, err = ParseDSN(dsn)
+	if err == nil {
+		t.Error("expected error for extremely large page_size")
+	}
+}
+
 func TestParseDSN_MTLSValidation(t *testing.T) {
 	// cert without key
 	_, err := ParseDSN("localhost:3141?cert=/path/to/cert.pem")
@@ -205,6 +237,8 @@ func TestConfig_Validate(t *testing.T) {
 		{"invalid port", &Config{Host: "localhost", Port: "abc", PageSize: 100}, true},
 		{"zero page_size", &Config{Host: "localhost", Port: "3141", PageSize: 0}, true},
 		{"negative page_size", &Config{Host: "localhost", Port: "3141", PageSize: -1}, true},
+		{"max page_size", &Config{Host: "localhost", Port: "3141", PageSize: MaxPageSize}, false},
+		{"exceeds max page_size", &Config{Host: "localhost", Port: "3141", PageSize: MaxPageSize + 1}, true},
 	}
 
 	for _, tt := range tests {

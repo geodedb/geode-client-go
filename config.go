@@ -17,6 +17,10 @@ const (
 	// DefaultPageSize is the default number of rows per page.
 	DefaultPageSize = 1000
 
+	// MaxPageSize is the maximum allowed page size.
+	// This prevents potential DoS via memory exhaustion with extremely large page sizes.
+	MaxPageSize = 100000
+
 	// DefaultHelloName is the default client name sent in HELLO.
 	DefaultHelloName = "geode-go"
 
@@ -266,6 +270,13 @@ func applyQueryParams(params url.Values, cfg *Config) error {
 					Message: "must be a positive integer",
 				}
 			}
+			if n > MaxPageSize {
+				return &ConfigError{
+					Field:   "page_size",
+					Value:   val,
+					Message: "exceeds maximum allowed value of " + strconv.Itoa(MaxPageSize),
+				}
+			}
 			cfg.PageSize = n
 
 		case "hello_name":
@@ -367,6 +378,14 @@ func (c *Config) Validate() error {
 			Field:   "page_size",
 			Value:   strconv.Itoa(c.PageSize),
 			Message: "must be positive",
+		}
+	}
+
+	if c.PageSize > MaxPageSize {
+		return &ConfigError{
+			Field:   "page_size",
+			Value:   strconv.Itoa(c.PageSize),
+			Message: "exceeds maximum allowed value of " + strconv.Itoa(MaxPageSize),
 		}
 	}
 

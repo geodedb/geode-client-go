@@ -30,7 +30,10 @@ import (
 )
 
 const (
-	defaultGeodeImage = "registry.gitlab.com/devnw/geode/geode:latest"
+	// defaultGeodeImage is pinned to a specific version to prevent supply chain attacks.
+	// Update this version when upgrading the Geode server dependency.
+	// Override with GEODE_IMAGE environment variable if needed.
+	defaultGeodeImage = "registry.gitlab.com/devnw/geode/geode:v1.0.0"
 	defaultGeodePort  = "3141/udp"
 	startupTimeout    = 60 * time.Second
 	queryTimeout      = 30 * time.Second

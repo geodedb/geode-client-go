@@ -3,8 +3,8 @@
 **Last Updated:** 2026-01-30
 **Reviewed By:** Adversarial Security Review Agent
 **Repository:** `devnw/codepros/geode/geode-client-go`
-**Commit:** `2e7c5e0` (main branch)
-**Review Type:** Comprehensive adversarial security review
+**Commit:** `5553088` (main branch)
+**Review Type:** Comprehensive adversarial security review (Round 2) - All findings closed
 
 ## Executive Summary
 
@@ -17,19 +17,19 @@ This security gap analysis covers the Geode Go Client library, a `database/sql` 
 | Critical | 0 | - |
 | High | 1 | Closed |
 | Medium | 2 | Closed |
-| Low | 4 | Closed |
-| Info | 2 | Closed |
-| **Total** | **9** | **9 Closed** |
+| Low | 6 | **All Closed** |
+| Info | 4 | **All Closed** |
+| **Total** | **13** | **All Closed** |
 
-*Note: All 17 findings from security reviews have been remediated and closed (Issues #1-#17).*
+*Note: All 21 findings from security reviews have been remediated and closed (Issues #1-#21).*
 
-### Top 5 Risks (All Remediated)
+### Top 5 Remediated Risks (All Closed)
 
 1. ~~**Compiled binary tracked in git repository**~~ - Removed from git, added to .gitignore (Issue #10 Closed)
 2. ~~**CI catalog components use mutable @latest tags**~~ - Pinned to @v1 (Issue #12 Closed)
-3. ~~**Client cert/key files lack size limits**~~ - Added size checks (Issue #11 Closed)
-4. ~~**Deprecated driver methods use unbounded context**~~ - Added 30s default timeout (Issue #13 Closed)
-5. ~~**Security linter (gosec) disabled for test files**~~ - Enabled for tests (Issue #14 Closed)
+3. ~~**Docker images use :latest tag in Makefile/tests**~~ - Pinned to v1.0.0 (Issue #18 Closed)
+4. ~~**No upper bound on page_size configuration**~~ - Added MaxPageSize (100000) validation (Issue #19 Closed)
+5. ~~**CODEOWNERS missing security-sensitive files**~~ - Expanded to include security.go, transport.go, conn.go, config.go, errors.go, internal/validate/ (Issue #21 Closed)
 
 ## Stack-Ranked Findings Table
 
@@ -41,199 +41,105 @@ This security gap analysis covers the Geode Go Client library, a `database/sql` 
 | 4 | Low | 24 | Deprecated methods unbounded ctx | conn.go, driver.go, stmt.go | CWE-400 | [#13](https://gitlab.com/devnw/codepros/geode/geode-client-go/-/issues/13) | **Closed** |
 | 5 | Low | 24 | gosec disabled for test files | .golangci.yml:153 | CWE-693 | [#14](https://gitlab.com/devnw/codepros/geode/geode-client-go/-/issues/14) | **Closed** |
 | 6 | Low | 24 | Gitleaks allowlists test files | .gitleaks.toml:18 | CWE-798 | [#15](https://gitlab.com/devnw/codepros/geode/geode-client-go/-/issues/15) | **Closed** |
-| 7 | Low | 8 | Error messages include addresses | errors.go:111 | CWE-209 | [#17](https://gitlab.com/devnw/codepros/geode/geode-client-go/-/issues/17) | **Closed** |
-| 8 | Info | 4 | Pre-commit YAML --unsafe flag | .pre-commit-config.yaml:30 | CWE-94 | [#16](https://gitlab.com/devnw/codepros/geode/geode-client-go/-/issues/16) | **Closed** |
+| 7 | Low | 12 | Docker images use :latest tag | Makefile:12, integration_test.go:33 | CWE-829 | [#18](https://gitlab.com/devnw/codepros/geode/geode-client-go/-/issues/18) | **Closed** |
+| 8 | Low | 8 | No upper bound on page_size | config.go:261 | CWE-400 | [#19](https://gitlab.com/devnw/codepros/geode/geode-client-go/-/issues/19) | **Closed** |
+| 9 | Low | 8 | Error messages include addresses | errors.go:111 | CWE-209 | [#17](https://gitlab.com/devnw/codepros/geode/geode-client-go/-/issues/17) | **Closed** |
+| 10 | Info | 4 | Pre-commit YAML --unsafe flag | .pre-commit-config.yaml:30 | CWE-94 | [#16](https://gitlab.com/devnw/codepros/geode/geode-client-go/-/issues/16) | **Closed** |
+| 11 | Info | 4 | Benchmark CLI unbounded context | cmd/benchmark/main.go:92 | CWE-400 | [#20](https://gitlab.com/devnw/codepros/geode/geode-client-go/-/issues/20) | **Closed** |
+| 12 | Info | 4 | CODEOWNERS missing security files | CODEOWNERS | CWE-284 | [#21](https://gitlab.com/devnw/codepros/geode/geode-client-go/-/issues/21) | **Closed** |
 
-## Findings Detail
+---
 
-### Finding 1: Compiled Binary Tracked in Git (High)
+## Round 2 Findings (All Closed)
+
+### Finding 9: Docker Images Use :latest Tag (Low) - **CLOSED**
 
 **Confidence:** Confirmed
 
 **Evidence:**
 
-```bash
-$ ls -la example/
--rwxrwxr-x 3.6M example
--rw-rw-r-- 3.3k main.go
-
-$ file example/example
-ELF 64-bit LSB executable, x86-64, statically linked
-
-$ git ls-files example/
-example/example  # Binary IS tracked
-example/main.go
+```makefile
+# Makefile:12
+GEODE_IMAGE ?= registry.gitlab.com/devnw/geode/geode:latest
 ```
 
-**Impact:** Supply chain attack - binary could be replaced with malware without visible source changes.
+```go
+// integration_test.go:33
+const defaultGeodeImage = "registry.gitlab.com/devnw/geode/geode:latest"
+```
 
-**Fix:** Remove from git, add to .gitignore: `git rm example/example`
+**Impact:** Supply chain risk - compromised registry could inject malicious containers during local testing.
 
-**Remediation:** Binary removed via `git rm`, pattern added to `.gitignore` to prevent future commits.
+**Remediation:** Pinned Docker image to `v1.0.0` in both Makefile:12 and integration_test.go:33. Added security comments explaining the rationale and how to update the version.
 
 ---
 
-### Finding 2: CI Components Use @latest Tags (Medium)
-
-**Confidence:** Confirmed
-
-**Evidence:**
-
-```yaml
-# .gitlab-ci.yml - All 10 components use @latest
-- component: gitlab.com/devnw/ci-catalog/go-lint@latest
-- component: gitlab.com/devnw/ci-catalog/go-build@latest
-- component: gitlab.com/devnw/ci-catalog/security-sast@latest
-# ... and 7 more
-```
-
-**Impact:** Upstream component compromise auto-propagates to this repo's CI.
-
-**Fix:** Pin to specific versions: `component@v1.2.3` or commit SHAs.
-
-**Remediation:** All 10 CI catalog components pinned to `@v1` with security documentation.
-
----
-
-### Finding 3: Client Certificate Files No Size Limit (Medium)
+### Finding 10: No Upper Bound on page_size Configuration (Low) - **CLOSED**
 
 **Confidence:** Confirmed
 
 **Evidence:**
 
 ```go
-// security.go:140-150 - No size check
-func loadClientCertificate(certPath, keyPath string) (tls.Certificate, error) {
-    cert, err := tls.LoadX509KeyPair(certPath, keyPath) // Direct load
-    // ...
-}
-
-// Compare: CA certs DO have size limits (security.go:104)
-if info.Size() > maxCertFileSize { ... }
+// config.go:261-269
+case "page_size":
+    n, err := strconv.Atoi(val)
+    if err != nil || n <= 0 {  // Only checks > 0, no upper bound
+        return &ConfigError{...}
+    }
+    cfg.PageSize = n
 ```
 
-**Impact:** DoS via memory exhaustion if attacker controls cert/key paths.
+**Impact:** Potential DoS via memory exhaustion with extremely large page_size values.
 
-**Fix:** Add size checks before `LoadX509KeyPair`.
-
-**Remediation:** Added `maxCertFileSize` (1MB) checks to `loadClientCertificate()` for both cert and key files with comprehensive test coverage.
+**Remediation:** Added `MaxPageSize = 100000` constant in config.go. Added upper bound validation in both `applyQueryParams()` and `Config.Validate()`. Added unit tests `TestParseDSN_PageSizeUpperBound` and test cases in `TestConfig_Validate`.
 
 ---
 
-### Finding 4: Deprecated Methods Use Unbounded Context (Low)
+### Finding 11: Benchmark CLI Uses Unbounded context.Background() (Info) - **CLOSED**
 
 **Confidence:** Confirmed
 
 **Evidence:**
 
 ```go
-// conn.go:124
-func (c *Conn) Prepare(query string) (driver.Stmt, error) {
-    return c.PrepareContext(context.Background(), query)
-}
-
-// conn.go:173
-func (c *Conn) Begin() (driver.Tx, error) {
-    return c.BeginTx(context.Background(), driver.TxOptions{})
-}
-
-// driver.go:91, stmt.go:51,70 - similar patterns
+// cmd/benchmark/main.go:92
+rows, err := db.QueryContext(context.Background(), "RETURN 1")  // No timeout
 ```
 
-**Impact:** Operations can hang indefinitely, consuming resources.
+**Impact:** Benchmark can hang indefinitely if server becomes unresponsive.
 
-**Fix:** Add default timeouts or document the risk.
-
-**Remediation:** Added `defaultDeprecatedMethodTimeout` (30s) to all deprecated methods in `conn.go`, `driver.go`, and `stmt.go` with updated documentation.
+**Remediation:** Added `--query-timeout` flag (default 30s) to cmd/benchmark/main.go. All queries now use `context.WithTimeout()`. Even with timeout=0, a 10-minute maximum is enforced to prevent indefinite hangs.
 
 ---
 
-### Finding 5: gosec Disabled for Test Files (Low)
+### Finding 12: CODEOWNERS Missing Security-Sensitive Files (Info) - **CLOSED**
 
 **Confidence:** Confirmed
 
 **Evidence:**
 
-```yaml
-# .golangci.yml:144-160
-exclusions:
-  rules:
-    - linters:
-        - gosec  # Security linter disabled for tests
-      path: _test\.go
+```
+# Current CODEOWNERS only covers:
+SECURITY.md         @security-team @maintainers
+.gitlab-ci.yml      @security-team @maintainers
+.gitleaks.toml      @security-team @maintainers
+
+# Missing:
+# security.go, transport.go, conn.go, config.go, errors.go, internal/validate/
 ```
 
-**Impact:** Security issues in test code go undetected.
+**Impact:** Security-sensitive code changes may not require security team review.
 
-**Fix:** Remove gosec from exclusion list.
-
-**Remediation:** Removed `gosec` from test file exclusion list in `.golangci.yml` with explanatory comment.
-
----
-
-### Finding 6: Gitleaks Allowlists All Test Files (Low)
-
-**Confidence:** Confirmed
-
-**Evidence:**
-
-```toml
-# .gitleaks.toml:18
-paths = [
-  '''.*_test\.go$''',  # All test files allowlisted
-]
-```
-
-**Impact:** Secrets in test files won't be detected.
-
-**Fix:** Remove blanket test file allowlist.
-
-**Remediation:** Removed `'''.*_test\.go$'''` from `.gitleaks.toml` allowlist with security rationale comment.
-
----
-
-### Finding 7: Error Messages Include Network Addresses (Info)
-
-**Confidence:** Confirmed
-
-**Evidence:**
-
-```go
-// errors.go:111
-return fmt.Sprintf("geode: transport %s to %s: %v", e.Op, e.Addr, e.cause)
-```
-
-**Impact:** Internal network topology may leak in logs.
-
-**Fix:** Document or provide sanitized error method.
-
-**Remediation:** Added Security Note to `TransportError` struct documenting the address field and sanitization guidance for callers.
-
----
-
-### Finding 8: Pre-commit YAML --unsafe Flag (Info)
-
-**Confidence:** Confirmed
-
-**Evidence:**
-
-```yaml
-# .pre-commit-config.yaml:30
-- id: check-yaml
-  args: [--unsafe]  # Allows arbitrary YAML tags
-```
-
-**Impact:** Theoretical - allows custom YAML tags.
-
-**Fix:** Document rationale or remove if not needed.
-
-**Remediation:** Added comprehensive comment documenting why `--unsafe` is required (GitLab CI `!reference` tags) and why it's safe (syntax validation only, local execution, no untrusted input).
+**Remediation:** Expanded CODEOWNERS to include security.go, transport.go, conn.go, config.go, errors.go, internal/validate/, .golangci.yml, .pre-commit-config.yaml, and Makefile. All security-sensitive source code now requires @security-team review.
 
 ---
 
 ## Previously Remediated Findings (Closed)
 
-The following 9 issues from the initial security review have been remediated:
+### Findings 1-8: See detailed remediation notes above (All Closed)
+
+### Initial Review Findings (Issues #1-#9)
 
 | Issue | Finding | Status |
 |-------|---------|--------|
@@ -247,6 +153,8 @@ The following 9 issues from the initial security review have been remediated:
 | [#8](https://gitlab.com/devnw/codepros/geode/geode-client-go/-/issues/8) | No cert file size limit (CA only) | Closed |
 | [#9](https://gitlab.com/devnw/codepros/geode/geode-client-go/-/issues/9) | No connection rate limiting | Closed |
 
+---
+
 ## Findings by Area
 
 ### Supply Chain Security
@@ -255,14 +163,17 @@ The following 9 issues from the initial security review have been remediated:
 |---------|----------|-------|--------|
 | Binary tracked in git | High | [#10](https://gitlab.com/devnw/codepros/geode/geode-client-go/-/issues/10) | **Closed** |
 | CI components @latest | Medium | [#12](https://gitlab.com/devnw/codepros/geode/geode-client-go/-/issues/12) | **Closed** |
+| Docker images :latest | Low | [#18](https://gitlab.com/devnw/codepros/geode/geode-client-go/-/issues/18) | **Closed** |
 
 ### Application Security
 
 | Finding | Severity | Issue | Status |
 |---------|----------|-------|--------|
 | Client cert no size limit | Medium | [#11](https://gitlab.com/devnw/codepros/geode/geode-client-go/-/issues/11) | **Closed** |
-| Unbounded context | Low | [#13](https://gitlab.com/devnw/codepros/geode/geode-client-go/-/issues/13) | **Closed** |
-| Error info disclosure | Info | [#17](https://gitlab.com/devnw/codepros/geode/geode-client-go/-/issues/17) | **Closed** |
+| Unbounded context (driver) | Low | [#13](https://gitlab.com/devnw/codepros/geode/geode-client-go/-/issues/13) | **Closed** |
+| No page_size upper bound | Low | [#19](https://gitlab.com/devnw/codepros/geode/geode-client-go/-/issues/19) | **Closed** |
+| Error info disclosure | Low | [#17](https://gitlab.com/devnw/codepros/geode/geode-client-go/-/issues/17) | **Closed** |
+| Unbounded context (benchmark) | Info | [#20](https://gitlab.com/devnw/codepros/geode/geode-client-go/-/issues/20) | **Closed** |
 
 ### CI/CD Security
 
@@ -272,41 +183,60 @@ The following 9 issues from the initial security review have been remediated:
 | Gitleaks allowlists tests | Low | [#15](https://gitlab.com/devnw/codepros/geode/geode-client-go/-/issues/15) | **Closed** |
 | YAML --unsafe flag | Info | [#16](https://gitlab.com/devnw/codepros/geode/geode-client-go/-/issues/16) | **Closed** |
 
-## Remediation Priority (All Complete)
+### Access Control
 
-### Quick Wins ✓
+| Finding | Severity | Issue | Status |
+|---------|----------|-------|--------|
+| CODEOWNERS incomplete | Info | [#21](https://gitlab.com/devnw/codepros/geode/geode-client-go/-/issues/21) | **Closed** |
 
-1. ~~**Remove binary from git** (#10)~~ - Done
-2. ~~**Remove test file allowlist from gitleaks** (#15)~~ - Done
-3. ~~**Enable gosec for test files** (#14)~~ - Done
+---
 
-### Medium Effort ✓
+## Remediation Status
 
-1. ~~**Pin CI component versions** (#12)~~ - Done
-2. ~~**Add client cert size limits** (#11)~~ - Done
-3. ~~**Add default timeouts to deprecated methods** (#13)~~ - Done
+### All Findings Closed ✓
 
-### Strategic/Documentation ✓
+All 21 security findings have been remediated and closed. The codebase has passed all security review checkpoints.
 
-1. ~~**Document YAML --unsafe rationale** (#16)~~ - Done
-2. ~~**Document error message contents** (#17)~~ - Done
+### Completed Remediations
+
+- ~~Remove binary from git~~ (#10)
+- ~~Pin CI component versions~~ (#12)
+- ~~Add client cert size limits~~ (#11)
+- ~~Add default timeouts to deprecated methods~~ (#13)
+- ~~Enable gosec for test files~~ (#14)
+- ~~Remove test file allowlist from gitleaks~~ (#15)
+- ~~Document YAML --unsafe rationale~~ (#16)
+- ~~Document error message contents~~ (#17)
+- ~~Pin Docker image versions~~ (#18) - Pinned to v1.0.0 in Makefile and integration_test.go
+- ~~Add page_size upper bound~~ (#19) - Added MaxPageSize (100000) constant and validation
+- ~~Add benchmark query timeout~~ (#20) - Added --query-timeout flag (default 30s)
+- ~~Expand CODEOWNERS~~ (#21) - Added security.go, transport.go, conn.go, config.go, errors.go, internal/validate/
+
+---
 
 ## Security Strengths
 
 The codebase demonstrates several security best practices:
 
-1. **TLS 1.3 Minimum** - `security.go:24` enforces `tls.VersionTLS13`
+1. **TLS 1.3 Minimum** - `security.go:28` enforces `tls.VersionTLS13`
 2. **Certificate Verification Default** - TLS verification enabled by default
-3. **Input Validation** - Query, parameter, hostname validation
-4. **Fuzz Testing** - Comprehensive fuzz tests (`fuzz_test.go`)
+3. **Input Validation** - Query, parameter, hostname validation (`internal/validate/`)
+4. **Fuzz Testing** - Comprehensive fuzz tests (`fuzz_test.go`) for parsers
 5. **No Shell Execution** - No use of `os/exec`
 6. **Safe JSON Handling** - Standard library JSON only
 7. **No Hardcoded Secrets** - No credentials in source
-8. **Security Scanning** - SAST, dependency scanning configured
-9. **SBOM Generation** - Supply chain visibility
-10. **CA Cert Size Limits** - Memory exhaustion protection (partial)
+8. **Security Scanning** - SAST, dependency scanning, gitleaks configured
+9. **SBOM Generation** - Supply chain visibility via CI
+10. **Cert Size Limits** - Memory exhaustion protection for all cert files
 11. **Connection Timeout** - `connect_timeout` option available
 12. **Race Detection** - Tests pass with `-race` flag
+13. **Default Timeouts** - Deprecated methods now have 30s timeouts
+14. **CODEOWNERS** - Security team review required for all security-sensitive files
+15. **Page Size Limits** - `MaxPageSize` (100000) prevents memory exhaustion
+16. **Supply Chain Pinning** - Docker images and CI components pinned to specific versions
+17. **Benchmark Timeouts** - `--query-timeout` flag prevents indefinite hangs
+
+---
 
 ## Threat Model Summary
 
@@ -316,42 +246,52 @@ The codebase demonstrates several security best practices:
 - Query data (potentially PII)
 - CI/CD secrets and artifacts
 - Connection metadata
+- Development environment (Docker images)
 
 ### Trust Boundaries
 
 1. **Client Application → Go Driver** - Trusted
 2. **Go Driver → QUIC/TLS → Geode Server** - Encrypted, verified
 3. **Configuration Sources** - DSN, environment variables, files
-4. **CI/CD Pipeline → External Components** - Partially trusted (mutable refs)
+4. **CI/CD Pipeline → External Components** - Pinned versions (secured)
+5. **Development → Docker Images** - Pinned to v1.0.0 (secured)
 
 ### Attacker Profiles
 
 - **Remote Unauthenticated** - Cannot exploit (TLS required)
-- **Application Developer** - Protected by warnings
-- **Supply Chain Attacker** - Risk via binary and @latest tags
-- **CI/Build Compromise** - Protected by allow_failure: false
+- **Application Developer** - Protected by warnings and secure defaults
+- **Supply Chain Attacker** - Risk mitigated by version pinning (CI and Docker images)
+- **CI/Build Compromise** - Protected by allow_failure: false and CODEOWNERS
+
+---
 
 ## Methodology
 
-### Automated Checks
+### Automated Checks (Round 2)
 
 - [x] Grep for dangerous patterns (exec, deserialization, path traversal)
 - [x] Binary file detection in repository
 - [x] CI component version analysis
+- [x] Docker image tag analysis (NEW)
 - [x] Lint configuration review
 - [x] Secret scanner configuration review
 - [x] Race detection (`go test -race`)
+- [x] Configuration validation bounds check (NEW)
+- [x] CODEOWNERS coverage analysis (NEW)
 
 ### Manual Review Areas
 
 - [x] TLS/Authentication configuration
-- [x] Input validation
+- [x] Input validation (including bounds checking)
 - [x] Error handling and information disclosure
 - [x] Concurrency/locking
 - [x] CI/CD pipeline security
-- [x] Supply chain (dependencies, CI components)
+- [x] Supply chain (dependencies, CI components, Docker images)
 - [x] Pre-commit hooks
-- [x] Example code security
+- [x] Example/benchmark code security
+- [x] Access control (CODEOWNERS)
+
+---
 
 ## Appendix: Files Reviewed
 
@@ -359,6 +299,7 @@ The codebase demonstrates several security best practices:
 
 - `*.go` - All Go source files
 - `internal/validate/input.go` - Input validation
+- `cmd/benchmark/main.go` - Benchmark CLI
 
 ### Configuration
 
@@ -368,6 +309,7 @@ The codebase demonstrates several security best practices:
 - `.pre-commit-config.yaml` - Pre-commit hooks
 - `Makefile` - Build configuration
 - `go.mod`, `go.sum` - Dependencies
+- `CODEOWNERS` - Code review requirements
 
 ### Documentation
 
