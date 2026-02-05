@@ -10,6 +10,12 @@ import (
 // MaxQueryLength is the maximum allowed query length (1MB).
 const MaxQueryLength = 1 << 20
 
+// MaxParamNameLength is the maximum allowed parameter name length.
+const MaxParamNameLength = 128
+
+// MaxHostnameLength is the maximum allowed hostname length per RFC 1035.
+const MaxHostnameLength = 253
+
 // Query validates and sanitizes a GQL query string.
 // It returns an error if the query contains invalid characters or exceeds size limits.
 func Query(query string) error {
@@ -50,11 +56,11 @@ func ParamName(name string) error {
 		return nil // Empty names are allowed (positional parameters)
 	}
 
-	if len(name) > 128 {
+	if len(name) > MaxParamNameLength {
 		return &ValidationError{
 			Field:   "param_name",
 			Value:   name,
-			Message: "parameter name too long (max 128 characters)",
+			Message: fmt.Sprintf("parameter name too long (max %d characters)", MaxParamNameLength),
 		}
 	}
 
@@ -100,7 +106,7 @@ func Hostname(host string) error {
 	}
 
 	// Basic validation - more specific validation happens at connection time
-	if len(host) > 253 {
+	if len(host) > MaxHostnameLength {
 		return &ValidationError{
 			Field:   "host",
 			Value:   host,

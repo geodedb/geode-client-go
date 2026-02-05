@@ -159,11 +159,27 @@ linters:
       path: _test\.go
       # Note: gosec intentionally NOT excluded from test files to detect
       # security issues like hardcoded credentials in test code.
+    # Exclude certain linters from example/benchmark CLI programs
+    # These programs intentionally use fmt.Print* for user output and have
+    # simplified code for demonstration purposes
+    - linters:
+      - forbidigo
+      - cyclop
+      - gochecknoglobals
+      - noctx
+      - mnd
+      - funlen
+      - gocognit
+      - gocritic
+      - sqlclosecheck
+      - rowserrcheck
+      path: ^(example|cmd/benchmark)/
     paths:
     - testdata
     - third_party$
     - builtin$
     - examples$
+    - example$
 issues:
   max-same-issues: 50
 formatters:

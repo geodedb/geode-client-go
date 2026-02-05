@@ -58,6 +58,9 @@ const (
 
 	// MaxQueryLength is the maximum allowed query length.
 	MaxQueryLength = 1 << 20 // 1MB
+
+	// DSN query parameter keys.
+	paramTLS = "tls"
 )
 
 // Config holds the configuration for a Geode connection.
@@ -317,6 +320,8 @@ func parseSimpleDSN(dsn string, cfg *Config) (*Config, error) {
 }
 
 // applyQueryParams applies URL query parameters to the config.
+//
+//nolint:gocognit,gocyclo,cyclop // This is a straightforward switch statement for parsing DSN parameters.
 func applyQueryParams(params url.Values, cfg *Config) error {
 	for key, values := range params {
 		if len(values) == 0 {
@@ -387,7 +392,7 @@ func applyQueryParams(params url.Values, cfg *Config) error {
 			}
 			cfg.ConnectTimeout = n
 
-		case "tls":
+		case paramTLS:
 			// tls=0 or tls=false disables TLS (gRPC only, for testing)
 			if val == "0" || val == "false" {
 				cfg.InsecureSkipVerify = true
@@ -407,7 +412,7 @@ func applyQueryParams(params url.Values, cfg *Config) error {
 	// Validate mTLS configuration
 	if (cfg.TLSCert != "" && cfg.TLSKey == "") || (cfg.TLSCert == "" && cfg.TLSKey != "") {
 		return &ConfigError{
-			Field:   "tls",
+			Field:   paramTLS,
 			Message: "both cert and key must be provided for mTLS",
 		}
 	}

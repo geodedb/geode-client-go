@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"sort"
 	"sync"
@@ -205,7 +206,9 @@ func main() {
 			"status":             result.Status,
 			"error_summary":      errCounts,
 		}
-		json.NewEncoder(os.Stdout).Encode(payload)
+		if err := json.NewEncoder(os.Stdout).Encode(payload); err != nil {
+			log.Fatalf("Failed to encode JSON output: %v", err)
+		}
 	} else {
 		fmt.Println("======================================================================")
 		fmt.Println("GO CLIENT BENCHMARK RESULTS")

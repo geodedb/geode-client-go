@@ -71,6 +71,8 @@ func main() {
 
 ## DSN Format
 
+> **Note**: See [`geode/docs/DSN.md`](../geode/docs/DSN.md) for the complete DSN specification.
+
 The driver supports multiple DSN formats with scheme-based transport selection:
 
 ```

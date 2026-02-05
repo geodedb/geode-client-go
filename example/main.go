@@ -92,7 +92,7 @@ func main() {
 	// Execute queries within transaction
 	_, err = tx.ExecContext(ctx, "RETURN 1")
 	if err != nil {
-		tx.Rollback()
+		_ = tx.Rollback() // Best effort rollback, original error is more important
 		log.Fatalf("Exec in transaction failed: %v", err)
 	}
 
