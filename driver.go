@@ -18,8 +18,9 @@
 //
 // The driver supports multiple DSN formats:
 //
-//	geode://host:port?options
-//	host:port?options
+//	quic://host:port?options (QUIC transport - recommended)
+//	grpc://host:port?options (gRPC transport)
+//	host:port?options (defaults to QUIC)
 //	host:port
 //	host
 //
@@ -41,7 +42,7 @@
 //
 // # Example
 //
-//	db, err := sql.Open("geode", "geode://localhost:3141?page_size=500")
+//	db, err := sql.Open("geode", "quic://localhost:3141?page_size=500")
 //	if err != nil {
 //	    log.Fatal(err)
 //	}

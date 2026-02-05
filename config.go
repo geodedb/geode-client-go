@@ -124,11 +124,11 @@ func (c *Config) Clone() *Config {
 
 // ParseDSN parses a data source name into a Config.
 //
+// See geode/docs/DSN.md for the complete DSN specification.
+//
 // Supported formats:
 //   - quic://host:port?options  (QUIC transport)
 //   - grpc://host:port?options  (gRPC transport)
-//   - grcp://host:port?options  (gRPC alias, deprecated)
-//   - geode://host:port?options (QUIC transport, legacy)
 //   - host:port?options         (QUIC transport, scheme-less)
 //   - host:port                 (QUIC transport)
 //   - host                      (QUIC transport, uses default port)
@@ -145,7 +145,7 @@ func (c *Config) Clone() *Config {
 //   - ca: Path to CA certificate
 //   - cert: Path to client certificate (for mTLS)
 //   - key: Path to client key (for mTLS)
-//   - insecure: Skip TLS verification (testing only, not recommended)
+//   - insecure_tls_skip_verify: Skip TLS verification (testing only, aliases: insecure, skip_verify)
 //   - tls: Enable/disable TLS ("0" or "false" to disable, gRPC only)
 //
 // Environment variables:
@@ -185,16 +185,20 @@ func ParseDSN(dsn string) (*Config, error) {
 		cfg.Transport = TransportQUIC
 		cfg.Port = DefaultPort
 		return parseURLDSN(dsn, cfg)
-	case strings.HasPrefix(dsn, "grpc://"), strings.HasPrefix(dsn, "grcp://"):
+	case strings.HasPrefix(dsn, "grpc://"):
 		cfg.Transport = TransportGRPC
 		cfg.Port = DefaultGRPCPort
 		return parseURLDSN(dsn, cfg)
-	case strings.HasPrefix(dsn, "geode://"):
-		// Legacy scheme - defaults to QUIC
-		cfg.Transport = TransportQUIC
-		cfg.Port = DefaultPort
-		return parseURLDSN(dsn, cfg)
 	default:
+		// Check for unsupported schemes
+		if idx := strings.Index(dsn, "://"); idx > 0 {
+			scheme := dsn[:idx]
+			return nil, &ConfigError{
+				Field:   "scheme",
+				Value:   scheme,
+				Message: "unsupported scheme, use quic:// or grpc://",
+			}
+		}
 		// Scheme-less - defaults to QUIC
 		cfg.Transport = TransportQUIC
 		cfg.Port = DefaultPort
@@ -369,8 +373,8 @@ func applyQueryParams(params url.Values, cfg *Config) error {
 		case "key":
 			cfg.TLSKey = val
 
-		case "insecure":
-			cfg.InsecureSkipVerify = val == "true" || val == "1"
+		case "insecure_tls_skip_verify", "insecure", "skip_verify":
+			cfg.InsecureSkipVerify = val == "true" || val == "1" || val == "yes" || val == "on"
 
 		case "connect_timeout":
 			n, err := strconv.Atoi(val)

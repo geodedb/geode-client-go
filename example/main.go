@@ -12,7 +12,7 @@ import (
 
 func main() {
 	// Connect to Geode server
-	// DSN format: host:port?options or geode://host:port?options
+	// DSN format: host:port?options or quic://host:port?options
 	//
 	// PRODUCTION (recommended): Use proper TLS certificates
 	//   db, err := sql.Open("geode", "localhost:3141?ca=/path/to/ca.crt")

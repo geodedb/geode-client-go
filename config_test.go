@@ -60,33 +60,20 @@ func TestParseDSN_Simple(t *testing.T) {
 	}
 }
 
-func TestParseDSN_URL(t *testing.T) {
-	tests := []struct {
-		dsn      string
-		host     string
-		port     string
-		pageSize int
-	}{
-		{"geode://localhost:3141", "localhost", "3141", DefaultPageSize},
-		{"geode://192.168.1.1:8080", "192.168.1.1", "8080", DefaultPageSize},
-		{"geode://myhost:3141?page_size=100", "myhost", "3141", 100},
-		{"geode://localhost", "localhost", DefaultPort, DefaultPageSize},
+func TestParseDSN_UnsupportedSchemes(t *testing.T) {
+	unsupportedSchemes := []string{
+		"geode://localhost:3141",
+		"grcp://localhost:50051",
+		"http://localhost:80",
+		"https://localhost:443",
+		"tcp://localhost:3141",
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.dsn, func(t *testing.T) {
-			cfg, err := ParseDSN(tt.dsn)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if cfg.Host != tt.host {
-				t.Errorf("expected host %q, got %q", tt.host, cfg.Host)
-			}
-			if cfg.Port != tt.port {
-				t.Errorf("expected port %q, got %q", tt.port, cfg.Port)
-			}
-			if cfg.PageSize != tt.pageSize {
-				t.Errorf("expected page_size %d, got %d", tt.pageSize, cfg.PageSize)
+	for _, dsn := range unsupportedSchemes {
+		t.Run(dsn, func(t *testing.T) {
+			_, err := ParseDSN(dsn)
+			if err == nil {
+				t.Errorf("expected error for unsupported scheme %q", dsn)
 			}
 		})
 	}
@@ -151,7 +138,7 @@ func TestParseDSN_QUICScheme(t *testing.T) {
 	}
 }
 
-// TestParseDSN_GRPCScheme tests the grpc:// and grcp:// DSN schemes.
+// TestParseDSN_GRPCScheme tests the grpc:// DSN scheme.
 // Acceptance test #2: grpc://127.0.0.1:50051?tls=0 => transport=GRPC, host=127.0.0.1, port=50051, tls disabled
 func TestParseDSN_GRPCScheme(t *testing.T) {
 	tests := []struct {
@@ -185,14 +172,6 @@ func TestParseDSN_GRPCScheme(t *testing.T) {
 			host:      "myhost",
 			port:      "50051",
 			insecure:  true,
-		},
-		{
-			name:      "alias grcp",
-			dsn:       "grcp://localhost:50051",
-			transport: TransportGRPC,
-			host:      "localhost",
-			port:      "50051",
-			insecure:  false,
 		},
 		{
 			name:      "default port",
@@ -504,9 +483,9 @@ func TestParseDSN_HostnameValidation(t *testing.T) {
 	}{
 		{"valid hostname", "localhost:3141", false},
 		{"valid IP", "192.168.1.1:3141", false},
-		{"valid URL hostname", "geode://myhost:3141", false},
+		{"valid URL hostname", "quic://myhost:3141", false},
 		{"null byte in simple DSN", "host\x00name:3141", true},
-		{"null byte in URL DSN", "geode://host\x00name:3141", true},
+		{"null byte in URL DSN", "quic://host\x00name:3141", true},
 	}
 
 	for _, tt := range tests {
@@ -575,6 +554,90 @@ func TestTransportType_String(t *testing.T) {
 	}
 	if TransportGRPC.String() != "grpc" {
 		t.Errorf("expected 'grpc', got %q", TransportGRPC.String())
+	}
+}
+
+// TestParseDSN_InsecureTLSSkipVerify tests the insecure_tls_skip_verify parameter
+// and its aliases (insecure, skip_verify).
+func TestParseDSN_InsecureTLSSkipVerify(t *testing.T) {
+	tests := []struct {
+		name     string
+		dsn      string
+		expected bool
+	}{
+		// Primary parameter name
+		{"insecure_tls_skip_verify=true", "localhost:3141?insecure_tls_skip_verify=true", true},
+		{"insecure_tls_skip_verify=1", "localhost:3141?insecure_tls_skip_verify=1", true},
+		{"insecure_tls_skip_verify=yes", "localhost:3141?insecure_tls_skip_verify=yes", true},
+		{"insecure_tls_skip_verify=on", "localhost:3141?insecure_tls_skip_verify=on", true},
+		{"insecure_tls_skip_verify=false", "localhost:3141?insecure_tls_skip_verify=false", false},
+		{"insecure_tls_skip_verify=0", "localhost:3141?insecure_tls_skip_verify=0", false},
+
+		// Alias: insecure
+		{"insecure=true", "localhost:3141?insecure=true", true},
+		{"insecure=1", "localhost:3141?insecure=1", true},
+		{"insecure=yes", "localhost:3141?insecure=yes", true},
+		{"insecure=on", "localhost:3141?insecure=on", true},
+		{"insecure=false", "localhost:3141?insecure=false", false},
+
+		// Alias: skip_verify
+		{"skip_verify=true", "localhost:3141?skip_verify=true", true},
+		{"skip_verify=1", "localhost:3141?skip_verify=1", true},
+		{"skip_verify=yes", "localhost:3141?skip_verify=yes", true},
+		{"skip_verify=on", "localhost:3141?skip_verify=on", true},
+		{"skip_verify=false", "localhost:3141?skip_verify=false", false},
+
+		// With URL scheme
+		{"quic with insecure_tls_skip_verify", "quic://localhost:3141?insecure_tls_skip_verify=true", true},
+		{"grpc with insecure_tls_skip_verify", "grpc://localhost:50051?insecure_tls_skip_verify=true", true},
+		{"simple dsn with skip_verify", "localhost:3141?skip_verify=true", true},
+
+		// Default (not set)
+		{"default", "localhost:3141", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := ParseDSN(tt.dsn)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.InsecureSkipVerify != tt.expected {
+				t.Errorf("InsecureSkipVerify = %v, want %v", cfg.InsecureSkipVerify, tt.expected)
+			}
+		})
+	}
+}
+
+// TestParseDSN_Credentials tests user/username and pass/password parameters.
+func TestParseDSN_Credentials(t *testing.T) {
+	tests := []struct {
+		name         string
+		dsn          string
+		wantUsername string
+		wantPassword string
+	}{
+		{"user and pass", "localhost:3141?user=admin&pass=secret", "admin", "secret"},
+		{"username and password", "localhost:3141?username=admin&password=secret", "admin", "secret"},
+		{"user only", "localhost:3141?user=admin", "admin", ""},
+		{"password only", "localhost:3141?password=secret", "", "secret"},
+		{"url scheme with creds", "quic://localhost:3141?user=admin&pass=secret", "admin", "secret"},
+		{"default", "localhost:3141", "", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := ParseDSN(tt.dsn)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.Username != tt.wantUsername {
+				t.Errorf("Username = %q, want %q", cfg.Username, tt.wantUsername)
+			}
+			if cfg.Password != tt.wantPassword {
+				t.Errorf("Password = %q, want %q", cfg.Password, tt.wantPassword)
+			}
+		})
 	}
 }
 

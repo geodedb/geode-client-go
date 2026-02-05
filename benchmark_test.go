@@ -27,7 +27,7 @@ func BenchmarkParseDSN_GRPC(b *testing.B) {
 
 func BenchmarkParseDSN_URL(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		_, _ = ParseDSN("geode://localhost:3141")
+		_, _ = ParseDSN("quic://localhost:3141")
 	}
 }
 
