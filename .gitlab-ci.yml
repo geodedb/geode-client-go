@@ -7,24 +7,23 @@
 # security regressions from being merged. Only optional stages (integration
 # tests requiring external services, SBOM scanning) may allow failure.
 #
-# Supply Chain Security: All CI components are pinned to major version tags
-# (e.g., @v1) to prevent automatic adoption of potentially compromised updates.
-# Review and update versions periodically. For maximum security, use commit SHAs.
+# Supply Chain Security: All CI components are pinned to specific versions
+# for supply chain security (CWE-1104). Review and update versions periodically.
 
 include:
-  # Pinned to v1 - update periodically after security review
-  - component: gitlab.com/devnw/ci-catalog/go-lint@v1
+  # Pinned to v1.11.0 for supply chain security
+  - component: gitlab.com/devnw/ci-catalog/go-lint@v1.11.0
     inputs:
       stage: lint
       # Lint includes gosec security checks - must not allow failure
       allow_failure: false
 
-  - component: gitlab.com/devnw/ci-catalog/go-build@v1
+  - component: gitlab.com/devnw/ci-catalog/go-build@v1.11.0
     inputs:
       go_version: "1.24.12"
       stage: build
 
-  - component: gitlab.com/devnw/ci-catalog/go-test@v1
+  - component: gitlab.com/devnw/ci-catalog/go-test@v1.11.0
     inputs:
       go_version: "1.24.12"
       stage: test
@@ -32,30 +31,30 @@ include:
       # require a running Geode server are skipped with -short.
       allow_failure: false
 
-  # Security scanning - pinned to v1
-  - component: gitlab.com/devnw/ci-catalog/security-sast@v1
+  # Security scanning - pinned to v1.11.0
+  - component: gitlab.com/devnw/ci-catalog/security-sast@v1.11.0
     inputs:
       stage: security
 
-  - component: gitlab.com/devnw/ci-catalog/security-dependency-scanning@v1
+  - component: gitlab.com/devnw/ci-catalog/security-dependency-scanning@v1.11.0
     inputs:
       stage: security
 
-  - component: gitlab.com/devnw/ci-catalog/security-secrets@v1
+  - component: gitlab.com/devnw/ci-catalog/security-secrets@v1.11.0
     inputs:
       stage: security
 
-  - component: gitlab.com/devnw/ci-catalog/security-gitleaks@v1
+  - component: gitlab.com/devnw/ci-catalog/security-gitleaks@v1.11.0
 
-  # SBOM generation and scanning - pinned to v1
-  - component: gitlab.com/devnw/ci-catalog/sbom-generate@v1
+  # SBOM generation and scanning - pinned to v1.11.0
+  - component: gitlab.com/devnw/ci-catalog/sbom-generate@v1.11.0
 
-  - component: gitlab.com/devnw/ci-catalog/sbom-scan@v1
+  - component: gitlab.com/devnw/ci-catalog/sbom-scan@v1.11.0
     inputs:
       allow_failure: false
 
-  # Release creation - pinned to v1
-  - component: gitlab.com/devnw/ci-catalog/release-semantic@v1
+  # Release creation - pinned to v1.11.0
+  - component: gitlab.com/devnw/ci-catalog/release-semantic@v1.11.0
     inputs:
       stage: release
 
