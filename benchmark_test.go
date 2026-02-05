@@ -4,11 +4,24 @@ import (
 	"testing"
 
 	"geodedb.com/geode/internal/validate"
+	"geodedb.com/geode/proto"
 )
 
 func BenchmarkParseDSN_Simple(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		_, _ = ParseDSN("localhost:3141")
+	}
+}
+
+func BenchmarkParseDSN_QUIC(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		_, _ = ParseDSN("quic://localhost:3141")
+	}
+}
+
+func BenchmarkParseDSN_GRPC(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		_, _ = ParseDSN("grpc://localhost:50051")
 	}
 }
 
@@ -25,60 +38,68 @@ func BenchmarkParseDSN_WithOptions(b *testing.B) {
 	}
 }
 
-func BenchmarkParseFrame_Schema(b *testing.B) {
-	data := []byte(`{"status_class":"00000","result":{"type":"SCHEMA","columns":[{"name":"x","type":"INT"},{"name":"y","type":"STRING"}]}}`)
+func BenchmarkProtoEncode_HelloRequest(b *testing.B) {
+	msg := &proto.QuicClientMessage{
+		Hello: &proto.HelloRequest{
+			Username: "testuser",
+			Password: "testpass",
+		},
+	}
 	for i := 0; i < b.N; i++ {
-		_, _ = ParseFrame(data)
+		_, _ = msg.Encode()
 	}
 }
 
-func BenchmarkParseFrame_Bindings(b *testing.B) {
-	data := []byte(`{"status_class":"00000","result":{"type":"BINDINGS","rows":[{"x":1,"y":"hello"},{"x":2,"y":"world"}],"final":true}}`)
+func BenchmarkProtoEncode_ExecuteRequest(b *testing.B) {
+	msg := &proto.QuicClientMessage{
+		Execute: &proto.ExecuteRequest{
+			SessionID: "session123",
+			Query:     "MATCH (n:Person)-[:KNOWS]->(m:Person) WHERE n.age > 30 RETURN n.name, m.name",
+			Parameters: map[string]string{
+				"param1": "value1",
+				"param2": "value2",
+			},
+		},
+	}
 	for i := 0; i < b.N; i++ {
-		_, _ = ParseFrame(data)
+		_, _ = msg.Encode()
 	}
 }
 
-func BenchmarkParseFrame_LargeBindings(b *testing.B) {
-	// Create a frame with many rows
-	data := []byte(`{"status_class":"00000","result":{"type":"BINDINGS","rows":[`)
-	for i := 0; i < 100; i++ {
-		if i > 0 {
-			data = append(data, ',')
-		}
-		data = append(data, `{"x":`...)
-		data = append(data, '0'+byte(i%10))
-		data = append(data, `}`...)
+func BenchmarkProtoDecode_HelloResponse(b *testing.B) {
+	// Create a sample HelloResponse
+	resp := &proto.HelloResponse{
+		Success:   true,
+		SessionID: "session123",
 	}
-	data = append(data, `],"final":true}}`...)
+	codec := proto.GeodeCodec{}
+	data, _ := codec.Marshal(resp)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = ParseFrame(data)
+		_, _ = proto.DecodeHelloResponse(data)
 	}
 }
 
-func BenchmarkBuildHelloMessage(b *testing.B) {
-	cfg := &Config{
-		HelloName:    "myapp",
-		HelloVersion: "1.0",
-		Conformance:  "min",
+func BenchmarkProtoDecode_ExecutionResponse(b *testing.B) {
+	// Create a sample ExecutionResponse with schema
+	str := "hello"
+	num := int64(42)
+	resp := &proto.ExecutionResponse{
+		Page: &proto.DataPage{
+			Rows: []proto.Row{
+				{Values: []proto.Value{{IntVal: &num}, {StringVal: &str}}},
+				{Values: []proto.Value{{IntVal: &num}, {StringVal: &str}}},
+			},
+			LastPage: true,
+		},
 	}
-	for i := 0; i < b.N; i++ {
-		_ = BuildHelloMessage(cfg)
-	}
-}
+	codec := proto.GeodeCodec{}
+	data, _ := codec.Marshal(resp)
 
-func BenchmarkBuildRunGQLMessage(b *testing.B) {
-	params := map[string]any{"x": 1, "y": "hello"}
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = BuildRunGQLMessage("MATCH (n) WHERE n.x = $x AND n.y = $y RETURN n", params)
-	}
-}
-
-func BenchmarkBuildPullMessage(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		_ = BuildPullMessage(1, 1000)
+		_, _ = proto.DecodeExecutionResponse(data)
 	}
 }
 
@@ -99,23 +120,6 @@ func BenchmarkValidateQuery_Medium(b *testing.B) {
 func BenchmarkValidateParamName(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		_ = validate.ParamName("user_name_123")
-	}
-}
-
-func BenchmarkConvertValue(b *testing.B) {
-	values := []any{
-		nil,
-		true,
-		float64(42),
-		float64(3.14),
-		"hello world",
-	}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		for _, v := range values {
-			_ = ConvertValue(v)
-		}
 	}
 }
 
@@ -154,8 +158,16 @@ func BenchmarkConfig_Clone(b *testing.B) {
 		HelloVersion: "1.0",
 		Conformance:  "min",
 		TLSCA:        "/path/to/ca.crt",
+		Transport:    TransportQUIC,
 	}
 	for i := 0; i < b.N; i++ {
 		_ = cfg.Clone()
+	}
+}
+
+func BenchmarkTransportType_String(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		_ = TransportQUIC.String()
+		_ = TransportGRPC.String()
 	}
 }

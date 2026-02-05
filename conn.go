@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"geodedb.com/geode/internal/validate"
+	"geodedb.com/geode/proto"
 )
 
 // defaultDeprecatedMethodTimeout is the default timeout for deprecated methods
@@ -29,19 +30,19 @@ type Conn struct {
 
 // tryReceiveInlineFrame attempts to read an extra frame already buffered (e.g., inline RUN+PULL).
 // Returns nil, nil if no buffered frame is available (this is not an error condition).
-func (c *Conn) tryReceiveInlineFrame(_ context.Context) (*Frame, error) {
+func (c *Conn) tryReceiveInlineFrame(_ context.Context) (*proto.ExecutionResponse, error) {
 	// Prefer a non-blocking buffered read to avoid partial line timeouts.
-	if data, ok, err := c.transport.TryReceiveBuffered(); err != nil {
+	msg, ok, err := c.transport.TryReceiveProtoBuffered()
+	if err != nil {
 		return nil, err
-	} else if ok {
-		frame, err := ParseFrame(data)
-		if err != nil {
-			return nil, err
-		}
-		return frame, nil
 	}
-
-	return nil, nil //nolint:nilnil // nil, nil indicates no frame available - this is expected
+	if !ok {
+		return nil, nil //nolint:nilnil // nil, nil indicates no frame available - this is expected
+	}
+	if msg.Execute != nil {
+		return msg.Execute, nil
+	}
+	return nil, nil //nolint:nilnil // message has no execute field
 }
 
 // Compile-time interface checks.
@@ -80,8 +81,21 @@ func connect(ctx context.Context, cfg *Config) (*Conn, error) {
 		defer cancel()
 	}
 
-	// Create transport
-	transport, err := NewQUICTransport(ctx, cfg)
+	// Create transport based on config
+	var transport Transport
+	var err error
+
+	switch cfg.Transport {
+	case TransportQUIC:
+		transport, err = NewQUICTransport(ctx, cfg)
+	case TransportGRPC:
+		transport, err = NewGRPCTransport(ctx, cfg)
+	default:
+		return nil, &ConfigError{
+			Field:   "transport",
+			Message: "unsupported transport type",
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -99,24 +113,31 @@ func connect(ctx context.Context, cfg *Config) (*Conn, error) {
 
 // hello performs the HELLO handshake with the server.
 func (c *Conn) hello(ctx context.Context) error {
-	msg := BuildHelloMessage(c.cfg)
-	if err := c.transport.Send(ctx, msg); err != nil {
+	msg := &proto.QuicClientMessage{
+		Hello: &proto.HelloRequest{
+			Username: c.cfg.Username,
+			Password: c.cfg.Password,
+		},
+	}
+	if err := c.transport.SendProto(ctx, msg); err != nil {
 		return fmt.Errorf("failed to send HELLO: %w", err)
 	}
 
 	// Read and validate HELLO response
-	data, err := c.transport.Receive(ctx)
+	resp, err := c.transport.ReceiveProto(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to receive HELLO response: %w", err)
 	}
 
-	frame, err := ParseFrame(data)
-	if err != nil {
-		return fmt.Errorf("failed to parse HELLO response: %w", err)
+	if resp.Hello == nil {
+		return fmt.Errorf("expected HELLO response")
 	}
 
-	if frame.IsError() {
-		return frame.ToError()
+	if !resp.Hello.Success {
+		return &DriverError{
+			Code:    "AUTH",
+			Message: resp.Hello.ErrorMessage,
+		}
 	}
 
 	return nil
@@ -189,7 +210,7 @@ func (c *Conn) Begin() (driver.Tx, error) {
 }
 
 // BeginTx starts a transaction with context and options.
-func (c *Conn) BeginTx(ctx context.Context, _ driver.TxOptions) (driver.Tx, error) {
+func (c *Conn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -206,23 +227,23 @@ func (c *Conn) BeginTx(ctx context.Context, _ driver.TxOptions) (driver.Tx, erro
 	}
 
 	// Send BEGIN
-	if err := c.transport.Send(ctx, BuildBeginMessage()); err != nil {
+	msg := &proto.QuicClientMessage{
+		Begin: &proto.BeginRequest{
+			ReadOnly: opts.ReadOnly,
+		},
+	}
+	if err := c.transport.SendProto(ctx, msg); err != nil {
 		return nil, err
 	}
 
 	// Read response
-	data, err := c.transport.Receive(ctx)
+	resp, err := c.transport.ReceiveProto(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	frame, err := ParseFrame(data)
-	if err != nil {
-		return nil, err
-	}
-
-	if frame.IsError() {
-		return nil, frame.ToError()
+	if resp.Begin == nil {
+		return nil, fmt.Errorf("expected BEGIN response")
 	}
 
 	c.inTx = true
@@ -255,34 +276,51 @@ func (c *Conn) ExecContext(ctx context.Context, query string, args []driver.Name
 	// Rewrite placeholders and build params
 	newQuery, params := rewritePlaceholders(query, args)
 
-	// Send RUN_GQL
-	if err := c.transport.Send(ctx, BuildRunGQLMessage(newQuery, params)); err != nil {
+	// Convert params to string map for protobuf
+	paramsProto := make(map[string]string)
+	for k, v := range params {
+		paramsProto[k] = fmt.Sprintf("%v", v)
+	}
+
+	// Send Execute
+	msg := &proto.QuicClientMessage{
+		Execute: &proto.ExecuteRequest{
+			Query:      newQuery,
+			Parameters: paramsProto,
+		},
+	}
+	if err := c.transport.SendProto(ctx, msg); err != nil {
 		return nil, err
 	}
 
 	// Read response
-	data, err := c.transport.Receive(ctx)
+	resp, err := c.transport.ReceiveProto(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	frame, err := ParseFrame(data)
-	if err != nil {
-		return nil, err
+	if resp.Execute == nil {
+		return nil, fmt.Errorf("expected Execute response")
 	}
 
-	if frame.IsError() {
-		return nil, frame.ToError()
+	if resp.Execute.Error != nil {
+		return nil, &DriverError{
+			Code:    resp.Execute.Error.Code,
+			Message: resp.Execute.Error.Message,
+		}
 	}
 
-	// Drain any inline BINDINGS frame to keep the stream in sync.
-	if frame.IsSchema() {
-		inlineFrame, err := c.tryReceiveInlineFrame(ctx)
+	// Drain any inline response to keep the stream in sync.
+	if resp.Execute.Schema != nil {
+		inlineResp, err := c.tryReceiveInlineFrame(ctx)
 		if err != nil {
 			return nil, err
 		}
-		if inlineFrame != nil && inlineFrame.IsError() {
-			return nil, inlineFrame.ToError()
+		if inlineResp != nil && inlineResp.Error != nil {
+			return nil, &DriverError{
+				Code:    inlineResp.Error.Code,
+				Message: inlineResp.Error.Message,
+			}
 		}
 	}
 
@@ -318,73 +356,83 @@ func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.Nam
 	// Rewrite placeholders and build params
 	newQuery, params := rewritePlaceholders(query, args)
 
-	// Send RUN_GQL
-	if err := c.transport.Send(ctx, BuildRunGQLMessage(newQuery, params)); err != nil {
+	// Convert params to string map for protobuf
+	paramsProto := make(map[string]string)
+	for k, v := range params {
+		paramsProto[k] = fmt.Sprintf("%v", v)
+	}
+
+	// Send Execute
+	msg := &proto.QuicClientMessage{
+		Execute: &proto.ExecuteRequest{
+			Query:      newQuery,
+			Parameters: paramsProto,
+		},
+	}
+	if err := c.transport.SendProto(ctx, msg); err != nil {
 		c.mu.Unlock()
 		return nil, err
 	}
 
-	// Read SCHEMA response
-	data, err := c.transport.Receive(ctx)
+	// Read response (could be schema, page, error, etc.)
+	resp, err := c.transport.ReceiveProto(ctx)
 	if err != nil {
 		c.mu.Unlock()
 		return nil, err
 	}
 
-	frame, err := ParseFrame(data)
-	if err != nil {
+	if resp.Execute == nil {
 		c.mu.Unlock()
-		return nil, err
+		return nil, fmt.Errorf("expected Execute response")
 	}
 
-	if frame.IsError() {
-		c.mu.Unlock()
-		return nil, frame.ToError()
-	}
+	execResp := resp.Execute
 
-	if !frame.IsSchema() {
+	if execResp.Error != nil {
 		c.mu.Unlock()
-		return nil, fmt.Errorf("geode: expected SCHEMA frame, got %s", frame.Result.Type)
-	}
-
-	// Build column info
-	columns := make([]ColumnInfo, len(frame.Result.Columns))
-	for i, col := range frame.Result.Columns {
-		columns[i] = ColumnInfo{
-			Name: col.Name,
-			Type: ParseGQLType(col.Type),
+		return nil, &DriverError{
+			Code:    execResp.Error.Code,
+			Message: execResp.Error.Message,
 		}
 	}
 
-	// Check for inline BINDINGS frame sent with RUN_GQL.
-	if inlineFrame, err := c.tryReceiveInlineFrame(ctx); err != nil {
+	// Build column info from schema
+	var columns []ColumnInfo
+	if execResp.Schema != nil {
+		columns = make([]ColumnInfo, len(execResp.Schema.Columns))
+		for i, col := range execResp.Schema.Columns {
+			columns[i] = ColumnInfo{
+				Name: col.Name,
+				Type: ParseGQLType(col.Type),
+			}
+		}
+	}
+
+	// Check for inline data page
+	if inlineResp, err := c.tryReceiveInlineFrame(ctx); err != nil {
 		c.mu.Unlock()
 		return nil, err
-	} else if inlineFrame != nil {
-		if inlineFrame.IsError() {
+	} else if inlineResp != nil {
+		if inlineResp.Error != nil {
 			c.mu.Unlock()
-			return nil, inlineFrame.ToError()
+			return nil, &DriverError{
+				Code:    inlineResp.Error.Code,
+				Message: inlineResp.Error.Message,
+			}
 		}
 
 		rows := &Rows{
-			conn:      c,
-			ctx:       ctx,
-			columns:   columns,
-			pageSize:  c.cfg.PageSize,
-			ordered:   inlineFrame.Result.Ordered,
-			orderKeys: inlineFrame.Result.OrderKeys,
+			conn:     c,
+			ctx:      ctx,
+			columns:  columns,
+			pageSize: c.cfg.PageSize,
 		}
 
-		switch inlineFrame.Result.Type {
-		case RespBindings:
-			rows.buffer = inlineFrame.Result.Rows
-			// Inline frames represent full results; treat as final by default.
+		if inlineResp.Page != nil {
+			rows.protoBuffer = inlineResp.Page.Rows
+			rows.final = inlineResp.Page.LastPage
+		} else {
 			rows.final = true
-		case RespProfile, RespResult, RespStatus:
-			rows.final = true
-		default:
-			c.mu.Unlock()
-			return nil, fmt.Errorf("geode: unexpected inline frame type: %s", inlineFrame.Result.Type)
 		}
 
 		c.activeRows = rows
@@ -392,49 +440,28 @@ func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.Nam
 		return rows, nil
 	}
 
-	// Send first PULL
-	if err := c.transport.Send(ctx, BuildPullMessage(1, c.cfg.PageSize)); err != nil {
-		c.mu.Unlock()
-		return nil, err
+	// If we got a page directly in the first response
+	if execResp.Page != nil {
+		rows := &Rows{
+			conn:        c,
+			ctx:         ctx,
+			columns:     columns,
+			pageSize:    c.cfg.PageSize,
+			protoBuffer: execResp.Page.Rows,
+			final:       execResp.Page.LastPage,
+		}
+		c.activeRows = rows
+		c.state = StateFetching
+		return rows, nil
 	}
 
-	// Read BINDINGS response
-	data, err = c.transport.Receive(ctx)
-	if err != nil {
-		c.mu.Unlock()
-		return nil, err
-	}
-
-	frame, err = ParseFrame(data)
-	if err != nil {
-		c.mu.Unlock()
-		return nil, err
-	}
-
-	if frame.IsError() {
-		c.mu.Unlock()
-		return nil, frame.ToError()
-	}
-
+	// Empty result set
 	rows := &Rows{
-		conn:      c,
-		ctx:       ctx,
-		columns:   columns,
-		pageSize:  c.cfg.PageSize,
-		ordered:   frame.Result.Ordered,
-		orderKeys: frame.Result.OrderKeys,
-	}
-
-	switch frame.Result.Type {
-	case RespBindings:
-		rows.buffer = frame.Result.Rows
-		rows.final = frame.Result.Final
-	case RespProfile, RespResult, RespStatus:
-		// No rows to return
-		rows.final = true
-	default:
-		c.mu.Unlock()
-		return nil, fmt.Errorf("geode: unexpected frame type after SCHEMA: %s", frame.Result.Type)
+		conn:     c,
+		ctx:      ctx,
+		columns:  columns,
+		pageSize: c.cfg.PageSize,
+		final:    true,
 	}
 
 	c.activeRows = rows
@@ -454,23 +481,25 @@ func (c *Conn) Ping(ctx context.Context) error {
 	}
 
 	// Send PING
-	if err := c.transport.Send(ctx, BuildPingMessage()); err != nil {
+	msg := &proto.QuicClientMessage{
+		Ping: &proto.PingRequest{},
+	}
+	if err := c.transport.SendProto(ctx, msg); err != nil {
 		return err
 	}
 
 	// Read response
-	data, err := c.transport.Receive(ctx)
+	resp, err := c.transport.ReceiveProto(ctx)
 	if err != nil {
 		return err
 	}
 
-	frame, err := ParseFrame(data)
-	if err != nil {
-		return err
+	if resp.Ping == nil {
+		return fmt.Errorf("expected PING response")
 	}
 
-	if frame.IsError() {
-		return frame.ToError()
+	if !resp.Ping.Ok {
+		return fmt.Errorf("ping failed")
 	}
 
 	return nil
@@ -487,22 +516,20 @@ func (c *Conn) ResetSession(ctx context.Context) error {
 
 	// If in transaction, rollback
 	if c.inTx {
-		if err := c.transport.Send(ctx, BuildRollbackMessage()); err != nil {
+		msg := &proto.QuicClientMessage{
+			Rollback: &proto.RollbackRequest{},
+		}
+		if err := c.transport.SendProto(ctx, msg); err != nil {
 			return err
 		}
 
-		data, err := c.transport.Receive(ctx)
+		resp, err := c.transport.ReceiveProto(ctx)
 		if err != nil {
 			return err
 		}
 
-		frame, err := ParseFrame(data)
-		if err != nil {
-			return err
-		}
-
-		if frame.IsError() {
-			return frame.ToError()
+		if resp.Rollback == nil {
+			return fmt.Errorf("expected ROLLBACK response")
 		}
 
 		c.inTx = false

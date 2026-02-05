@@ -2,15 +2,13 @@ package geode
 
 import (
 	"bufio"
-	"bytes"
 	"context"
-	"encoding/json"
-	"errors"
-	"fmt"
+	"encoding/binary"
 	"io"
 	"sync"
 	"time"
 
+	"geodedb.com/geode/proto"
 	"github.com/quic-go/quic-go"
 )
 
@@ -23,20 +21,20 @@ const (
 	quicInitialConnectionReceiveWindow = 8 * 1024 * 1024  // 8MB initial connection window
 	quicMaxConnectionReceiveWindow     = 32 * 1024 * 1024 // 32MB max connection window
 	quicReadBufferSize                 = 64 * 1024        // 64KB buffer
-	maxFrameSize                       = 32 * 1024 * 1024 // 32MB max frame size (JSON line)
+	lengthPrefixSize                   = 4                // 4-byte big-endian length prefix
 )
 
 // Transport defines the interface for communication with a Geode server.
 type Transport interface {
-	// Send writes a message to the server.
-	Send(ctx context.Context, msg map[string]any) error
+	// SendProto writes a protobuf message to the server.
+	SendProto(ctx context.Context, msg *proto.QuicClientMessage) error
 
-	// Receive reads a message from the server.
-	Receive(ctx context.Context) ([]byte, error)
+	// ReceiveProto reads a protobuf message from the server.
+	ReceiveProto(ctx context.Context) (*proto.QuicServerMessage, error)
 
-	// TryReceiveBuffered reads a message only if a full line is already buffered.
-	// Returns (nil, false, nil) when no complete line is buffered.
-	TryReceiveBuffered() ([]byte, bool, error)
+	// TryReceiveProtoBuffered reads a message only if enough data is already buffered.
+	// Returns (nil, false, nil) when no complete message is buffered.
+	TryReceiveProtoBuffered() (*proto.QuicServerMessage, bool, error)
 
 	// Close closes the transport.
 	Close() error
@@ -48,7 +46,7 @@ type Transport interface {
 	Addr() string
 }
 
-// QUICTransport implements Transport over QUIC with TLS.
+// QUICTransport implements Transport over QUIC with TLS using length-prefixed protobuf.
 type QUICTransport struct {
 	conn   *quic.Conn
 	stream *quic.Stream
@@ -57,6 +55,9 @@ type QUICTransport struct {
 	mu     sync.Mutex
 	closed bool
 	addr   string
+
+	// lenBuf is reused for reading length prefixes
+	lenBuf [4]byte
 }
 
 // NewQUICTransport creates a new QUIC transport to the Geode server.
@@ -120,8 +121,8 @@ func NewQUICTransport(ctx context.Context, cfg *Config) (*QUICTransport, error) 
 	return t, nil
 }
 
-// Send writes a JSON message to the server.
-func (t *QUICTransport) Send(ctx context.Context, msg map[string]any) error {
+// SendProto writes a length-prefixed protobuf message to the server.
+func (t *QUICTransport) SendProto(ctx context.Context, msg *proto.QuicClientMessage) error {
 	t.mu.Lock()
 	if t.closed {
 		t.mu.Unlock()
@@ -129,7 +130,8 @@ func (t *QUICTransport) Send(ctx context.Context, msg map[string]any) error {
 	}
 	t.mu.Unlock()
 
-	data, err := json.Marshal(msg)
+	// Encode the message
+	data, err := msg.Encode()
 	if err != nil {
 		return &TransportError{
 			Op:    "marshal",
@@ -137,7 +139,6 @@ func (t *QUICTransport) Send(ctx context.Context, msg map[string]any) error {
 			cause: err,
 		}
 	}
-	data = append(data, '\n')
 
 	// Set write deadline from context
 	if deadline, ok := ctx.Deadline(); ok {
@@ -158,8 +159,22 @@ func (t *QUICTransport) Send(ctx context.Context, msg map[string]any) error {
 	default:
 	}
 
+	// Write 4-byte length prefix (big endian)
+	var lenBuf [4]byte
+	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(data))) //nolint:gosec // message sizes are bounded
+	if _, err := t.stream.Write(lenBuf[:]); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return &TransportError{
+			Op:    "write_length",
+			Addr:  t.addr,
+			cause: err,
+		}
+	}
+
+	// Write message body
 	if _, err := t.stream.Write(data); err != nil {
-		// Check if context was cancelled
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -173,9 +188,9 @@ func (t *QUICTransport) Send(ctx context.Context, msg map[string]any) error {
 	return nil
 }
 
-// Receive reads a JSON line from the server.
+// ReceiveProto reads a length-prefixed protobuf message from the server.
 // Note: This is a blocking call. Use context deadline for timeout control.
-func (t *QUICTransport) Receive(ctx context.Context) ([]byte, error) {
+func (t *QUICTransport) ReceiveProto(ctx context.Context) (*proto.QuicServerMessage, error) {
 	t.mu.Lock()
 	if t.closed {
 		t.mu.Unlock()
@@ -202,13 +217,38 @@ func (t *QUICTransport) Receive(ctx context.Context) ([]byte, error) {
 	default:
 	}
 
-	// Simple blocking read with frame size limit
-	line, err := readLineLimited(t.br, maxFrameSize)
-	if err != nil {
+	// Read 4-byte length prefix (big endian)
+	if _, err := io.ReadFull(t.br, t.lenBuf[:]); err != nil {
 		if err == io.EOF {
 			return nil, io.EOF
 		}
-		// Check if context was cancelled during read
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, &TransportError{
+			Op:    "read_length",
+			Addr:  t.addr,
+			cause: err,
+		}
+	}
+
+	msgLen := binary.BigEndian.Uint32(t.lenBuf[:])
+
+	// Sanity check length (16MB max)
+	if msgLen > 16*1024*1024 {
+		return nil, &TransportError{
+			Op:    "read",
+			Addr:  t.addr,
+			cause: proto.ErrInvalidMessage,
+		}
+	}
+
+	// Read message body
+	msgBuf := make([]byte, msgLen)
+	if _, err := io.ReadFull(t.br, msgBuf); err != nil {
+		if err == io.EOF {
+			return nil, io.EOF
+		}
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -219,12 +259,22 @@ func (t *QUICTransport) Receive(ctx context.Context) ([]byte, error) {
 		}
 	}
 
-	return line, nil
+	// Decode protobuf message
+	msg, err := proto.DecodeQuicServerMessage(msgBuf)
+	if err != nil {
+		return nil, &TransportError{
+			Op:    "decode",
+			Addr:  t.addr,
+			cause: err,
+		}
+	}
+
+	return msg, nil
 }
 
-// TryReceiveBuffered reads a complete buffered line without touching the network.
-// This avoids partial reads/timeouts when probing for inline frames.
-func (t *QUICTransport) TryReceiveBuffered() ([]byte, bool, error) {
+// TryReceiveProtoBuffered reads a complete protobuf message if enough data is buffered.
+// This avoids blocking when probing for inline frames.
+func (t *QUICTransport) TryReceiveProtoBuffered() (*proto.QuicServerMessage, bool, error) {
 	t.mu.Lock()
 	if t.closed {
 		t.mu.Unlock()
@@ -233,11 +283,12 @@ func (t *QUICTransport) TryReceiveBuffered() ([]byte, bool, error) {
 	t.mu.Unlock()
 
 	buffered := t.br.Buffered()
-	if buffered == 0 {
+	if buffered < lengthPrefixSize {
 		return nil, false, nil
 	}
 
-	peeked, err := t.br.Peek(buffered)
+	// Peek length prefix
+	peeked, err := t.br.Peek(lengthPrefixSize)
 	if err != nil {
 		return nil, false, &TransportError{
 			Op:    "peek",
@@ -246,13 +297,25 @@ func (t *QUICTransport) TryReceiveBuffered() ([]byte, bool, error) {
 		}
 	}
 
-	idx := bytes.IndexByte(peeked, '\n')
-	if idx == -1 {
+	msgLen := binary.BigEndian.Uint32(peeked)
+
+	// Check if full message is buffered
+	if buffered < lengthPrefixSize+int(msgLen) {
 		return nil, false, nil
 	}
 
-	line, err := readLineLimited(t.br, maxFrameSize)
-	if err != nil {
+	// Read length prefix (we already peeked it)
+	if _, err := io.ReadFull(t.br, t.lenBuf[:]); err != nil {
+		return nil, false, &TransportError{
+			Op:    "read_length",
+			Addr:  t.addr,
+			cause: err,
+		}
+	}
+
+	// Read message body
+	msgBuf := make([]byte, msgLen)
+	if _, err := io.ReadFull(t.br, msgBuf); err != nil {
 		return nil, false, &TransportError{
 			Op:    "read_buffered",
 			Addr:  t.addr,
@@ -260,59 +323,17 @@ func (t *QUICTransport) TryReceiveBuffered() ([]byte, bool, error) {
 		}
 	}
 
-	return line, true, nil
-}
-
-// readLineLimited reads a single newline-delimited frame with a hard size limit.
-// The returned slice does not include the trailing newline.
-func readLineLimited(br *bufio.Reader, limit int) ([]byte, error) {
-	var buf bytes.Buffer
-	total := 0
-
-	for {
-		frag, err := br.ReadSlice('\n')
-		total += len(frag)
-		if total > limit+1 {
-			if errors.Is(err, bufio.ErrBufferFull) {
-				if derr := discardUntilNewline(br); derr != nil {
-					return nil, derr
-				}
-			}
-			return nil, &SecurityError{
-				Type:    "transport",
-				Message: fmt.Sprintf("frame exceeds maximum size of %d bytes", limit),
-			}
+	// Decode protobuf message
+	msg, err := proto.DecodeQuicServerMessage(msgBuf)
+	if err != nil {
+		return nil, false, &TransportError{
+			Op:    "decode",
+			Addr:  t.addr,
+			cause: err,
 		}
-
-		buf.Write(frag)
-
-		if err == nil {
-			break
-		}
-		if errors.Is(err, bufio.ErrBufferFull) {
-			continue
-		}
-		return nil, err
 	}
 
-	line := buf.Bytes()
-	if len(line) > 0 && line[len(line)-1] == '\n' {
-		line = line[:len(line)-1]
-	}
-	return line, nil
-}
-
-func discardUntilNewline(br *bufio.Reader) error {
-	for {
-		_, err := br.ReadSlice('\n')
-		if err == nil {
-			return nil
-		}
-		if errors.Is(err, bufio.ErrBufferFull) {
-			continue
-		}
-		return err
-	}
+	return msg, true, nil
 }
 
 // Close closes the transport.

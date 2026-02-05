@@ -3,9 +3,12 @@ package geode
 import (
 	"context"
 	"database/sql/driver"
+	"fmt"
 	"io"
 	"reflect"
 	"sync"
+
+	"geodedb.com/geode/proto"
 )
 
 // ColumnInfo holds metadata about a column.
@@ -21,11 +24,11 @@ type Rows struct {
 	columns  []ColumnInfo
 	pageSize int
 
-	buffer    []map[string]any
-	bufferIdx int
-	final     bool
-	ordered   bool
-	orderKeys []string
+	protoBuffer []proto.Row // Protobuf rows buffer
+	bufferIdx   int
+	final       bool
+	ordered     bool
+	orderKeys   []string
 
 	mu     sync.Mutex
 	closed bool
@@ -73,15 +76,15 @@ func (r *Rows) Next(dest []driver.Value) error {
 	r.mu.Unlock()
 
 	for {
-		// Check if we have buffered rows
-		if r.bufferIdx < len(r.buffer) {
-			row := r.buffer[r.bufferIdx]
+		// Check if we have buffered protobuf rows
+		if r.bufferIdx < len(r.protoBuffer) {
+			row := r.protoBuffer[r.bufferIdx]
 			r.bufferIdx++
 
 			// Copy values to dest
-			for i, col := range r.columns {
-				if v, ok := row[col.Name]; ok {
-					dest[i] = ConvertValue(v)
+			for i := range r.columns {
+				if i < len(row.Values) {
+					dest[i] = convertProtoValue(&row.Values[i])
 				} else {
 					dest[i] = nil
 				}
@@ -101,41 +104,55 @@ func (r *Rows) Next(dest []driver.Value) error {
 	}
 }
 
+// convertProtoValue converts a protobuf Value to a driver.Value.
+func convertProtoValue(v *proto.Value) driver.Value {
+	if v.NullVal {
+		return nil
+	}
+	if v.StringVal != nil {
+		return *v.StringVal
+	}
+	if v.IntVal != nil {
+		return *v.IntVal
+	}
+	if v.DoubleVal != nil {
+		return *v.DoubleVal
+	}
+	if v.BoolVal != nil {
+		return *v.BoolVal
+	}
+	return nil
+}
+
 // fetchNextPage fetches the next page of results from the server.
 func (r *Rows) fetchNextPage() error {
-	// Send PULL request
-	if err := r.conn.transport.Send(r.ctx, BuildPullMessage(1, r.pageSize)); err != nil {
-		return err
-	}
-
-	// Read response
-	data, err := r.conn.transport.Receive(r.ctx)
+	resp, err := r.conn.transport.ReceiveProto(r.ctx)
 	if err != nil {
 		return err
 	}
 
-	frame, err := ParseFrame(data)
-	if err != nil {
-		return err
-	}
-
-	// Check for errors
-	if frame.IsError() {
-		return frame.ToError()
-	}
-
-	if frame.Result.Type != RespBindings {
-		// Treat other types as end of results
+	if resp.Execute == nil {
 		r.final = true
 		return io.EOF
 	}
 
-	// Update buffer
-	r.buffer = frame.Result.Rows
-	r.bufferIdx = 0
-	r.final = frame.Result.Final
+	if resp.Execute.Error != nil {
+		return &DriverError{
+			Code:    resp.Execute.Error.Code,
+			Message: resp.Execute.Error.Message,
+		}
+	}
 
-	return nil
+	if resp.Execute.Page != nil {
+		r.protoBuffer = resp.Execute.Page.Rows
+		r.bufferIdx = 0
+		r.final = resp.Execute.Page.LastPage
+		return nil
+	}
+
+	// No more data
+	r.final = true
+	return fmt.Errorf("unexpected response type")
 }
 
 // ColumnTypeDatabaseTypeName returns the database type name for a column.

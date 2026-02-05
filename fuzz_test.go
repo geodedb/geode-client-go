@@ -4,18 +4,25 @@ import (
 	"testing"
 
 	"geodedb.com/geode/internal/validate"
+	"geodedb.com/geode/proto"
 )
 
 func FuzzParseDSN(f *testing.F) {
 	// Add seed corpus
 	f.Add("localhost:3141")
 	f.Add("geode://localhost:3141")
+	f.Add("quic://localhost:3141")
+	f.Add("grpc://localhost:50051")
+	f.Add("grcp://localhost:50051")
 	f.Add("localhost:3141?page_size=100")
-	f.Add("geode://host:8080?page_size=500&hello_name=test&insecure=true")
+	f.Add("quic://host:8080?page_size=500&hello_name=test&insecure=true")
+	f.Add("grpc://host:50051?tls=0")
 	f.Add("")
 	f.Add("host")
 	f.Add("192.168.1.1:3141")
-	f.Add("::1:3141")
+	f.Add("[::1]:3141")
+	f.Add("quic://[::1]:3141")
+	f.Add("grpc://[2001:db8::1]:50051")
 	f.Add("localhost:3141?ca=/path/to/ca.crt")
 	f.Add("localhost:3141?cert=/path/to/cert&key=/path/to/key")
 
@@ -34,31 +41,29 @@ func FuzzParseDSN(f *testing.F) {
 
 		// Clone should not panic
 		_ = cfg.Clone()
+
+		// Transport String should not panic
+		_ = cfg.Transport.String()
 	})
 }
 
-func FuzzParseFrame(f *testing.F) {
-	// Add seed corpus
-	f.Add([]byte(`{"status_class":"00000","result":{"type":"SCHEMA"}}`))
-	f.Add([]byte(`{"status_class":"00000","result":{"type":"BINDINGS","rows":[],"final":true}}`))
-	f.Add([]byte(`{"status_class":"42000","result":{"type":"ERROR","code":"US001"}}`))
-	f.Add([]byte(`{}`))
-	f.Add([]byte(`{"result":{}}`))
-	f.Add([]byte(`{"status_class":"00000","result":{"type":"BINDINGS","rows":[{"x":1}]}}`))
+func FuzzProtoDecodeServerMessage(f *testing.F) {
+	// Add seed corpus with valid protobuf-encoded messages
+	// Note: These are simple handcrafted byte sequences
+	f.Add([]byte{}) // Empty message
 
 	f.Fuzz(func(_ *testing.T, data []byte) {
-		// ParseFrame should never panic
-		frame, err := ParseFrame(data)
-		if err != nil {
-			return
-		}
+		// DecodeQuicServerMessage should never panic
+		_, _ = proto.DecodeQuicServerMessage(data)
+	})
+}
 
-		// These methods should never panic
-		_ = frame.IsError()
-		_ = frame.IsSchema()
-		_ = frame.IsBindings()
-		_ = frame.IsFinal()
-		_ = frame.ToError()
+func FuzzProtoDecodeExecutionResponse(f *testing.F) {
+	f.Add([]byte{})
+
+	f.Fuzz(func(_ *testing.T, data []byte) {
+		// DecodeExecutionResponse should never panic
+		_, _ = proto.DecodeExecutionResponse(data)
 	})
 }
 
@@ -88,19 +93,6 @@ func FuzzValidateParamName(f *testing.F) {
 	f.Fuzz(func(_ *testing.T, name string) {
 		// Should never panic
 		_ = validate.ParamName(name)
-	})
-}
-
-func FuzzConvertValue(f *testing.F) {
-	// Note: Go's fuzzer only supports basic types
-	// We can only fuzz with strings here
-
-	f.Fuzz(func(_ *testing.T, s string) {
-		// Should never panic
-		_ = ConvertValue(s)
-		_ = ConvertValue(nil)
-		_ = ConvertValue(true)
-		_ = ConvertValue(float64(42))
 	})
 }
 

@@ -5,7 +5,9 @@ A Go `database/sql` driver for the [Geode](https://github.com/devnw/geode) graph
 ## Features
 
 - Full `database/sql` driver implementation
-- QUIC transport with TLS 1.3
+- **Dual transport support**: QUIC (default) and gRPC
+- Protobuf wire protocol
+- TLS 1.3 security
 - Connection pooling via `database/sql`
 - Prepared statements
 - Transaction support
@@ -33,12 +35,15 @@ import (
 )
 
 func main() {
-    // Connect to Geode server
-    db, err := sql.Open("geode", "localhost:3141?ca=/path/to/ca.crt")
+    // Connect via QUIC (default)
+    db, err := sql.Open("geode", "quic://localhost:3141?ca=/path/to/ca.crt")
     if err != nil {
         log.Fatal(err)
     }
     defer db.Close()
+
+    // Or connect via gRPC
+    // db, err := sql.Open("geode", "grpc://localhost:50051?ca=/path/to/ca.crt")
 
     // Configure connection pool
     db.SetMaxOpenConns(10)
@@ -66,11 +71,36 @@ func main() {
 
 ## DSN Format
 
+The driver supports multiple DSN formats with scheme-based transport selection:
+
 ```
-geode://host:port?options
-host:port?options
+quic://host:port?options     # QUIC transport (recommended)
+grpc://host:port?options     # gRPC transport
+grcp://host:port?options     # gRPC alias (deprecated)
+geode://host:port?options    # QUIC transport (legacy)
+host:port?options            # QUIC transport (scheme-less)
 host:port
 host
+```
+
+### Transport Schemes
+
+| Scheme | Transport | Default Port | Description |
+|--------|-----------|--------------|-------------|
+| `quic://` | QUIC | 3141 | High-performance UDP-based transport |
+| `grpc://` | gRPC | 50051 | Standard gRPC over HTTP/2 |
+| `grcp://` | gRPC | 50051 | Alias for `grpc://` (deprecated) |
+| `geode://` | QUIC | 3141 | Legacy scheme, use `quic://` instead |
+| (none) | QUIC | 3141 | Scheme-less defaults to QUIC |
+
+### IPv6 Support
+
+IPv6 addresses are fully supported:
+
+```
+quic://[::1]:3141
+grpc://[2001:db8::1]:50051
+[::1]:3141
 ```
 
 ### Options
@@ -85,6 +115,9 @@ host
 | `cert` | Path to client certificate (mTLS) | |
 | `key` | Path to client key (mTLS) | |
 | `insecure` | Skip TLS verification (testing only) | false |
+| `tls` | Enable/disable TLS (`0` or `false` to disable) | enabled |
+| `user`/`username` | Authentication username | |
+| `pass`/`password` | Authentication password | |
 
 ### Environment Variables
 
@@ -172,8 +205,11 @@ safe := geode.Wtf8Lossy([]byte{0x61, 0x80, 0x62})
 # Unit tests (no server required)
 go test -v -short ./...
 
-# Integration tests with manual server
-GEODE_TEST_DSN="localhost:3141?insecure=true" go test -v ./...
+# Integration tests with manual server (QUIC)
+GEODE_TEST_DSN="quic://localhost:3141?insecure=true" go test -v ./...
+
+# Integration tests with manual server (gRPC)
+GEODE_TEST_DSN="grpc://localhost:50051?tls=0" go test -v ./...
 
 # Docker-based integration tests (recommended)
 go test -v -tags=integration ./...
@@ -253,6 +289,22 @@ DPLPMTUD probes for optimal MTU size, reducing per-packet overhead. It's enabled
 - Sends fewer than 10 probe packets over a connection's lifetime
 - Particularly beneficial on paths supporting MTUs larger than 1200 bytes
 - Configured via `quic.Config.DisablePathMTUDiscovery` (default: false)
+
+## Wire Protocol
+
+The driver uses Protocol Buffers (protobuf) for wire encoding over both QUIC and gRPC transports.
+
+### QUIC Transport
+
+- Length-prefixed protobuf messages (4-byte big-endian length prefix)
+- Single bidirectional stream per connection
+- TLS 1.3 with ALPN protocol `geode/1`
+
+### gRPC Transport
+
+- Standard gRPC over HTTP/2
+- Streaming responses for query execution
+- TLS 1.3 by default (can be disabled with `tls=0` for testing)
 
 ## Go Module Configuration
 

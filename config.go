@@ -10,9 +10,35 @@ import (
 	"geodedb.com/geode/internal/validate"
 )
 
+// TransportType specifies the transport protocol to use.
+type TransportType int
+
 const (
-	// DefaultPort is the default Geode server port.
+	// TransportQUIC uses QUIC transport with TLS 1.3 (default).
+	TransportQUIC TransportType = iota
+
+	// TransportGRPC uses gRPC transport.
+	TransportGRPC
+)
+
+// String returns the string representation of the transport type.
+func (t TransportType) String() string {
+	switch t {
+	case TransportQUIC:
+		return "quic"
+	case TransportGRPC:
+		return "grpc"
+	default:
+		return "unknown"
+	}
+}
+
+const (
+	// DefaultPort is the default Geode server port for QUIC.
 	DefaultPort = "3141"
+
+	// DefaultGRPCPort is the default Geode server port for gRPC.
+	DefaultGRPCPort = "50051"
 
 	// DefaultPageSize is the default number of rows per page.
 	DefaultPageSize = 1000
@@ -36,11 +62,20 @@ const (
 
 // Config holds the configuration for a Geode connection.
 type Config struct {
+	// Transport specifies the transport protocol (QUIC or gRPC).
+	Transport TransportType
+
 	// Host is the server hostname or IP address.
 	Host string
 
 	// Port is the server port.
 	Port string
+
+	// Username for authentication.
+	Username string
+
+	// Password for authentication.
+	Password string
 
 	// PageSize is the number of rows to fetch per page.
 	PageSize int
@@ -90,10 +125,17 @@ func (c *Config) Clone() *Config {
 // ParseDSN parses a data source name into a Config.
 //
 // Supported formats:
-//   - geode://host:port?options
-//   - host:port?options
-//   - host:port
-//   - host (uses default port)
+//   - quic://host:port?options  (QUIC transport)
+//   - grpc://host:port?options  (gRPC transport)
+//   - grcp://host:port?options  (gRPC alias, deprecated)
+//   - geode://host:port?options (QUIC transport, legacy)
+//   - host:port?options         (QUIC transport, scheme-less)
+//   - host:port                 (QUIC transport)
+//   - host                      (QUIC transport, uses default port)
+//
+// IPv6 hosts are supported:
+//   - quic://[::1]:3141
+//   - grpc://[2001:db8::1]:50051
 //
 // Supported options:
 //   - page_size: Results page size (default: 1000)
@@ -104,6 +146,7 @@ func (c *Config) Clone() *Config {
 //   - cert: Path to client certificate (for mTLS)
 //   - key: Path to client key (for mTLS)
 //   - insecure: Skip TLS verification (testing only, not recommended)
+//   - tls: Enable/disable TLS ("0" or "false" to disable, gRPC only)
 //
 // Environment variables:
 //   - GEODE_HOST: Default host if DSN is empty
@@ -111,6 +154,7 @@ func (c *Config) Clone() *Config {
 //   - GEODE_TLS_CA: Default CA certificate path
 func ParseDSN(dsn string) (*Config, error) {
 	cfg := &Config{
+		Transport:    TransportQUIC,
 		Host:         "localhost",
 		Port:         DefaultPort,
 		PageSize:     DefaultPageSize,
@@ -135,16 +179,30 @@ func ParseDSN(dsn string) (*Config, error) {
 		return cfg, nil
 	}
 
-	// Check for geode:// URL scheme
-	if strings.HasPrefix(dsn, "geode://") {
+	// Detect scheme
+	switch {
+	case strings.HasPrefix(dsn, "quic://"):
+		cfg.Transport = TransportQUIC
+		cfg.Port = DefaultPort
 		return parseURLDSN(dsn, cfg)
+	case strings.HasPrefix(dsn, "grpc://"), strings.HasPrefix(dsn, "grcp://"):
+		cfg.Transport = TransportGRPC
+		cfg.Port = DefaultGRPCPort
+		return parseURLDSN(dsn, cfg)
+	case strings.HasPrefix(dsn, "geode://"):
+		// Legacy scheme - defaults to QUIC
+		cfg.Transport = TransportQUIC
+		cfg.Port = DefaultPort
+		return parseURLDSN(dsn, cfg)
+	default:
+		// Scheme-less - defaults to QUIC
+		cfg.Transport = TransportQUIC
+		cfg.Port = DefaultPort
+		return parseSimpleDSN(dsn, cfg)
 	}
-
-	// Parse as host:port?options
-	return parseSimpleDSN(dsn, cfg)
 }
 
-// parseURLDSN parses a geode:// URL format DSN.
+// parseURLDSN parses a URL format DSN.
 func parseURLDSN(dsn string, cfg *Config) (*Config, error) {
 	u, err := url.Parse(dsn)
 	if err != nil {
@@ -164,9 +222,11 @@ func parseURLDSN(dsn string, cfg *Config) (*Config, error) {
 
 	host, port, err := net.SplitHostPort(u.Host)
 	if err != nil {
-		// No port specified, use the host as-is
+		// No port specified, use the host as-is with default port
 		host = u.Host
-		port = DefaultPort
+		// port already set to default based on scheme
+	} else {
+		cfg.Port = port
 	}
 
 	if host == "" {
@@ -186,7 +246,6 @@ func parseURLDSN(dsn string, cfg *Config) (*Config, error) {
 	}
 
 	cfg.Host = host
-	cfg.Port = port
 
 	// Parse query parameters
 	if err := applyQueryParams(u.Query(), cfg); err != nil {
@@ -205,13 +264,15 @@ func parseSimpleDSN(dsn string, cfg *Config) (*Config, error) {
 		dsn = dsn[:idx]
 	}
 
-	// Parse host:port
+	// Parse host:port (supports IPv6 in brackets)
 	if dsn != "" {
 		host, port, err := net.SplitHostPort(dsn)
 		if err != nil {
 			// No port specified, treat entire string as host
 			host = dsn
-			port = DefaultPort
+			// port already set to default
+		} else {
+			cfg.Port = port
 		}
 
 		if host == "" {
@@ -231,7 +292,6 @@ func parseSimpleDSN(dsn string, cfg *Config) (*Config, error) {
 		}
 
 		cfg.Host = host
-		cfg.Port = port
 	}
 
 	// Parse query parameters
@@ -323,6 +383,18 @@ func applyQueryParams(params url.Values, cfg *Config) error {
 			}
 			cfg.ConnectTimeout = n
 
+		case "tls":
+			// tls=0 or tls=false disables TLS (gRPC only, for testing)
+			if val == "0" || val == "false" {
+				cfg.InsecureSkipVerify = true
+			}
+
+		case "user", "username":
+			cfg.Username = val
+
+		case "pass", "password":
+			cfg.Password = val
+
 		default:
 			// Ignore unknown parameters for forward compatibility
 		}
@@ -389,5 +461,22 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	// Validate transport type
+	if c.Transport != TransportQUIC && c.Transport != TransportGRPC {
+		return &ConfigError{
+			Field:   "transport",
+			Message: "unsupported transport type",
+		}
+	}
+
 	return nil
+}
+
+// UnsupportedSchemeError is returned when an unsupported DSN scheme is used.
+type UnsupportedSchemeError struct {
+	Scheme string
+}
+
+func (e *UnsupportedSchemeError) Error() string {
+	return "geode: unsupported scheme: " + e.Scheme
 }

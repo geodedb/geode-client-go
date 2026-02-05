@@ -196,3 +196,25 @@ func readLimitedFile(path, label string) ([]byte, error) {
 
 	return data, nil
 }
+
+// loadCACertPool loads a CA certificate from a file path into a cert pool.
+func loadCACertPool(path string) (*x509.CertPool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, &SecurityError{
+			Type:    "tls",
+			Message: fmt.Sprintf("failed to read CA certificate: %s", path),
+			cause:   err,
+		}
+	}
+
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(data) {
+		return nil, &SecurityError{
+			Type:    "tls",
+			Message: fmt.Sprintf("failed to parse CA certificate: %s", path),
+		}
+	}
+
+	return pool, nil
+}

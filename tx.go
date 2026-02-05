@@ -3,7 +3,10 @@ package geode
 import (
 	"context"
 	"database/sql/driver"
+	"fmt"
 	"sync"
+
+	"geodedb.com/geode/proto"
 )
 
 // Tx represents a database transaction.
@@ -20,16 +23,20 @@ var _ driver.Tx = (*Tx)(nil)
 
 // Commit commits the transaction.
 func (t *Tx) Commit() error {
-	return t.finish(BuildCommitMessage())
+	return t.finish(&proto.QuicClientMessage{
+		Commit: &proto.CommitRequest{},
+	}, "commit")
 }
 
 // Rollback rolls back the transaction.
 func (t *Tx) Rollback() error {
-	return t.finish(BuildRollbackMessage())
+	return t.finish(&proto.QuicClientMessage{
+		Rollback: &proto.RollbackRequest{},
+	}, "rollback")
 }
 
 // finish executes either COMMIT or ROLLBACK and cleans up the transaction state.
-func (t *Tx) finish(msg map[string]any) error {
+func (t *Tx) finish(msg *proto.QuicClientMessage, opName string) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -45,23 +52,26 @@ func (t *Tx) finish(msg map[string]any) error {
 	}
 
 	// Send COMMIT or ROLLBACK
-	if err := t.conn.transport.Send(t.ctx, msg); err != nil {
+	if err := t.conn.transport.SendProto(t.ctx, msg); err != nil {
 		return err
 	}
 
 	// Read response
-	data, err := t.conn.transport.Receive(t.ctx)
+	resp, err := t.conn.transport.ReceiveProto(t.ctx)
 	if err != nil {
 		return err
 	}
 
-	frame, err := ParseFrame(data)
-	if err != nil {
-		return err
-	}
-
-	if frame.IsError() {
-		return frame.ToError()
+	// Check for expected response
+	switch opName {
+	case "commit":
+		if resp.Commit == nil {
+			return fmt.Errorf("expected COMMIT response")
+		}
+	case "rollback":
+		if resp.Rollback == nil {
+			return fmt.Errorf("expected ROLLBACK response")
+		}
 	}
 
 	t.done = true

@@ -1,0 +1,197 @@
+syntax = "proto3";
+package geode;
+
+option go_package = "geodedb.com/geode/proto";
+
+// GeodeService provides gRPC access to the Geode database.
+service GeodeService {
+  // Handshake performs authentication.
+  rpc Handshake(HelloRequest) returns (HelloResponse);
+
+  // Execute runs a GQL query and streams results.
+  rpc Execute(ExecuteRequest) returns (stream ExecutionResponse);
+
+  // Ping checks server health.
+  rpc Ping(PingRequest) returns (PingResponse);
+
+  // Begin starts a new transaction.
+  rpc Begin(BeginRequest) returns (BeginResponse);
+
+  // Commit commits the current transaction.
+  rpc Commit(CommitRequest) returns (CommitResponse);
+
+  // Rollback rolls back the current transaction.
+  rpc Rollback(RollbackRequest) returns (RollbackResponse);
+
+  // CDC diagnostics and control.
+  rpc GetCdcDiagnostics(CdcDiagnosticsRequest) returns (CdcDiagnosticsResponse);
+  rpc ControlCdc(CdcControlRequest) returns (CdcControlResponse);
+}
+
+// ----------------------------------------------------------------------------
+// QUIC Transport Wrappers (for length-prefixed framing over QUIC streams)
+// ----------------------------------------------------------------------------
+
+message QuicClientMessage {
+  oneof msg {
+    HelloRequest hello = 1;
+    ExecuteRequest execute = 2;
+    PingRequest ping = 3;
+    CdcDiagnosticsRequest cdc_diag = 4;
+    CdcControlRequest cdc_ctrl = 5;
+    BeginRequest begin = 6;
+    CommitRequest commit = 7;
+    RollbackRequest rollback = 8;
+  }
+}
+
+message QuicServerMessage {
+  oneof msg {
+    HelloResponse hello = 1;
+    ExecutionResponse execute = 2;
+    PingResponse ping = 3;
+    CdcDiagnosticsResponse cdc_diag = 4;
+    CdcControlResponse cdc_ctrl = 5;
+    BeginResponse begin = 6;
+    CommitResponse commit = 7;
+    RollbackResponse rollback = 8;
+  }
+}
+
+// ----------------------------------------------------------------------------
+// Authentication (HELLO)
+// ----------------------------------------------------------------------------
+
+message HelloRequest {
+  string username = 1;
+  string password = 2;
+  optional string tenant_id = 3;
+}
+
+message HelloResponse {
+  bool success = 1;
+  string session_id = 2;
+  string error_message = 3;
+  repeated string capabilities = 4;
+}
+
+// ----------------------------------------------------------------------------
+// Query Execution
+// ----------------------------------------------------------------------------
+
+message ExecuteRequest {
+  string session_id = 1;
+  string query = 2;
+  map<string, string> parameters = 3;
+}
+
+message ExecutionResponse {
+  oneof result {
+    SchemaDefinition schema = 1;
+    DataPage page = 2;
+    Error error = 3;
+    ExecutionMetrics metrics = 4;
+    Heartbeat heartbeat = 5;
+  }
+}
+
+message SchemaDefinition {
+  repeated ColumnDefinition columns = 1;
+}
+
+message ColumnDefinition {
+  string name = 1;
+  string type = 2;
+}
+
+message DataPage {
+  repeated Row rows = 1;
+  bool last_page = 2;
+}
+
+message Row {
+  repeated Value values = 1;
+}
+
+message Value {
+  oneof kind {
+    string string_val = 1;
+    int64 int_val = 2;
+    double double_val = 3;
+    bool bool_val = 4;
+    bool null_val = 5;
+  }
+}
+
+message Error {
+  string code = 1;
+  string message = 2;
+  string type = 3;
+}
+
+message ExecutionMetrics {
+  int64 parse_duration_ns = 1;
+  int64 plan_duration_ns = 2;
+  int64 execute_duration_ns = 3;
+  int64 total_duration_ns = 4;
+}
+
+message Heartbeat {}
+
+// ----------------------------------------------------------------------------
+// Utilities (PING)
+// ----------------------------------------------------------------------------
+
+message PingRequest {}
+
+message PingResponse {
+  bool ok = 1;
+}
+
+// ----------------------------------------------------------------------------
+// Transactions
+// ----------------------------------------------------------------------------
+
+message BeginRequest {
+  bool read_only = 1;
+  string session_id = 2;
+}
+
+message BeginResponse {
+  string session_id = 1;
+  string tx_id = 2;
+}
+
+message CommitRequest {
+  string session_id = 1;
+}
+
+message CommitResponse {
+  bool success = 1;
+}
+
+message RollbackRequest {
+  string session_id = 1;
+}
+
+message RollbackResponse {
+  bool success = 1;
+}
+
+// ----------------------------------------------------------------------------
+// CDC
+// ----------------------------------------------------------------------------
+
+message CdcDiagnosticsRequest {}
+
+message CdcDiagnosticsResponse {
+  string json_payload = 1;
+}
+
+message CdcControlRequest {
+  string action = 1;
+}
+
+message CdcControlResponse {
+  bool success = 1;
+}
