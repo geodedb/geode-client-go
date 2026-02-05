@@ -12,18 +12,18 @@
 
 include:
   # Pinned to v1.11.0 for supply chain security
-  - component: gitlab.com/devnw/ci-catalog/go-lint@v1.11.0
+  - component: gitlab.com/devnw/ci-catalog/go-lint@v1.9.15
     inputs:
       stage: lint
       # Lint includes gosec security checks - must not allow failure
       allow_failure: false
 
-  - component: gitlab.com/devnw/ci-catalog/go-build@v1.11.0
+  - component: gitlab.com/devnw/ci-catalog/go-build@v1.9.15
     inputs:
       go_version: "1.24.12"
       stage: build
 
-  - component: gitlab.com/devnw/ci-catalog/go-test@v1.11.0
+  - component: gitlab.com/devnw/ci-catalog/go-test@v1.9.15
     inputs:
       go_version: "1.24.12"
       stage: test
@@ -32,29 +32,29 @@ include:
       allow_failure: false
 
   # Security scanning - pinned to v1.11.0
-  - component: gitlab.com/devnw/ci-catalog/security-sast@v1.11.0
+  - component: gitlab.com/devnw/ci-catalog/security-sast@v1.9.15
     inputs:
       stage: security
 
-  - component: gitlab.com/devnw/ci-catalog/security-dependency-scanning@v1.11.0
+  - component: gitlab.com/devnw/ci-catalog/security-dependency-scanning@v1.9.15
     inputs:
       stage: security
 
-  - component: gitlab.com/devnw/ci-catalog/security-secrets@v1.11.0
+  - component: gitlab.com/devnw/ci-catalog/security-secrets@v1.9.15
     inputs:
       stage: security
 
-  - component: gitlab.com/devnw/ci-catalog/security-gitleaks@v1.11.0
+  - component: gitlab.com/devnw/ci-catalog/security-gitleaks@v1.9.15
 
   # SBOM generation and scanning - pinned to v1.11.0
-  - component: gitlab.com/devnw/ci-catalog/sbom-generate@v1.11.0
+  - component: gitlab.com/devnw/ci-catalog/sbom-generate@v1.9.15
 
-  - component: gitlab.com/devnw/ci-catalog/sbom-scan@v1.11.0
+  - component: gitlab.com/devnw/ci-catalog/sbom-scan@v1.9.15
     inputs:
       allow_failure: false
 
   # Release creation - pinned to v1.11.0
-  - component: gitlab.com/devnw/ci-catalog/release-semantic@v1.11.0
+  - component: gitlab.com/devnw/ci-catalog/release-semantic@v1.9.15
     inputs:
       stage: release
 
