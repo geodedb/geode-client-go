@@ -78,8 +78,6 @@ The driver supports multiple DSN formats with scheme-based transport selection:
 ```
 quic://host:port?options     # QUIC transport (recommended)
 grpc://host:port?options     # gRPC transport
-grcp://host:port?options     # gRPC alias (deprecated)
-geode://host:port?options    # QUIC transport (legacy)
 host:port?options            # QUIC transport (scheme-less)
 host:port
 host
@@ -91,8 +89,6 @@ host
 |--------|-----------|--------------|-------------|
 | `quic://` | QUIC | 3141 | High-performance UDP-based transport |
 | `grpc://` | gRPC | 50051 | Standard gRPC over HTTP/2 |
-| `grcp://` | gRPC | 50051 | Alias for `grpc://` (deprecated) |
-| `geode://` | QUIC | 3141 | Legacy scheme, use `quic://` instead |
 | (none) | QUIC | 3141 | Scheme-less defaults to QUIC |
 
 ### IPv6 Support
@@ -116,7 +112,7 @@ grpc://[2001:db8::1]:50051
 | `ca` | Path to CA certificate (must exist; no fallback) | |
 | `cert` | Path to client certificate (mTLS) | |
 | `key` | Path to client key (mTLS) | |
-| `insecure` | Skip TLS verification (testing only) | false |
+| `insecure_tls_skip_verify` | Skip TLS verification (testing only) | false |
 | `tls` | Enable/disable TLS (`0` or `false` to disable) | enabled |
 | `user`/`username` | Authentication username | |
 | `pass`/`password` | Authentication password | |
@@ -208,7 +204,7 @@ safe := geode.Wtf8Lossy([]byte{0x61, 0x80, 0x62})
 go test -v -short ./...
 
 # Integration tests with manual server (QUIC)
-GEODE_TEST_DSN="quic://localhost:3141?insecure=true" go test -v ./...
+GEODE_TEST_DSN="quic://localhost:3141?insecure_tls_skip_verify=true" go test -v ./...
 
 # Integration tests with manual server (gRPC)
 GEODE_TEST_DSN="grpc://localhost:50051?tls=0" go test -v ./...

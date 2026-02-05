@@ -94,11 +94,11 @@ The following issues were addressed in prior reviews (Rounds 1-2) and are closed
 
 | Issue | Title | Status |
 |-------|-------|--------|
-| <https://gitlab.com/devnw/codepros/geode/geode-client-go/-/issues/1> | Security: Benchmark tool defaults insecure=true (CWE-295) | Closed |
+| <https://gitlab.com/devnw/codepros/geode/geode-client-go/-/issues/1> | Security: Benchmark tool defaults insecure_tls_skip_verify=true (CWE-295) | Closed |
 | <https://gitlab.com/devnw/codepros/geode/geode-client-go/-/issues/2> | Security: Gitleaks allowlist disables scanning for all source files | Closed |
 | <https://gitlab.com/devnw/codepros/geode/geode-client-go/-/issues/3> | Security: Hostname validation function exists but is never called | Closed |
 | <https://gitlab.com/devnw/codepros/geode/geode-client-go/-/issues/4> | Security: Complex manual lock management in QueryContext may lead to lock leaks | Closed |
-| <https://gitlab.com/devnw/codepros/geode/geode-client-go/-/issues/5> | Security: Example code demonstrates insecure=true pattern | Closed |
+| <https://gitlab.com/devnw/codepros/geode/geode-client-go/-/issues/5> | Security: Example code demonstrates insecure_tls_skip_verify=true pattern | Closed |
 | <https://gitlab.com/devnw/codepros/geode/geode-client-go/-/issues/6> | Security: CI pipeline allows test failures without blocking | Closed |
 | <https://gitlab.com/devnw/codepros/geode/geode-client-go/-/issues/7> | Security: Pre-commit CI skips golangci-lint including gosec security checks | Closed |
 | <https://gitlab.com/devnw/codepros/geode/geode-client-go/-/issues/8> | Security: No size limit on certificate file loading | Closed |
