@@ -176,7 +176,7 @@ The driver uses Protocol Buffers (protobuf) for wire encoding over both transpor
 
 Docker-based integration tests in `integration_test.go` use `testcontainers-go` to automatically:
 
-- Pull and start a Geode container (`registry.gitlab.com/devnw/codepros/geode/geode:latest`)
+- Pull and start a Geode container (`geodedb/geode:latest`)
 - Run comprehensive test suite
 - Clean up after tests
 

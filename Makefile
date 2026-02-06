@@ -11,7 +11,7 @@ GOLANGCI_LINT ?= golangci-lint
 # SECURITY: Pin to specific version to prevent supply chain attacks via mutable tags
 # Update this version when upgrading the Geode server dependency
 DOCKER ?= docker
-GEODE_IMAGE ?= registry.gitlab.com/devnw/geode/geode:v1.0.0
+GEODE_IMAGE ?= geodedb/geode:latest
 GEODE_CONTAINER ?= geode-go-test
 GEODE_HOST ?= 127.0.0.1
 GEODE_PORT ?= 3141
@@ -105,7 +105,7 @@ help:
 	@echo "  GOFLAGS             - Additional flags for go commands"
 	@echo "  GEODE_HOST          - Geode server host (default: 127.0.0.1)"
 	@echo "  GEODE_PORT          - Geode server port (default: 3141)"
-	@echo "  GEODE_IMAGE         - Docker image (default: registry.gitlab.com/devnw/geode/geode:v1.0.0)"
+	@echo "  GEODE_IMAGE         - Docker image (default: geodedb/geode:latest)"
 	@echo "  GEODE_TEST_DSN      - DSN for manual server tests"
 	@echo "  FUZZ_TIME           - Fuzz test duration (default: 30s)"
 
