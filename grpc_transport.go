@@ -109,9 +109,9 @@ func (t *GRPCTransport) SendProto(ctx context.Context, msg *proto.QuicClientMess
 	t.mu.Unlock()
 
 	// Handle different message types via gRPC methods
-	switch {
-	case msg.Hello != nil:
-		resp, err := t.client.Handshake(ctx, msg.Hello)
+	switch m := msg.GetMsg().(type) {
+	case *proto.QuicClientMessage_Hello:
+		resp, err := t.client.Handshake(ctx, m.Hello)
 		if err != nil {
 			return &TransportError{
 				Op:    "handshake",
@@ -120,13 +120,15 @@ func (t *GRPCTransport) SendProto(ctx context.Context, msg *proto.QuicClientMess
 			}
 		}
 		t.mu.Lock()
-		t.sessionID = resp.SessionID
-		t.lastResponse = &proto.QuicServerMessage{Hello: resp}
+		t.sessionID = resp.GetSessionId()
+		t.lastResponse = &proto.QuicServerMessage{
+			Msg: &proto.QuicServerMessage_Hello{Hello: resp},
+		}
 		t.mu.Unlock()
 		return nil
 
-	case msg.Ping != nil:
-		resp, err := t.client.Ping(ctx, msg.Ping)
+	case *proto.QuicClientMessage_Ping:
+		resp, err := t.client.Ping(ctx, m.Ping)
 		if err != nil {
 			return &TransportError{
 				Op:    "ping",
@@ -135,14 +137,16 @@ func (t *GRPCTransport) SendProto(ctx context.Context, msg *proto.QuicClientMess
 			}
 		}
 		t.mu.Lock()
-		t.lastResponse = &proto.QuicServerMessage{Ping: resp}
+		t.lastResponse = &proto.QuicServerMessage{
+			Msg: &proto.QuicServerMessage_Ping{Ping: resp},
+		}
 		t.mu.Unlock()
 		return nil
 
-	case msg.Execute != nil:
+	case *proto.QuicClientMessage_Execute:
 		// Set session ID for gRPC
-		req := msg.Execute
-		req.SessionID = t.sessionID
+		req := m.Execute
+		req.SessionId = t.sessionID
 
 		stream, err := t.client.Execute(ctx, req)
 		if err != nil {
@@ -158,9 +162,9 @@ func (t *GRPCTransport) SendProto(ctx context.Context, msg *proto.QuicClientMess
 		t.mu.Unlock()
 		return nil
 
-	case msg.Begin != nil:
-		req := msg.Begin
-		req.SessionID = t.sessionID
+	case *proto.QuicClientMessage_Begin:
+		req := m.Begin
+		req.SessionId = t.sessionID
 
 		resp, err := t.client.Begin(ctx, req)
 		if err != nil {
@@ -171,13 +175,15 @@ func (t *GRPCTransport) SendProto(ctx context.Context, msg *proto.QuicClientMess
 			}
 		}
 		t.mu.Lock()
-		t.lastResponse = &proto.QuicServerMessage{Begin: resp}
+		t.lastResponse = &proto.QuicServerMessage{
+			Msg: &proto.QuicServerMessage_Begin{Begin: resp},
+		}
 		t.mu.Unlock()
 		return nil
 
-	case msg.Commit != nil:
-		req := msg.Commit
-		req.SessionID = t.sessionID
+	case *proto.QuicClientMessage_Commit:
+		req := m.Commit
+		req.SessionId = t.sessionID
 
 		resp, err := t.client.Commit(ctx, req)
 		if err != nil {
@@ -188,13 +194,15 @@ func (t *GRPCTransport) SendProto(ctx context.Context, msg *proto.QuicClientMess
 			}
 		}
 		t.mu.Lock()
-		t.lastResponse = &proto.QuicServerMessage{Commit: resp}
+		t.lastResponse = &proto.QuicServerMessage{
+			Msg: &proto.QuicServerMessage_Commit{Commit: resp},
+		}
 		t.mu.Unlock()
 		return nil
 
-	case msg.Rollback != nil:
-		req := msg.Rollback
-		req.SessionID = t.sessionID
+	case *proto.QuicClientMessage_Rollback:
+		req := m.Rollback
+		req.SessionId = t.sessionID
 
 		resp, err := t.client.Rollback(ctx, req)
 		if err != nil {
@@ -205,12 +213,14 @@ func (t *GRPCTransport) SendProto(ctx context.Context, msg *proto.QuicClientMess
 			}
 		}
 		t.mu.Lock()
-		t.lastResponse = &proto.QuicServerMessage{Rollback: resp}
+		t.lastResponse = &proto.QuicServerMessage{
+			Msg: &proto.QuicServerMessage_Rollback{Rollback: resp},
+		}
 		t.mu.Unlock()
 		return nil
 
-	case msg.CdcDiag != nil:
-		resp, err := t.client.GetCdcDiagnostics(ctx, msg.CdcDiag)
+	case *proto.QuicClientMessage_CdcDiag:
+		resp, err := t.client.GetCdcDiagnostics(ctx, m.CdcDiag)
 		if err != nil {
 			return &TransportError{
 				Op:    "cdc_diag",
@@ -219,12 +229,14 @@ func (t *GRPCTransport) SendProto(ctx context.Context, msg *proto.QuicClientMess
 			}
 		}
 		t.mu.Lock()
-		t.lastResponse = &proto.QuicServerMessage{CdcDiag: resp}
+		t.lastResponse = &proto.QuicServerMessage{
+			Msg: &proto.QuicServerMessage_CdcDiag{CdcDiag: resp},
+		}
 		t.mu.Unlock()
 		return nil
 
-	case msg.CdcCtrl != nil:
-		resp, err := t.client.ControlCdc(ctx, msg.CdcCtrl)
+	case *proto.QuicClientMessage_CdcCtrl:
+		resp, err := t.client.ControlCdc(ctx, m.CdcCtrl)
 		if err != nil {
 			return &TransportError{
 				Op:    "cdc_ctrl",
@@ -233,7 +245,9 @@ func (t *GRPCTransport) SendProto(ctx context.Context, msg *proto.QuicClientMess
 			}
 		}
 		t.mu.Lock()
-		t.lastResponse = &proto.QuicServerMessage{CdcCtrl: resp}
+		t.lastResponse = &proto.QuicServerMessage{
+			Msg: &proto.QuicServerMessage_CdcCtrl{CdcCtrl: resp},
+		}
 		t.mu.Unlock()
 		return nil
 
@@ -271,7 +285,9 @@ func (t *GRPCTransport) ReceiveProto(_ context.Context) (*proto.QuicServerMessag
 				cause: err,
 			}
 		}
-		return &proto.QuicServerMessage{Execute: resp}, nil
+		return &proto.QuicServerMessage{
+			Msg: &proto.QuicServerMessage_Execute{Execute: resp},
+		}, nil
 	}
 
 	return nil, fmt.Errorf("no response available")

@@ -37,3 +37,6 @@ bin/
 
 # Example binary (build with: go build -o example/example ./example)
 example/example
+
+# Protoc toolchain
+.tools/

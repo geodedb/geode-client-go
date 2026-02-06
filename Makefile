@@ -24,6 +24,7 @@ FUZZ_TIME ?= 30s
         fuzz fuzz-dsn fuzz-frame fuzz-query fuzz-param fuzz-value fuzz-type \
         docker-start docker-stop docker-logs docker-status docker-pull docker-wait \
         pre-commit pre-commit-install pre-commit-run pre-commit-update \
+        generate-proto \
         help deps update tidy
 
 # Default target - run everything (except integration tests which require server)
@@ -139,6 +140,30 @@ update:
 	$(GO) get -u ./...
 	$(GO) mod tidy
 	@echo "✓ Dependencies updated"
+
+# =============================================================================
+# Proto Generation
+# =============================================================================
+
+# Protobuf settings
+PROTOC ?= .tools/protoc/bin/protoc
+CANONICAL_PROTO ?= ../geode/src/proto/geode.proto
+
+generate-proto:
+	@echo "Generating Go protobuf code from canonical proto..."
+	@if [ -f "$(CANONICAL_PROTO)" ]; then \
+		echo "  Copying canonical proto from $(CANONICAL_PROTO)"; \
+		cp "$(CANONICAL_PROTO)" proto/geode.proto; \
+	fi
+	$(PROTOC) \
+		--proto_path=proto \
+		--go_out=proto \
+		--go_opt=paths=source_relative \
+		--go-grpc_out=proto \
+		--go-grpc_opt=paths=source_relative \
+		proto/geode.proto
+	@echo "Generated files:"
+	@ls -la proto/geode.pb.go proto/geode_grpc.pb.go
 
 # =============================================================================
 # Test Targets

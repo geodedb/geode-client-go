@@ -28,21 +28,62 @@ type Conn struct {
 	activeRows *Rows
 }
 
-// tryReceiveInlineFrame attempts to read an extra frame already buffered (e.g., inline RUN+PULL).
-// Returns nil, nil if no buffered frame is available (this is not an error condition).
-func (c *Conn) tryReceiveInlineFrame(_ context.Context) (*proto.ExecutionResponse, error) {
-	// Prefer a non-blocking buffered read to avoid partial line timeouts.
-	msg, ok, err := c.transport.TryReceiveProtoBuffered()
-	if err != nil {
-		return nil, err
+// drainExecStream reads all remaining ExecutionResponse frames from the stream
+// until the execution is complete (final data page + optional metrics/heartbeat).
+// This MUST be called when ExecContext gets a schema or non-final page to keep
+// the single bidirectional QUIC stream in sync.
+func (c *Conn) drainExecStream(ctx context.Context, first *proto.ExecutionResponse) error {
+	gotFinal := first.GetPage() != nil && first.GetPage().GetFinal()
+
+	// Check if the first response already has a final page
+
+	for !gotFinal {
+		// Blocking read for data page (server always sends one after schema)
+		resp, err := c.transport.ReceiveProto(ctx)
+		if err != nil {
+			return err
+		}
+		execResp := resp.GetExecute()
+		if execResp == nil {
+			break // Non-execute response, stop
+		}
+		if execResp.GetError() != nil {
+			return &DriverError{
+				Code:    execResp.GetError().GetCode(),
+				Message: execResp.GetError().GetMessage(),
+			}
+		}
+		if execResp.GetPage() != nil && execResp.GetPage().GetFinal() {
+			gotFinal = true
+		}
+		// If it's metrics or heartbeat, loop to read next
+		if execResp.GetMetrics() != nil || execResp.GetHeartbeat() != nil {
+			break
+		}
 	}
-	if !ok {
-		return nil, nil //nolint:nilnil // nil, nil indicates no frame available - this is expected
+
+	// After final data page, drain any additional frames (metrics, heartbeat)
+	// that may already be buffered.
+	for {
+		msg, ok, err := c.transport.TryReceiveProtoBuffered()
+		if err != nil {
+			return err
+		}
+		if !ok {
+			break // No more buffered data
+		}
+		execResp := msg.GetExecute()
+		if execResp == nil {
+			break // Non-execute message, stop
+		}
+		// Continue draining metrics/heartbeat frames
+		if execResp.GetMetrics() != nil || execResp.GetHeartbeat() != nil {
+			continue
+		}
+		break
 	}
-	if msg.Execute != nil {
-		return msg.Execute, nil
-	}
-	return nil, nil //nolint:nilnil // message has no execute field
+
+	return nil
 }
 
 // Compile-time interface checks.
@@ -113,12 +154,10 @@ func connect(ctx context.Context, cfg *Config) (*Conn, error) {
 
 // hello performs the HELLO handshake with the server.
 func (c *Conn) hello(ctx context.Context) error {
-	msg := &proto.QuicClientMessage{
-		Hello: &proto.HelloRequest{
-			Username: c.cfg.Username,
-			Password: c.cfg.Password,
-		},
-	}
+	msg := proto.NewHelloMessage(&proto.HelloRequest{
+		Username: c.cfg.Username,
+		Password: c.cfg.Password,
+	})
 	if err := c.transport.SendProto(ctx, msg); err != nil {
 		return fmt.Errorf("failed to send HELLO: %w", err)
 	}
@@ -129,14 +168,15 @@ func (c *Conn) hello(ctx context.Context) error {
 		return fmt.Errorf("failed to receive HELLO response: %w", err)
 	}
 
-	if resp.Hello == nil {
+	helloResp := resp.GetHello()
+	if helloResp == nil {
 		return fmt.Errorf("expected HELLO response")
 	}
 
-	if !resp.Hello.Success {
+	if !helloResp.GetSuccess() {
 		return &DriverError{
 			Code:    "AUTH",
-			Message: resp.Hello.ErrorMessage,
+			Message: helloResp.GetErrorMessage(),
 		}
 	}
 
@@ -227,11 +267,9 @@ func (c *Conn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, e
 	}
 
 	// Send BEGIN
-	msg := &proto.QuicClientMessage{
-		Begin: &proto.BeginRequest{
-			ReadOnly: opts.ReadOnly,
-		},
-	}
+	msg := proto.NewBeginMessage(&proto.BeginRequest{
+		ReadOnly: opts.ReadOnly,
+	})
 	if err := c.transport.SendProto(ctx, msg); err != nil {
 		return nil, err
 	}
@@ -242,7 +280,7 @@ func (c *Conn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, e
 		return nil, err
 	}
 
-	if resp.Begin == nil {
+	if resp.GetBegin() == nil {
 		return nil, fmt.Errorf("expected BEGIN response")
 	}
 
@@ -276,19 +314,17 @@ func (c *Conn) ExecContext(ctx context.Context, query string, args []driver.Name
 	// Rewrite placeholders and build params
 	newQuery, params := rewritePlaceholders(query, args)
 
-	// Convert params to string map for protobuf
-	paramsProto := make(map[string]string)
+	// Convert params to Param slice for protobuf
+	var protoParams []*proto.Param
 	for k, v := range params {
-		paramsProto[k] = fmt.Sprintf("%v", v)
+		protoParams = append(protoParams, proto.MakeParam(k, v))
 	}
 
 	// Send Execute
-	msg := &proto.QuicClientMessage{
-		Execute: &proto.ExecuteRequest{
-			Query:      newQuery,
-			Parameters: paramsProto,
-		},
-	}
+	msg := proto.NewExecuteMessage(&proto.ExecuteRequest{
+		Query:  newQuery,
+		Params: protoParams,
+	})
 	if err := c.transport.SendProto(ctx, msg); err != nil {
 		return nil, err
 	}
@@ -299,28 +335,24 @@ func (c *Conn) ExecContext(ctx context.Context, query string, args []driver.Name
 		return nil, err
 	}
 
-	if resp.Execute == nil {
+	execResp := resp.GetExecute()
+	if execResp == nil {
 		return nil, fmt.Errorf("expected Execute response")
 	}
 
-	if resp.Execute.Error != nil {
+	if execResp.GetError() != nil {
 		return nil, &DriverError{
-			Code:    resp.Execute.Error.Code,
-			Message: resp.Execute.Error.Message,
+			Code:    execResp.GetError().GetCode(),
+			Message: execResp.GetError().GetMessage(),
 		}
 	}
 
-	// Drain any inline response to keep the stream in sync.
-	if resp.Execute.Schema != nil {
-		inlineResp, err := c.tryReceiveInlineFrame(ctx)
-		if err != nil {
+	// Drain the full execution response stream (schema → data page → metrics).
+	// The server always sends at least a data page after schema.
+	// After the final data page, the server may send a metrics frame.
+	if execResp.GetSchema() != nil || execResp.GetPage() != nil {
+		if err := c.drainExecStream(ctx, execResp); err != nil {
 			return nil, err
-		}
-		if inlineResp != nil && inlineResp.Error != nil {
-			return nil, &DriverError{
-				Code:    inlineResp.Error.Code,
-				Message: inlineResp.Error.Message,
-			}
 		}
 	}
 
@@ -356,19 +388,17 @@ func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.Nam
 	// Rewrite placeholders and build params
 	newQuery, params := rewritePlaceholders(query, args)
 
-	// Convert params to string map for protobuf
-	paramsProto := make(map[string]string)
+	// Convert params to Param slice for protobuf
+	var protoParams []*proto.Param
 	for k, v := range params {
-		paramsProto[k] = fmt.Sprintf("%v", v)
+		protoParams = append(protoParams, proto.MakeParam(k, v))
 	}
 
 	// Send Execute
-	msg := &proto.QuicClientMessage{
-		Execute: &proto.ExecuteRequest{
-			Query:      newQuery,
-			Parameters: paramsProto,
-		},
-	}
+	msg := proto.NewExecuteMessage(&proto.ExecuteRequest{
+		Query:  newQuery,
+		Params: protoParams,
+	})
 	if err := c.transport.SendProto(ctx, msg); err != nil {
 		c.mu.Unlock()
 		return nil, err
@@ -381,43 +411,46 @@ func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.Nam
 		return nil, err
 	}
 
-	if resp.Execute == nil {
+	execResp := resp.GetExecute()
+	if execResp == nil {
 		c.mu.Unlock()
 		return nil, fmt.Errorf("expected Execute response")
 	}
 
-	execResp := resp.Execute
-
-	if execResp.Error != nil {
+	if execResp.GetError() != nil {
 		c.mu.Unlock()
 		return nil, &DriverError{
-			Code:    execResp.Error.Code,
-			Message: execResp.Error.Message,
+			Code:    execResp.GetError().GetCode(),
+			Message: execResp.GetError().GetMessage(),
 		}
 	}
 
 	// Build column info from schema
 	var columns []ColumnInfo
-	if execResp.Schema != nil {
-		columns = make([]ColumnInfo, len(execResp.Schema.Columns))
-		for i, col := range execResp.Schema.Columns {
+	if execResp.GetSchema() != nil {
+		columns = make([]ColumnInfo, len(execResp.GetSchema().GetColumns()))
+		for i, col := range execResp.GetSchema().GetColumns() {
 			columns[i] = ColumnInfo{
-				Name: col.Name,
-				Type: ParseGQLType(col.Type),
+				Name: col.GetName(),
+				Type: ParseGQLType(col.GetType()),
 			}
 		}
 	}
 
-	// Check for inline data page
-	if inlineResp, err := c.tryReceiveInlineFrame(ctx); err != nil {
-		c.mu.Unlock()
-		return nil, err
-	} else if inlineResp != nil {
-		if inlineResp.Error != nil {
+	// If the first response was a schema, we need to read the data page next.
+	// Use a blocking read since the server always sends a data page after schema.
+	if execResp.GetSchema() != nil {
+		pageResp, err := c.transport.ReceiveProto(ctx)
+		if err != nil {
+			c.mu.Unlock()
+			return nil, err
+		}
+		pageExecResp := pageResp.GetExecute()
+		if pageExecResp != nil && pageExecResp.GetError() != nil {
 			c.mu.Unlock()
 			return nil, &DriverError{
-				Code:    inlineResp.Error.Code,
-				Message: inlineResp.Error.Message,
+				Code:    pageExecResp.GetError().GetCode(),
+				Message: pageExecResp.GetError().GetMessage(),
 			}
 		}
 
@@ -428,9 +461,9 @@ func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.Nam
 			pageSize: c.cfg.PageSize,
 		}
 
-		if inlineResp.Page != nil {
-			rows.protoBuffer = inlineResp.Page.Rows
-			rows.final = inlineResp.Page.LastPage
+		if pageExecResp != nil && pageExecResp.GetPage() != nil {
+			rows.protoBuffer = pageExecResp.GetPage().GetRows()
+			rows.final = pageExecResp.GetPage().GetFinal()
 		} else {
 			rows.final = true
 		}
@@ -441,14 +474,14 @@ func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.Nam
 	}
 
 	// If we got a page directly in the first response
-	if execResp.Page != nil {
+	if execResp.GetPage() != nil {
 		rows := &Rows{
 			conn:        c,
 			ctx:         ctx,
 			columns:     columns,
 			pageSize:    c.cfg.PageSize,
-			protoBuffer: execResp.Page.Rows,
-			final:       execResp.Page.LastPage,
+			protoBuffer: execResp.GetPage().GetRows(),
+			final:       execResp.GetPage().GetFinal(),
 		}
 		c.activeRows = rows
 		c.state = StateFetching
@@ -481,9 +514,7 @@ func (c *Conn) Ping(ctx context.Context) error {
 	}
 
 	// Send PING
-	msg := &proto.QuicClientMessage{
-		Ping: &proto.PingRequest{},
-	}
+	msg := proto.NewPingMessage(&proto.PingRequest{})
 	if err := c.transport.SendProto(ctx, msg); err != nil {
 		return err
 	}
@@ -494,11 +525,12 @@ func (c *Conn) Ping(ctx context.Context) error {
 		return err
 	}
 
-	if resp.Ping == nil {
+	pingResp := resp.GetPing()
+	if pingResp == nil {
 		return fmt.Errorf("expected PING response")
 	}
 
-	if !resp.Ping.Ok {
+	if !pingResp.GetOk() {
 		return fmt.Errorf("ping failed")
 	}
 
@@ -516,9 +548,7 @@ func (c *Conn) ResetSession(ctx context.Context) error {
 
 	// If in transaction, rollback
 	if c.inTx {
-		msg := &proto.QuicClientMessage{
-			Rollback: &proto.RollbackRequest{},
-		}
+		msg := proto.NewRollbackMessage(&proto.RollbackRequest{})
 		if err := c.transport.SendProto(ctx, msg); err != nil {
 			return err
 		}
@@ -528,7 +558,7 @@ func (c *Conn) ResetSession(ctx context.Context) error {
 			return err
 		}
 
-		if resp.Rollback == nil {
+		if resp.GetRollback() == nil {
 			return fmt.Errorf("expected ROLLBACK response")
 		}
 
@@ -610,6 +640,23 @@ func countPlaceholders(query string) int {
 // releaseRows is called by Rows.Close() to release the lock and update state.
 func (c *Conn) releaseRows(r *Rows) {
 	if c.activeRows == r {
+		// Drain any remaining frames (metrics, heartbeat) left in the stream
+		// after the final data page was read, to keep the stream in sync.
+		for {
+			msg, ok, err := c.transport.TryReceiveProtoBuffered()
+			if err != nil || !ok {
+				break
+			}
+			execResp := msg.GetExecute()
+			if execResp == nil {
+				break
+			}
+			if execResp.GetMetrics() != nil || execResp.GetHeartbeat() != nil {
+				continue
+			}
+			break
+		}
+
 		c.activeRows = nil
 		if c.inTx {
 			c.state = StateInTransaction

@@ -24,7 +24,7 @@ type Rows struct {
 	columns  []ColumnInfo
 	pageSize int
 
-	protoBuffer []proto.Row // Protobuf rows buffer
+	protoBuffer []*proto.Row // Protobuf rows buffer
 	bufferIdx   int
 	final       bool
 	ordered     bool
@@ -83,8 +83,8 @@ func (r *Rows) Next(dest []driver.Value) error {
 
 			// Copy values to dest
 			for i := range r.columns {
-				if i < len(row.Values) {
-					dest[i] = convertProtoValue(&row.Values[i])
+				if i < len(row.GetValues()) {
+					dest[i] = convertProtoValue(row.GetValues()[i])
 				} else {
 					dest[i] = nil
 				}
@@ -106,22 +106,56 @@ func (r *Rows) Next(dest []driver.Value) error {
 
 // convertProtoValue converts a protobuf Value to a driver.Value.
 func convertProtoValue(v *proto.Value) driver.Value {
-	if v.NullVal {
+	if v == nil {
 		return nil
 	}
-	if v.StringVal != nil {
-		return *v.StringVal
+	switch k := v.GetKind().(type) {
+	case *proto.Value_NullVal:
+		_ = k // null
+		return nil
+	case *proto.Value_StringVal:
+		if k.StringVal != nil {
+			return k.StringVal.GetValue()
+		}
+		return ""
+	case *proto.Value_IntVal:
+		if k.IntVal != nil {
+			return k.IntVal.GetValue()
+		}
+		return int64(0)
+	case *proto.Value_DoubleVal:
+		if k.DoubleVal != nil {
+			return k.DoubleVal.GetValue()
+		}
+		return float64(0)
+	case *proto.Value_BoolVal:
+		return k.BoolVal
+	case *proto.Value_DecimalVal:
+		if k.DecimalVal != nil {
+			return k.DecimalVal.GetOrigRepr()
+		}
+		return ""
+	case *proto.Value_BytesVal:
+		if k.BytesVal != nil {
+			return k.BytesVal.GetValue()
+		}
+		return []byte(nil)
+	case *proto.Value_ListVal:
+		// Return as string representation for now
+		return fmt.Sprintf("%v", k.ListVal)
+	case *proto.Value_MapVal:
+		return fmt.Sprintf("%v", k.MapVal)
+	case *proto.Value_NodeVal:
+		return fmt.Sprintf("%v", k.NodeVal)
+	case *proto.Value_EdgeVal:
+		return fmt.Sprintf("%v", k.EdgeVal)
+	case *proto.Value_PathVal:
+		return fmt.Sprintf("%v", k.PathVal)
+	case *proto.Value_ExtVal:
+		return fmt.Sprintf("%v", k.ExtVal)
+	default:
+		return nil
 	}
-	if v.IntVal != nil {
-		return *v.IntVal
-	}
-	if v.DoubleVal != nil {
-		return *v.DoubleVal
-	}
-	if v.BoolVal != nil {
-		return *v.BoolVal
-	}
-	return nil
 }
 
 // fetchNextPage fetches the next page of results from the server.
@@ -131,22 +165,23 @@ func (r *Rows) fetchNextPage() error {
 		return err
 	}
 
-	if resp.Execute == nil {
+	execResp := resp.GetExecute()
+	if execResp == nil {
 		r.final = true
 		return io.EOF
 	}
 
-	if resp.Execute.Error != nil {
+	if execResp.GetError() != nil {
 		return &DriverError{
-			Code:    resp.Execute.Error.Code,
-			Message: resp.Execute.Error.Message,
+			Code:    execResp.GetError().GetCode(),
+			Message: execResp.GetError().GetMessage(),
 		}
 	}
 
-	if resp.Execute.Page != nil {
-		r.protoBuffer = resp.Execute.Page.Rows
+	if execResp.GetPage() != nil {
+		r.protoBuffer = execResp.GetPage().GetRows()
 		r.bufferIdx = 0
-		r.final = resp.Execute.Page.LastPage
+		r.final = execResp.GetPage().GetFinal()
 		return nil
 	}
 

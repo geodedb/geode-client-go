@@ -1,748 +1,294 @@
 // Package proto provides protobuf message types and gRPC client for Geode.
 //
+// The generated types come from protoc (geode.pb.go / geode_grpc.pb.go).
+// This file provides:
+//   - QUIC wire-format helpers: length-prefixed protobuf encode/decode
+//   - Convenience constructors for QuicClientMessage/QuicServerMessage
+//   - DecodeQuicServerMessage for QUIC transport
+//   - Encode() on QuicClientMessage for QUIC transport
+//
 //nolint:mnd,dupl,gosec,gocyclo,cyclop,funlen // protobuf encoding uses field numbers and repetitive patterns
 package proto
 
 import (
-	"google.golang.org/grpc/encoding"
+	"errors"
+	"fmt"
+
 	gpb "google.golang.org/protobuf/proto"
 )
 
-func init() {
-	// Register our custom codec for the proto message types
-	encoding.RegisterCodec(GeodeCodec{})
+// ErrInvalidMessage is returned when a protobuf message cannot be decoded.
+var ErrInvalidMessage = errors.New("invalid protobuf message")
+
+// Encode serializes a QuicClientMessage using standard protobuf marshaling.
+func (x *QuicClientMessage) Encode() ([]byte, error) {
+	return gpb.Marshal(x)
 }
 
-// GeodeCodec implements grpc/encoding.Codec for Geode proto messages.
-type GeodeCodec struct{}
-
-// Marshal implements encoding.Codec.
-func (GeodeCodec) Marshal(v any) ([]byte, error) {
-	// Try protobuf.Message first (for google.golang.org/protobuf types)
-	if pm, ok := v.(gpb.Message); ok {
-		return gpb.Marshal(pm)
+// DecodeQuicServerMessage decodes a protobuf-encoded QuicServerMessage.
+func DecodeQuicServerMessage(data []byte) (*QuicServerMessage, error) {
+	msg := &QuicServerMessage{}
+	if err := gpb.Unmarshal(data, msg); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidMessage, err)
 	}
+	return msg, nil
+}
 
-	// Handle our custom message types
-	switch m := v.(type) {
-	case *HelloRequest:
-		return m.Encode()
-	case *HelloResponse:
-		return encodeHelloResponse(m)
-	case *ExecuteRequest:
-		return m.Encode()
-	case *ExecutionResponse:
-		return encodeExecutionResponse(m)
-	case *PingRequest:
-		return m.Encode()
-	case *PingResponse:
-		return encodePingResponse(m)
-	case *BeginRequest:
-		return m.Encode()
-	case *BeginResponse:
-		return encodeBeginResponse(m)
-	case *CommitRequest:
-		return m.Encode()
-	case *CommitResponse:
-		return encodeCommitResponse(m)
-	case *RollbackRequest:
-		return m.Encode()
-	case *RollbackResponse:
-		return encodeRollbackResponse(m)
-	case *CdcDiagnosticsRequest:
-		return m.Encode()
-	case *CdcDiagnosticsResponse:
-		return encodeCdcDiagnosticsResponse(m)
-	case *CdcControlRequest:
-		return m.Encode()
-	case *CdcControlResponse:
-		return encodeCdcControlResponse(m)
+// DecodeHelloResponse decodes a protobuf-encoded HelloResponse.
+func DecodeHelloResponse(data []byte) (*HelloResponse, error) {
+	msg := &HelloResponse{}
+	if err := gpb.Unmarshal(data, msg); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidMessage, err)
+	}
+	return msg, nil
+}
+
+// DecodeExecutionResponse decodes a protobuf-encoded ExecutionResponse.
+func DecodeExecutionResponse(data []byte) (*ExecutionResponse, error) {
+	msg := &ExecutionResponse{}
+	if err := gpb.Unmarshal(data, msg); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidMessage, err)
+	}
+	return msg, nil
+}
+
+// DecodePingResponse decodes a protobuf-encoded PingResponse.
+func DecodePingResponse(data []byte) (*PingResponse, error) {
+	msg := &PingResponse{}
+	if err := gpb.Unmarshal(data, msg); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidMessage, err)
+	}
+	return msg, nil
+}
+
+// DecodeBeginResponse decodes a protobuf-encoded BeginResponse.
+func DecodeBeginResponse(data []byte) (*BeginResponse, error) {
+	msg := &BeginResponse{}
+	if err := gpb.Unmarshal(data, msg); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidMessage, err)
+	}
+	return msg, nil
+}
+
+// DecodeCommitResponse decodes a protobuf-encoded CommitResponse.
+func DecodeCommitResponse(data []byte) (*CommitResponse, error) {
+	msg := &CommitResponse{}
+	if err := gpb.Unmarshal(data, msg); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidMessage, err)
+	}
+	return msg, nil
+}
+
+// DecodeRollbackResponse decodes a protobuf-encoded RollbackResponse.
+func DecodeRollbackResponse(data []byte) (*RollbackResponse, error) {
+	msg := &RollbackResponse{}
+	if err := gpb.Unmarshal(data, msg); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidMessage, err)
+	}
+	return msg, nil
+}
+
+// DecodeCdcDiagnosticsResponse decodes a protobuf-encoded CdcDiagnosticsResponse.
+func DecodeCdcDiagnosticsResponse(data []byte) (*CdcDiagnosticsResponse, error) {
+	msg := &CdcDiagnosticsResponse{}
+	if err := gpb.Unmarshal(data, msg); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidMessage, err)
+	}
+	return msg, nil
+}
+
+// DecodeCdcControlResponse decodes a protobuf-encoded CdcControlResponse.
+func DecodeCdcControlResponse(data []byte) (*CdcControlResponse, error) {
+	msg := &CdcControlResponse{}
+	if err := gpb.Unmarshal(data, msg); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidMessage, err)
+	}
+	return msg, nil
+}
+
+// ----------------------------------------------------------------------------
+// QuicClientMessage constructors (convenience for QUIC transport callers)
+// ----------------------------------------------------------------------------
+
+// NewHelloMessage creates a QuicClientMessage with a HelloRequest.
+func NewHelloMessage(req *HelloRequest) *QuicClientMessage {
+	return &QuicClientMessage{
+		Msg: &QuicClientMessage_Hello{Hello: req},
+	}
+}
+
+// NewExecuteMessage creates a QuicClientMessage with an ExecuteRequest.
+func NewExecuteMessage(req *ExecuteRequest) *QuicClientMessage {
+	return &QuicClientMessage{
+		Msg: &QuicClientMessage_Execute{Execute: req},
+	}
+}
+
+// NewPingMessage creates a QuicClientMessage with a PingRequest.
+func NewPingMessage(req *PingRequest) *QuicClientMessage {
+	return &QuicClientMessage{
+		Msg: &QuicClientMessage_Ping{Ping: req},
+	}
+}
+
+// NewBeginMessage creates a QuicClientMessage with a BeginRequest.
+func NewBeginMessage(req *BeginRequest) *QuicClientMessage {
+	return &QuicClientMessage{
+		Msg: &QuicClientMessage_Begin{Begin: req},
+	}
+}
+
+// NewCommitMessage creates a QuicClientMessage with a CommitRequest.
+func NewCommitMessage(req *CommitRequest) *QuicClientMessage {
+	return &QuicClientMessage{
+		Msg: &QuicClientMessage_Commit{Commit: req},
+	}
+}
+
+// NewRollbackMessage creates a QuicClientMessage with a RollbackRequest.
+func NewRollbackMessage(req *RollbackRequest) *QuicClientMessage {
+	return &QuicClientMessage{
+		Msg: &QuicClientMessage_Rollback{Rollback: req},
+	}
+}
+
+// NewCdcDiagMessage creates a QuicClientMessage with a CdcDiagnosticsRequest.
+func NewCdcDiagMessage(req *CdcDiagnosticsRequest) *QuicClientMessage {
+	return &QuicClientMessage{
+		Msg: &QuicClientMessage_CdcDiag{CdcDiag: req},
+	}
+}
+
+// NewCdcCtrlMessage creates a QuicClientMessage with a CdcControlRequest.
+func NewCdcCtrlMessage(req *CdcControlRequest) *QuicClientMessage {
+	return &QuicClientMessage{
+		Msg: &QuicClientMessage_CdcCtrl{CdcCtrl: req},
+	}
+}
+
+// ----------------------------------------------------------------------------
+// QuicServerMessage field accessors (convenience wrappers around oneof getters)
+// These provide nil-safe access matching how the old code used direct fields.
+// ----------------------------------------------------------------------------
+
+// GetHelloResponse returns the HelloResponse if this is a hello message, or nil.
+func (x *QuicServerMessage) GetHelloResponse() *HelloResponse {
+	return x.GetHello()
+}
+
+// GetExecuteResponse returns the ExecutionResponse if this is an execute message, or nil.
+func (x *QuicServerMessage) GetExecuteResponse() *ExecutionResponse {
+	return x.GetExecute()
+}
+
+// GetPingResp returns the PingResponse if this is a ping message, or nil.
+func (x *QuicServerMessage) GetPingResp() *PingResponse {
+	return x.GetPing()
+}
+
+// GetBeginResp returns the BeginResponse if this is a begin message, or nil.
+func (x *QuicServerMessage) GetBeginResp() *BeginResponse {
+	return x.GetBegin()
+}
+
+// GetCommitResp returns the CommitResponse if this is a commit message, or nil.
+func (x *QuicServerMessage) GetCommitResp() *CommitResponse {
+	return x.GetCommit()
+}
+
+// GetRollbackResp returns the RollbackResponse if this is a rollback message, or nil.
+func (x *QuicServerMessage) GetRollbackResp() *RollbackResponse {
+	return x.GetRollback()
+}
+
+// StringParam creates a Param with a string value.
+func StringParam(name, val string) *Param {
+	return &Param{
+		Name: name,
+		Value: &Value{
+			Kind: &Value_StringVal{StringVal: &StringValue{Value: val}},
+		},
+	}
+}
+
+// IntParam creates a Param with an integer value.
+func IntParam(name string, val int64) *Param {
+	return &Param{
+		Name: name,
+		Value: &Value{
+			Kind: &Value_IntVal{IntVal: &IntValue{Value: val, Kind: IntKind_INT}},
+		},
+	}
+}
+
+// FloatParam creates a Param with a float value.
+func FloatParam(name string, val float64) *Param {
+	return &Param{
+		Name: name,
+		Value: &Value{
+			Kind: &Value_DoubleVal{DoubleVal: &DoubleValue{Value: val, Kind: FloatKind_DOUBLE}},
+		},
+	}
+}
+
+// BoolParam creates a Param with a bool value.
+func BoolParam(name string, val bool) *Param {
+	return &Param{
+		Name: name,
+		Value: &Value{
+			Kind: &Value_BoolVal{BoolVal: val},
+		},
+	}
+}
+
+// NullParam creates a Param with a null value.
+func NullParam(name string) *Param {
+	return &Param{
+		Name:  name,
+		Value: &Value{Kind: &Value_NullVal{NullVal: &NullValue{}}},
+	}
+}
+
+// MakeParam creates a Param with the appropriate protobuf type for the given Go value.
+func MakeParam(name string, val interface{}) *Param {
+	if val == nil {
+		return NullParam(name)
+	}
+	switch v := val.(type) {
+	case int:
+		return IntParam(name, int64(v))
+	case int8:
+		return IntParam(name, int64(v))
+	case int16:
+		return IntParam(name, int64(v))
+	case int32:
+		return IntParam(name, int64(v))
+	case int64:
+		return IntParam(name, v)
+	case uint:
+		return IntParam(name, int64(v))
+	case uint8:
+		return IntParam(name, int64(v))
+	case uint16:
+		return IntParam(name, int64(v))
+	case uint32:
+		return IntParam(name, int64(v))
+	case uint64:
+		return IntParam(name, int64(v))
+	case float32:
+		return FloatParam(name, float64(v))
+	case float64:
+		// If the float is a whole number, send as int (YAML parses 35 as int but
+		// some paths may produce float64).
+		if v == float64(int64(v)) {
+			return IntParam(name, int64(v))
+		}
+		return FloatParam(name, v)
+	case bool:
+		return BoolParam(name, v)
+	case string:
+		return StringParam(name, v)
 	default:
-		return nil, ErrInvalidMessage
+		return StringParam(name, fmt.Sprintf("%v", v))
 	}
-}
-
-// Unmarshal implements encoding.Codec.
-func (GeodeCodec) Unmarshal(data []byte, v any) error {
-	// Try protobuf.Message first
-	if pm, ok := v.(gpb.Message); ok {
-		return gpb.Unmarshal(data, pm)
-	}
-
-	// Handle our custom message types
-	switch m := v.(type) {
-	case *HelloRequest:
-		req, err := decodeHelloRequest(data)
-		if err != nil {
-			return err
-		}
-		*m = *req
-		return nil
-	case *HelloResponse:
-		resp, err := DecodeHelloResponse(data)
-		if err != nil {
-			return err
-		}
-		*m = *resp
-		return nil
-	case *ExecuteRequest:
-		req, err := decodeExecuteRequest(data)
-		if err != nil {
-			return err
-		}
-		*m = *req
-		return nil
-	case *ExecutionResponse:
-		resp, err := DecodeExecutionResponse(data)
-		if err != nil {
-			return err
-		}
-		*m = *resp
-		return nil
-	case *PingRequest:
-		// Empty message
-		return nil
-	case *PingResponse:
-		resp, err := DecodePingResponse(data)
-		if err != nil {
-			return err
-		}
-		*m = *resp
-		return nil
-	case *BeginRequest:
-		req, err := decodeBeginRequest(data)
-		if err != nil {
-			return err
-		}
-		*m = *req
-		return nil
-	case *BeginResponse:
-		resp, err := DecodeBeginResponse(data)
-		if err != nil {
-			return err
-		}
-		*m = *resp
-		return nil
-	case *CommitRequest:
-		req, err := decodeCommitRequest(data)
-		if err != nil {
-			return err
-		}
-		*m = *req
-		return nil
-	case *CommitResponse:
-		resp, err := DecodeCommitResponse(data)
-		if err != nil {
-			return err
-		}
-		*m = *resp
-		return nil
-	case *RollbackRequest:
-		req, err := decodeRollbackRequest(data)
-		if err != nil {
-			return err
-		}
-		*m = *req
-		return nil
-	case *RollbackResponse:
-		resp, err := DecodeRollbackResponse(data)
-		if err != nil {
-			return err
-		}
-		*m = *resp
-		return nil
-	case *CdcDiagnosticsRequest:
-		// Empty message
-		return nil
-	case *CdcDiagnosticsResponse:
-		resp, err := DecodeCdcDiagnosticsResponse(data)
-		if err != nil {
-			return err
-		}
-		*m = *resp
-		return nil
-	case *CdcControlRequest:
-		req, err := decodeCdcControlRequest(data)
-		if err != nil {
-			return err
-		}
-		*m = *req
-		return nil
-	case *CdcControlResponse:
-		resp, err := DecodeCdcControlResponse(data)
-		if err != nil {
-			return err
-		}
-		*m = *resp
-		return nil
-	default:
-		return ErrInvalidMessage
-	}
-}
-
-// Name implements encoding.Codec.
-func (GeodeCodec) Name() string {
-	return "proto"
-}
-
-// ----------------------------------------------------------------------------
-// Additional encode functions for response types
-// ----------------------------------------------------------------------------
-
-func encodeHelloResponse(m *HelloResponse) ([]byte, error) {
-	var buf []byte
-	w := newBytesWriter(&buf)
-	if err := EncodeBool(w, 1, m.Success); err != nil {
-		return nil, err
-	}
-	if err := EncodeString(w, 2, m.SessionID); err != nil {
-		return nil, err
-	}
-	if err := EncodeString(w, 3, m.ErrorMessage); err != nil {
-		return nil, err
-	}
-	for _, cap := range m.Capabilities {
-		if err := EncodeString(w, 4, cap); err != nil {
-			return nil, err
-		}
-	}
-	return buf, nil
-}
-
-func encodeExecutionResponse(m *ExecutionResponse) ([]byte, error) {
-	var buf []byte
-	w := newBytesWriter(&buf)
-	if m.Schema != nil {
-		data, err := encodeSchemaDefinition(m.Schema)
-		if err != nil {
-			return nil, err
-		}
-		if err := EncodeBytes(w, 1, data); err != nil {
-			return nil, err
-		}
-	}
-	if m.Page != nil {
-		data, err := encodeDataPage(m.Page)
-		if err != nil {
-			return nil, err
-		}
-		if err := EncodeBytes(w, 2, data); err != nil {
-			return nil, err
-		}
-	}
-	if m.Error != nil {
-		data, err := encodeError(m.Error)
-		if err != nil {
-			return nil, err
-		}
-		if err := EncodeBytes(w, 3, data); err != nil {
-			return nil, err
-		}
-	}
-	if m.Metrics != nil {
-		data, err := encodeExecutionMetrics(m.Metrics)
-		if err != nil {
-			return nil, err
-		}
-		if err := EncodeBytes(w, 4, data); err != nil {
-			return nil, err
-		}
-	}
-	if m.Heartbeat != nil {
-		if err := EncodeBytesAlways(w, 5, []byte{}); err != nil {
-			return nil, err
-		}
-	}
-	return buf, nil
-}
-
-func encodeSchemaDefinition(m *SchemaDefinition) ([]byte, error) {
-	var buf []byte
-	w := newBytesWriter(&buf)
-	for _, col := range m.Columns {
-		data, err := encodeColumnDefinition(&col)
-		if err != nil {
-			return nil, err
-		}
-		if err := EncodeBytes(w, 1, data); err != nil {
-			return nil, err
-		}
-	}
-	return buf, nil
-}
-
-func encodeColumnDefinition(m *ColumnDefinition) ([]byte, error) {
-	var buf []byte
-	w := newBytesWriter(&buf)
-	if err := EncodeString(w, 1, m.Name); err != nil {
-		return nil, err
-	}
-	if err := EncodeString(w, 2, m.Type); err != nil {
-		return nil, err
-	}
-	return buf, nil
-}
-
-func encodeDataPage(m *DataPage) ([]byte, error) {
-	var buf []byte
-	w := newBytesWriter(&buf)
-	for _, row := range m.Rows {
-		data, err := encodeRow(&row)
-		if err != nil {
-			return nil, err
-		}
-		if err := EncodeBytes(w, 1, data); err != nil {
-			return nil, err
-		}
-	}
-	if err := EncodeBool(w, 2, m.LastPage); err != nil {
-		return nil, err
-	}
-	return buf, nil
-}
-
-func encodeRow(m *Row) ([]byte, error) {
-	var buf []byte
-	w := newBytesWriter(&buf)
-	for _, val := range m.Values {
-		data, err := encodeValue(&val)
-		if err != nil {
-			return nil, err
-		}
-		if err := EncodeBytes(w, 1, data); err != nil {
-			return nil, err
-		}
-	}
-	return buf, nil
-}
-
-func encodeValue(m *Value) ([]byte, error) {
-	var buf []byte
-	w := newBytesWriter(&buf)
-	if m.StringVal != nil {
-		if err := EncodeString(w, 1, *m.StringVal); err != nil {
-			return nil, err
-		}
-	}
-	if m.IntVal != nil {
-		if err := EncodeInt64(w, 2, *m.IntVal); err != nil {
-			return nil, err
-		}
-	}
-	if m.DoubleVal != nil {
-		if err := EncodeDouble(w, 3, *m.DoubleVal); err != nil {
-			return nil, err
-		}
-	}
-	if m.BoolVal != nil {
-		if err := EncodeBool(w, 4, *m.BoolVal); err != nil {
-			return nil, err
-		}
-	}
-	if m.NullVal {
-		if err := EncodeBool(w, 5, true); err != nil {
-			return nil, err
-		}
-	}
-	return buf, nil
-}
-
-func encodeError(m *Error) ([]byte, error) {
-	var buf []byte
-	w := newBytesWriter(&buf)
-	if err := EncodeString(w, 1, m.Code); err != nil {
-		return nil, err
-	}
-	if err := EncodeString(w, 2, m.Message); err != nil {
-		return nil, err
-	}
-	if err := EncodeString(w, 3, m.Type); err != nil {
-		return nil, err
-	}
-	return buf, nil
-}
-
-func encodeExecutionMetrics(m *ExecutionMetrics) ([]byte, error) {
-	var buf []byte
-	w := newBytesWriter(&buf)
-	if err := EncodeInt64(w, 1, m.ParseDurationNs); err != nil {
-		return nil, err
-	}
-	if err := EncodeInt64(w, 2, m.PlanDurationNs); err != nil {
-		return nil, err
-	}
-	if err := EncodeInt64(w, 3, m.ExecuteDurationNs); err != nil {
-		return nil, err
-	}
-	if err := EncodeInt64(w, 4, m.TotalDurationNs); err != nil {
-		return nil, err
-	}
-	return buf, nil
-}
-
-func encodePingResponse(m *PingResponse) ([]byte, error) {
-	var buf []byte
-	w := newBytesWriter(&buf)
-	if err := EncodeBool(w, 1, m.Ok); err != nil {
-		return nil, err
-	}
-	return buf, nil
-}
-
-func encodeBeginResponse(m *BeginResponse) ([]byte, error) {
-	var buf []byte
-	w := newBytesWriter(&buf)
-	if err := EncodeString(w, 1, m.SessionID); err != nil {
-		return nil, err
-	}
-	if err := EncodeString(w, 2, m.TxID); err != nil {
-		return nil, err
-	}
-	return buf, nil
-}
-
-func encodeCommitResponse(m *CommitResponse) ([]byte, error) {
-	var buf []byte
-	w := newBytesWriter(&buf)
-	if err := EncodeBool(w, 1, m.Success); err != nil {
-		return nil, err
-	}
-	return buf, nil
-}
-
-func encodeRollbackResponse(m *RollbackResponse) ([]byte, error) {
-	var buf []byte
-	w := newBytesWriter(&buf)
-	if err := EncodeBool(w, 1, m.Success); err != nil {
-		return nil, err
-	}
-	return buf, nil
-}
-
-func encodeCdcDiagnosticsResponse(m *CdcDiagnosticsResponse) ([]byte, error) {
-	var buf []byte
-	w := newBytesWriter(&buf)
-	if err := EncodeString(w, 1, m.JSONPayload); err != nil {
-		return nil, err
-	}
-	return buf, nil
-}
-
-func encodeCdcControlResponse(m *CdcControlResponse) ([]byte, error) {
-	var buf []byte
-	w := newBytesWriter(&buf)
-	if err := EncodeBool(w, 1, m.Success); err != nil {
-		return nil, err
-	}
-	return buf, nil
-}
-
-// ----------------------------------------------------------------------------
-// Additional decode functions for request types
-// ----------------------------------------------------------------------------
-
-func decodeHelloRequest(data []byte) (*HelloRequest, error) {
-	m := &HelloRequest{}
-	pos := 0
-	for pos < len(data) {
-		tag, n, err := DecodeVarint(data[pos:])
-		if err != nil {
-			return nil, err
-		}
-		pos += n
-		fieldNum := int(tag >> 3)
-		wireType := int(tag & 7)
-
-		switch fieldNum {
-		case 1: // username
-			if wireType != WireBytes {
-				return nil, ErrInvalidMessage
-			}
-			s, n, err := DecodeString(data[pos:])
-			if err != nil {
-				return nil, err
-			}
-			pos += n
-			m.Username = s
-		case 2: // password
-			if wireType != WireBytes {
-				return nil, ErrInvalidMessage
-			}
-			s, n, err := DecodeString(data[pos:])
-			if err != nil {
-				return nil, err
-			}
-			pos += n
-			m.Password = s
-		case 3: // tenant_id
-			if wireType != WireBytes {
-				return nil, ErrInvalidMessage
-			}
-			s, n, err := DecodeString(data[pos:])
-			if err != nil {
-				return nil, err
-			}
-			pos += n
-			m.TenantID = s
-		default:
-			n, err := skipField(data[pos:], wireType)
-			if err != nil {
-				return nil, err
-			}
-			pos += n
-		}
-	}
-	return m, nil
-}
-
-func decodeExecuteRequest(data []byte) (*ExecuteRequest, error) {
-	m := &ExecuteRequest{
-		Parameters: make(map[string]string),
-	}
-	pos := 0
-	for pos < len(data) {
-		tag, n, err := DecodeVarint(data[pos:])
-		if err != nil {
-			return nil, err
-		}
-		pos += n
-		fieldNum := int(tag >> 3)
-		wireType := int(tag & 7)
-
-		switch fieldNum {
-		case 1: // session_id
-			if wireType != WireBytes {
-				return nil, ErrInvalidMessage
-			}
-			s, n, err := DecodeString(data[pos:])
-			if err != nil {
-				return nil, err
-			}
-			pos += n
-			m.SessionID = s
-		case 2: // query
-			if wireType != WireBytes {
-				return nil, ErrInvalidMessage
-			}
-			s, n, err := DecodeString(data[pos:])
-			if err != nil {
-				return nil, err
-			}
-			pos += n
-			m.Query = s
-		case 3: // parameters (map entry)
-			if wireType != WireBytes {
-				return nil, ErrInvalidMessage
-			}
-			length, n, err := DecodeVarint(data[pos:])
-			if err != nil {
-				return nil, err
-			}
-			pos += n
-			entryData := data[pos : pos+int(length)]
-			pos += int(length)
-			key, val, err := decodeMapEntry(entryData)
-			if err != nil {
-				return nil, err
-			}
-			m.Parameters[key] = val
-		default:
-			n, err := skipField(data[pos:], wireType)
-			if err != nil {
-				return nil, err
-			}
-			pos += n
-		}
-	}
-	return m, nil
-}
-
-func decodeMapEntry(data []byte) (string, string, error) {
-	var key, val string
-	pos := 0
-	for pos < len(data) {
-		tag, n, err := DecodeVarint(data[pos:])
-		if err != nil {
-			return "", "", err
-		}
-		pos += n
-		fieldNum := int(tag >> 3)
-		wireType := int(tag & 7)
-
-		switch fieldNum {
-		case 1: // key
-			if wireType != WireBytes {
-				return "", "", ErrInvalidMessage
-			}
-			s, n, err := DecodeString(data[pos:])
-			if err != nil {
-				return "", "", err
-			}
-			pos += n
-			key = s
-		case 2: // value
-			if wireType != WireBytes {
-				return "", "", ErrInvalidMessage
-			}
-			s, n, err := DecodeString(data[pos:])
-			if err != nil {
-				return "", "", err
-			}
-			pos += n
-			val = s
-		default:
-			n, err := skipField(data[pos:], wireType)
-			if err != nil {
-				return "", "", err
-			}
-			pos += n
-		}
-	}
-	return key, val, nil
-}
-
-func decodeBeginRequest(data []byte) (*BeginRequest, error) {
-	m := &BeginRequest{}
-	pos := 0
-	for pos < len(data) {
-		tag, n, err := DecodeVarint(data[pos:])
-		if err != nil {
-			return nil, err
-		}
-		pos += n
-		fieldNum := int(tag >> 3)
-		wireType := int(tag & 7)
-
-		switch fieldNum {
-		case 1: // read_only
-			if wireType != WireVarint {
-				return nil, ErrInvalidMessage
-			}
-			v, n, err := DecodeVarint(data[pos:])
-			if err != nil {
-				return nil, err
-			}
-			pos += n
-			m.ReadOnly = v != 0
-		case 2: // session_id
-			if wireType != WireBytes {
-				return nil, ErrInvalidMessage
-			}
-			s, n, err := DecodeString(data[pos:])
-			if err != nil {
-				return nil, err
-			}
-			pos += n
-			m.SessionID = s
-		default:
-			n, err := skipField(data[pos:], wireType)
-			if err != nil {
-				return nil, err
-			}
-			pos += n
-		}
-	}
-	return m, nil
-}
-
-func decodeCommitRequest(data []byte) (*CommitRequest, error) {
-	m := &CommitRequest{}
-	pos := 0
-	for pos < len(data) {
-		tag, n, err := DecodeVarint(data[pos:])
-		if err != nil {
-			return nil, err
-		}
-		pos += n
-		fieldNum := int(tag >> 3)
-		wireType := int(tag & 7)
-
-		switch fieldNum {
-		case 1: // session_id
-			if wireType != WireBytes {
-				return nil, ErrInvalidMessage
-			}
-			s, n, err := DecodeString(data[pos:])
-			if err != nil {
-				return nil, err
-			}
-			pos += n
-			m.SessionID = s
-		default:
-			n, err := skipField(data[pos:], wireType)
-			if err != nil {
-				return nil, err
-			}
-			pos += n
-		}
-	}
-	return m, nil
-}
-
-func decodeRollbackRequest(data []byte) (*RollbackRequest, error) {
-	m := &RollbackRequest{}
-	pos := 0
-	for pos < len(data) {
-		tag, n, err := DecodeVarint(data[pos:])
-		if err != nil {
-			return nil, err
-		}
-		pos += n
-		fieldNum := int(tag >> 3)
-		wireType := int(tag & 7)
-
-		switch fieldNum {
-		case 1: // session_id
-			if wireType != WireBytes {
-				return nil, ErrInvalidMessage
-			}
-			s, n, err := DecodeString(data[pos:])
-			if err != nil {
-				return nil, err
-			}
-			pos += n
-			m.SessionID = s
-		default:
-			n, err := skipField(data[pos:], wireType)
-			if err != nil {
-				return nil, err
-			}
-			pos += n
-		}
-	}
-	return m, nil
-}
-
-func decodeCdcControlRequest(data []byte) (*CdcControlRequest, error) {
-	m := &CdcControlRequest{}
-	pos := 0
-	for pos < len(data) {
-		tag, n, err := DecodeVarint(data[pos:])
-		if err != nil {
-			return nil, err
-		}
-		pos += n
-		fieldNum := int(tag >> 3)
-		wireType := int(tag & 7)
-
-		switch fieldNum {
-		case 1: // action
-			if wireType != WireBytes {
-				return nil, ErrInvalidMessage
-			}
-			s, n, err := DecodeString(data[pos:])
-			if err != nil {
-				return nil, err
-			}
-			pos += n
-			m.Action = s
-		default:
-			n, err := skipField(data[pos:], wireType)
-			if err != nil {
-				return nil, err
-			}
-			pos += n
-		}
-	}
-	return m, nil
 }

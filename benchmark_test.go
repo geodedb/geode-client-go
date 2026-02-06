@@ -5,6 +5,7 @@ import (
 
 	"geodedb.com/geode/internal/validate"
 	"geodedb.com/geode/proto"
+	gpb "google.golang.org/protobuf/proto"
 )
 
 func BenchmarkParseDSN_Simple(b *testing.B) {
@@ -39,41 +40,35 @@ func BenchmarkParseDSN_WithOptions(b *testing.B) {
 }
 
 func BenchmarkProtoEncode_HelloRequest(b *testing.B) {
-	msg := &proto.QuicClientMessage{
-		Hello: &proto.HelloRequest{
-			Username: "testuser",
-			Password: "testpass",
-		},
-	}
+	msg := proto.NewHelloMessage(&proto.HelloRequest{
+		Username: "testuser",
+		Password: "testpass",
+	})
 	for i := 0; i < b.N; i++ {
 		_, _ = msg.Encode()
 	}
 }
 
 func BenchmarkProtoEncode_ExecuteRequest(b *testing.B) {
-	msg := &proto.QuicClientMessage{
-		Execute: &proto.ExecuteRequest{
-			SessionID: "session123",
-			Query:     "MATCH (n:Person)-[:KNOWS]->(m:Person) WHERE n.age > 30 RETURN n.name, m.name",
-			Parameters: map[string]string{
-				"param1": "value1",
-				"param2": "value2",
-			},
+	msg := proto.NewExecuteMessage(&proto.ExecuteRequest{
+		SessionId: "session123",
+		Query:     "MATCH (n:Person)-[:KNOWS]->(m:Person) WHERE n.age > 30 RETURN n.name, m.name",
+		Params: []*proto.Param{
+			proto.StringParam("param1", "value1"),
+			proto.StringParam("param2", "value2"),
 		},
-	}
+	})
 	for i := 0; i < b.N; i++ {
 		_, _ = msg.Encode()
 	}
 }
 
 func BenchmarkProtoDecode_HelloResponse(b *testing.B) {
-	// Create a sample HelloResponse
 	resp := &proto.HelloResponse{
 		Success:   true,
-		SessionID: "session123",
+		SessionId: "session123",
 	}
-	codec := proto.GeodeCodec{}
-	data, _ := codec.Marshal(resp)
+	data, _ := gpb.Marshal(resp)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -82,20 +77,24 @@ func BenchmarkProtoDecode_HelloResponse(b *testing.B) {
 }
 
 func BenchmarkProtoDecode_ExecutionResponse(b *testing.B) {
-	// Create a sample ExecutionResponse with schema
-	str := "hello"
-	num := int64(42)
 	resp := &proto.ExecutionResponse{
-		Page: &proto.DataPage{
-			Rows: []proto.Row{
-				{Values: []proto.Value{{IntVal: &num}, {StringVal: &str}}},
-				{Values: []proto.Value{{IntVal: &num}, {StringVal: &str}}},
+		Payload: &proto.ExecutionResponse_Page{
+			Page: &proto.DataPage{
+				Rows: []*proto.Row{
+					{Values: []*proto.Value{
+						{Kind: &proto.Value_IntVal{IntVal: &proto.IntValue{Value: 42}}},
+						{Kind: &proto.Value_StringVal{StringVal: &proto.StringValue{Value: "hello"}}},
+					}},
+					{Values: []*proto.Value{
+						{Kind: &proto.Value_IntVal{IntVal: &proto.IntValue{Value: 42}}},
+						{Kind: &proto.Value_StringVal{StringVal: &proto.StringValue{Value: "hello"}}},
+					}},
+				},
+				Final: true,
 			},
-			LastPage: true,
 		},
 	}
-	codec := proto.GeodeCodec{}
-	data, _ := codec.Marshal(resp)
+	data, _ := gpb.Marshal(resp)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
