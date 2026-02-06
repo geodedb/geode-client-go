@@ -638,6 +638,8 @@ func countPlaceholders(query string) int {
 }
 
 // releaseRows is called by Rows.Close() to release the lock and update state.
+//
+//nolint:nestif // draining leftover frames requires checking nested conditions
 func (c *Conn) releaseRows(r *Rows) {
 	if c.activeRows == r {
 		// Drain any remaining frames (metrics, heartbeat) left in the stream

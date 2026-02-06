@@ -7,7 +7,7 @@
 //   - DecodeQuicServerMessage for QUIC transport
 //   - Encode() on QuicClientMessage for QUIC transport
 //
-//nolint:mnd,dupl,gosec,gocyclo,cyclop,funlen // protobuf encoding uses field numbers and repetitive patterns
+//nolint:gosec // protobuf encoding uses field numbers and repetitive patterns
 package proto
 
 import (
