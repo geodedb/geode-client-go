@@ -33,18 +33,21 @@ const (
 	// defaultGeodeImage is pinned to a specific version to prevent supply chain attacks.
 	// Update this version when upgrading the Geode server dependency.
 	// Override with GEODE_IMAGE environment variable if needed.
-	defaultGeodeImage = "geodedb/geode:latest"
-	defaultGeodePort  = "3141/udp"
-	startupTimeout    = 60 * time.Second
-	queryTimeout      = 30 * time.Second
+	defaultGeodeImage    = "geodedb/geode:latest"
+	defaultGeodePort     = "3141/udp"
+	defaultGeodeGrpcPort = "50051/tcp"
+	startupTimeout       = 60 * time.Second
+	queryTimeout         = 30 * time.Second
 )
 
 // geodeContainer holds the running Geode container instance.
 type geodeContainer struct {
 	testcontainers.Container
-	Host string
-	Port string
-	DSN  string
+	Host     string
+	Port     string
+	DSN      string
+	GrpcPort string
+	GrpcDSN  string
 }
 
 var (
@@ -65,13 +68,14 @@ func getGeodeImage() string {
 func startGeodeContainer(ctx context.Context) (*geodeContainer, error) {
 	req := testcontainers.ContainerRequest{
 		Image:        getGeodeImage(),
-		ExposedPorts: []string{defaultGeodePort},
+		ExposedPorts: []string{defaultGeodePort, defaultGeodeGrpcPort},
 		// QUIC uses UDP, so we can't use ForListeningPort (TCP only)
 		// Use log-based waiting instead
 		WaitingFor: wait.ForLog("Server ready").WithStartupTimeout(startupTimeout),
 		Cmd: []string{
 			"serve",
 			"--listen", "0.0.0.0:3141",
+			"--listen-grpc", "0.0.0.0:50051",
 			"--log-level", "info",
 		},
 	}
@@ -96,13 +100,22 @@ func startGeodeContainer(ctx context.Context) (*geodeContainer, error) {
 		return nil, fmt.Errorf("failed to get mapped port: %w", err)
 	}
 
+	grpcMapped, err := container.MappedPort(ctx, defaultGeodeGrpcPort)
+	if err != nil {
+		container.Terminate(ctx)
+		return nil, fmt.Errorf("failed to get gRPC mapped port: %w", err)
+	}
+
 	dsn := fmt.Sprintf("%s:%s?insecure=true", host, mappedPort.Port())
+	grpcDSN := fmt.Sprintf("grpc://%s:%s?tls=0", host, grpcMapped.Port())
 
 	return &geodeContainer{
 		Container: container,
 		Host:      host,
 		Port:      mappedPort.Port(),
 		DSN:       dsn,
+		GrpcPort:  grpcMapped.Port(),
+		GrpcDSN:   grpcDSN,
 	}, nil
 }
 

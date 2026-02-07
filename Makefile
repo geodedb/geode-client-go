@@ -15,6 +15,7 @@ GEODE_IMAGE ?= geodedb/geode:latest
 GEODE_CONTAINER ?= geode-go-test
 GEODE_HOST ?= 127.0.0.1
 GEODE_PORT ?= 3141
+GEODE_GRPC_PORT ?= 50051
 
 # Fuzz duration (default 30 seconds)
 FUZZ_TIME ?= 30s
@@ -58,6 +59,8 @@ help:
 	@echo "  make test-integration              - Run integration tests (requires manual Geode server)"
 	@echo "  make test-integration-docker       - Run integration tests with testcontainers (auto)"
 	@echo "  make test-integration-docker-manual - Run integration tests with manual Docker container"
+	@echo "  make test-integration-grpc         - Run gRPC integration tests (requires manual server)"
+	@echo "  make test-integration-docker-grpc  - Run gRPC integration tests with testcontainers"
 	@echo "  make test-all       - Run unit + Docker integration tests"
 	@echo ""
 	@echo "Quality targets:"
@@ -106,6 +109,7 @@ help:
 	@echo "  GEODE_HOST          - Geode server host (default: 127.0.0.1)"
 	@echo "  GEODE_PORT          - Geode server port (default: 3141)"
 	@echo "  GEODE_IMAGE         - Docker image (default: geodedb/geode:latest)"
+	@echo "  GEODE_GRPC_PORT     - Geode gRPC port (default: 50051)"
 	@echo "  GEODE_TEST_DSN      - DSN for manual server tests"
 	@echo "  FUZZ_TIME           - Fuzz test duration (default: 30s)"
 
@@ -205,6 +209,26 @@ test-integration-docker-manual: docker-start docker-wait
 	@echo ""
 	@echo "✓ Docker integration tests complete"
 	$(MAKE) docker-stop
+
+test-integration-grpc:
+	@echo "Running gRPC integration tests (manual server)..."
+	@echo ""
+	@echo "Connecting to Geode gRPC server at $(GEODE_HOST):$(GEODE_GRPC_PORT)"
+	@echo "Start server first: cd ../geode && ./zig-out/bin/geode serve --listen-grpc 0.0.0.0:50051"
+	@echo "Or use: make docker-start"
+	@echo ""
+	GEODE_TEST_DSN="grpc://$(GEODE_HOST):$(GEODE_GRPC_PORT)?tls=0" $(GO) test -v -tags=integration $(GOFLAGS) ./...
+	@echo ""
+	@echo "✓ gRPC integration tests complete"
+
+test-integration-docker-grpc:
+	@echo "Running gRPC integration tests with Docker (testcontainers)..."
+	@echo ""
+	@echo "Using Docker image: $(GEODE_IMAGE)"
+	@echo ""
+	GEODE_IMAGE=$(GEODE_IMAGE) GEODE_TEST_TRANSPORT=grpc $(GO) test -v -tags=integration $(GOFLAGS) ./...
+	@echo ""
+	@echo "✓ Docker gRPC integration tests complete"
 
 test-all: test-unit test-integration-docker
 	@echo "✓ All tests complete (including Docker integration)"
@@ -308,11 +332,13 @@ docker-start:
 	@$(DOCKER) rm -f $(GEODE_CONTAINER) 2>/dev/null || true
 	$(DOCKER) run -d --name $(GEODE_CONTAINER) \
 		-p $(GEODE_PORT):3141/udp \
+		-p $(GEODE_GRPC_PORT):50051/tcp \
 		$(GEODE_IMAGE) \
-		serve --listen 0.0.0.0:3141 --log-level info
+		serve --listen 0.0.0.0:3141 --listen-grpc 0.0.0.0:50051 --log-level info
 	@echo "✓ Geode container started"
 	@echo "  Container: $(GEODE_CONTAINER)"
-	@echo "  Port: $(GEODE_PORT)/udp"
+	@echo "  QUIC Port: $(GEODE_PORT)/udp"
+	@echo "  gRPC Port: $(GEODE_GRPC_PORT)/tcp"
 
 docker-wait:
 	@echo "Waiting for Geode server to be ready..."

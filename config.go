@@ -97,6 +97,9 @@ type Config struct {
 	TLSCert string // Path to client certificate (for mTLS)
 	TLSKey  string // Path to client private key (for mTLS)
 
+	// TLSDisabled disables TLS entirely (plaintext gRPC, for testing only).
+	TLSDisabled bool
+
 	// InsecureSkipVerify allows skipping TLS verification (for testing only).
 	// This should never be used in production.
 	InsecureSkipVerify bool
@@ -254,7 +257,17 @@ func parseURLDSN(dsn string, cfg *Config) (*Config, error) {
 
 	cfg.Host = host
 
-	// Parse query parameters
+	// Extract credentials from URL userinfo (user:pass@host)
+	if u.User != nil {
+		if username := u.User.Username(); username != "" {
+			cfg.Username = username
+		}
+		if password, ok := u.User.Password(); ok {
+			cfg.Password = password
+		}
+	}
+
+	// Parse query parameters (may override userinfo credentials)
 	if err := applyQueryParams(u.Query(), cfg); err != nil {
 		return nil, err
 	}
@@ -393,9 +406,9 @@ func applyQueryParams(params url.Values, cfg *Config) error {
 			cfg.ConnectTimeout = n
 
 		case paramTLS:
-			// tls=0 or tls=false disables TLS (gRPC only, for testing)
+			// tls=0 or tls=false disables TLS entirely (plaintext gRPC, for testing)
 			if val == "0" || val == "false" {
-				cfg.InsecureSkipVerify = true
+				cfg.TLSDisabled = true
 			}
 
 		case "user", "username":

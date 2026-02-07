@@ -142,44 +142,44 @@ func TestParseDSN_QUICScheme(t *testing.T) {
 // Acceptance test #2: grpc://127.0.0.1:50051?tls=0 => transport=GRPC, host=127.0.0.1, port=50051, tls disabled
 func TestParseDSN_GRPCScheme(t *testing.T) {
 	tests := []struct {
-		name      string
-		dsn       string
-		transport TransportType
-		host      string
-		port      string
-		insecure  bool
+		name        string
+		dsn         string
+		transport   TransportType
+		host        string
+		port        string
+		tlsDisabled bool
 	}{
 		{
-			name:      "basic",
-			dsn:       "grpc://localhost:50051",
-			transport: TransportGRPC,
-			host:      "localhost",
-			port:      "50051",
-			insecure:  false,
+			name:        "basic",
+			dsn:         "grpc://localhost:50051",
+			transport:   TransportGRPC,
+			host:        "localhost",
+			port:        "50051",
+			tlsDisabled: false,
 		},
 		{
-			name:      "with tls=0",
-			dsn:       "grpc://127.0.0.1:50051?tls=0",
-			transport: TransportGRPC,
-			host:      "127.0.0.1",
-			port:      "50051",
-			insecure:  true,
+			name:        "with tls=0",
+			dsn:         "grpc://127.0.0.1:50051?tls=0",
+			transport:   TransportGRPC,
+			host:        "127.0.0.1",
+			port:        "50051",
+			tlsDisabled: true,
 		},
 		{
-			name:      "with tls=false",
-			dsn:       "grpc://myhost:50051?tls=false",
-			transport: TransportGRPC,
-			host:      "myhost",
-			port:      "50051",
-			insecure:  true,
+			name:        "with tls=false",
+			dsn:         "grpc://myhost:50051?tls=false",
+			transport:   TransportGRPC,
+			host:        "myhost",
+			port:        "50051",
+			tlsDisabled: true,
 		},
 		{
-			name:      "default port",
-			dsn:       "grpc://localhost",
-			transport: TransportGRPC,
-			host:      "localhost",
-			port:      DefaultGRPCPort,
-			insecure:  false,
+			name:        "default port",
+			dsn:         "grpc://localhost",
+			transport:   TransportGRPC,
+			host:        "localhost",
+			port:        DefaultGRPCPort,
+			tlsDisabled: false,
 		},
 	}
 
@@ -198,8 +198,8 @@ func TestParseDSN_GRPCScheme(t *testing.T) {
 			if cfg.Port != tt.port {
 				t.Errorf("expected port %q, got %q", tt.port, cfg.Port)
 			}
-			if cfg.InsecureSkipVerify != tt.insecure {
-				t.Errorf("expected insecure %v, got %v", tt.insecure, cfg.InsecureSkipVerify)
+			if cfg.TLSDisabled != tt.tlsDisabled {
+				t.Errorf("expected TLSDisabled %v, got %v", tt.tlsDisabled, cfg.TLSDisabled)
 			}
 		})
 	}

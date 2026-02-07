@@ -39,9 +39,9 @@ func getTestDSN(t *testing.T) string {
 	ctx := context.Background()
 	req := testcontainers.ContainerRequest{
 		Image:        "geodedb/geode:latest",
-		ExposedPorts: []string{"3141/udp"},
+		ExposedPorts: []string{"3141/udp", "50051/tcp"},
 		WaitingFor:   wait.ForLog("Server ready").WithStartupTimeout(60 * time.Second),
-		Cmd:          []string{"serve", "--listen", "0.0.0.0:3141", "--log-level", "info"},
+		Cmd:          []string{"serve", "--listen", "0.0.0.0:3141", "--listen-grpc", "0.0.0.0:50051", "--log-level", "info"},
 	}
 
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{

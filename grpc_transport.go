@@ -36,10 +36,19 @@ func NewGRPCTransport(_ context.Context, cfg *Config) (*GRPCTransport, error) {
 	// Build dial options
 	var opts []grpc.DialOption
 
-	if cfg.InsecureSkipVerify {
+	switch {
+	case cfg.TLSDisabled:
+		// Plaintext mode (tls=0) — no TLS at all
 		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	} else {
-		// Build TLS config
+	case cfg.InsecureSkipVerify:
+		// TLS with skip verification (for self-signed certs in testing)
+		tlsCfg := &tls.Config{
+			InsecureSkipVerify: true, //nolint:gosec // intentional for testing with self-signed certs
+			MinVersion:         tls.VersionTLS13,
+		}
+		opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)))
+	default:
+		// Full TLS with CA verification
 		tlsCfg, err := buildGRPCTLSConfig(cfg)
 		if err != nil {
 			return nil, err
