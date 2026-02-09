@@ -149,6 +149,26 @@ func convertProtoPath(path *proto.PathValue) map[string]any {
 	}
 }
 
+// convertProtoList converts a ListValue to a slice.
+func convertProtoList(list *proto.ListValue) []any {
+	result := make([]any, 0, len(list.GetValues()))
+	for _, item := range list.GetValues() {
+		result = append(result, convertProtoValue(item))
+	}
+	return result
+}
+
+// convertProtoExt converts an ExtValue to a driver.Value.
+func convertProtoExt(ext *proto.ExtendedValue) driver.Value {
+	if ext.GetText() != "" {
+		return ext.GetText()
+	}
+	if len(ext.GetBytes()) > 0 {
+		return ext.GetBytes()
+	}
+	return fmt.Sprintf("%v", ext)
+}
+
 // convertProtoValue converts a protobuf Value to a driver.Value.
 func convertProtoValue(v *proto.Value) driver.Value {
 	if v == nil {
@@ -156,7 +176,7 @@ func convertProtoValue(v *proto.Value) driver.Value {
 	}
 	switch k := v.GetKind().(type) {
 	case *proto.Value_NullVal:
-		_ = k // null
+		_ = k
 		return nil
 	case *proto.Value_StringVal:
 		if k.StringVal != nil {
@@ -187,11 +207,7 @@ func convertProtoValue(v *proto.Value) driver.Value {
 		return []byte(nil)
 	case *proto.Value_ListVal:
 		if k.ListVal != nil {
-			result := make([]any, 0, len(k.ListVal.GetValues()))
-			for _, item := range k.ListVal.GetValues() {
-				result = append(result, convertProtoValue(item))
-			}
-			return result
+			return convertProtoList(k.ListVal)
 		}
 		return []any(nil)
 	case *proto.Value_MapVal:
@@ -216,13 +232,7 @@ func convertProtoValue(v *proto.Value) driver.Value {
 		return map[string]any(nil)
 	case *proto.Value_ExtVal:
 		if k.ExtVal != nil {
-			if k.ExtVal.GetText() != "" {
-				return k.ExtVal.GetText()
-			}
-			if len(k.ExtVal.GetBytes()) > 0 {
-				return k.ExtVal.GetBytes()
-			}
-			return fmt.Sprintf("%v", k.ExtVal)
+			return convertProtoExt(k.ExtVal)
 		}
 		return nil
 	default:
