@@ -179,32 +179,17 @@ func convertProtoValue(v *proto.Value) driver.Value {
 		_ = k
 		return nil
 	case *proto.Value_StringVal:
-		if k.StringVal != nil {
-			return k.StringVal.GetValue()
-		}
-		return ""
+		return k.StringVal.GetValue()
 	case *proto.Value_IntVal:
-		if k.IntVal != nil {
-			return k.IntVal.GetValue()
-		}
-		return int64(0)
+		return k.IntVal.GetValue()
 	case *proto.Value_DoubleVal:
-		if k.DoubleVal != nil {
-			return k.DoubleVal.GetValue()
-		}
-		return float64(0)
+		return k.DoubleVal.GetValue()
 	case *proto.Value_BoolVal:
 		return k.BoolVal
 	case *proto.Value_DecimalVal:
-		if k.DecimalVal != nil {
-			return k.DecimalVal.GetOrigRepr()
-		}
-		return ""
+		return k.DecimalVal.GetOrigRepr()
 	case *proto.Value_BytesVal:
-		if k.BytesVal != nil {
-			return k.BytesVal.GetValue()
-		}
-		return []byte(nil)
+		return k.BytesVal.GetValue()
 	case *proto.Value_ListVal:
 		if k.ListVal != nil {
 			return convertProtoList(k.ListVal)
