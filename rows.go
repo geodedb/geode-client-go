@@ -104,6 +104,51 @@ func (r *Rows) Next(dest []driver.Value) error {
 	}
 }
 
+// convertProtoProperties converts a slice of MapEntry to a map.
+func convertProtoProperties(entries []*proto.MapEntry) map[string]any {
+	props := make(map[string]any, len(entries))
+	for _, entry := range entries {
+		props[entry.GetKey()] = convertProtoValue(entry.GetValue())
+	}
+	return props
+}
+
+// convertProtoNode converts a NodeValue to a structured map.
+func convertProtoNode(node *proto.NodeValue) map[string]any {
+	return map[string]any{
+		"id":         int64(node.GetId()), //nolint:gosec // G115: proto IDs fit int64
+		"labels":     node.GetLabels(),
+		"properties": convertProtoProperties(node.GetProperties()),
+	}
+}
+
+// convertProtoEdge converts an EdgeValue to a structured map.
+func convertProtoEdge(edge *proto.EdgeValue) map[string]any {
+	return map[string]any{
+		"id":         int64(edge.GetId()),     //nolint:gosec // G115: proto IDs fit int64
+		"start_node": int64(edge.GetFromId()), //nolint:gosec // G115: proto IDs fit int64
+		"end_node":   int64(edge.GetToId()),   //nolint:gosec // G115: proto IDs fit int64
+		"type":       edge.GetLabel(),
+		"properties": convertProtoProperties(edge.GetProperties()),
+	}
+}
+
+// convertProtoPath converts a PathValue to a structured map.
+func convertProtoPath(path *proto.PathValue) map[string]any {
+	nodes := make([]any, 0, len(path.GetNodes()))
+	for _, n := range path.GetNodes() {
+		nodes = append(nodes, convertProtoNode(n))
+	}
+	edges := make([]any, 0, len(path.GetEdges()))
+	for _, e := range path.GetEdges() {
+		edges = append(edges, convertProtoEdge(e))
+	}
+	return map[string]any{
+		"nodes": nodes,
+		"edges": edges,
+	}
+}
+
 // convertProtoValue converts a protobuf Value to a driver.Value.
 func convertProtoValue(v *proto.Value) driver.Value {
 	if v == nil {
@@ -151,76 +196,22 @@ func convertProtoValue(v *proto.Value) driver.Value {
 		return []any(nil)
 	case *proto.Value_MapVal:
 		if k.MapVal != nil {
-			result := make(map[string]any)
-			for _, entry := range k.MapVal.GetEntries() {
-				result[entry.GetKey()] = convertProtoValue(entry.GetValue())
-			}
-			return result
+			return convertProtoProperties(k.MapVal.GetEntries())
 		}
 		return map[string]any(nil)
 	case *proto.Value_NodeVal:
 		if k.NodeVal != nil {
-			node := k.NodeVal
-			props := make(map[string]any)
-			for _, entry := range node.GetProperties() {
-				props[entry.GetKey()] = convertProtoValue(entry.GetValue())
-			}
-			return map[string]any{
-				"id":         int64(node.GetId()), //nolint:gosec // G115: proto IDs fit int64
-				"labels":     node.GetLabels(),
-				"properties": props,
-			}
+			return convertProtoNode(k.NodeVal)
 		}
 		return map[string]any(nil)
 	case *proto.Value_EdgeVal:
 		if k.EdgeVal != nil {
-			edge := k.EdgeVal
-			props := make(map[string]any)
-			for _, entry := range edge.GetProperties() {
-				props[entry.GetKey()] = convertProtoValue(entry.GetValue())
-			}
-			return map[string]any{
-				"id":         int64(edge.GetId()),     //nolint:gosec // G115: proto IDs fit int64
-				"start_node": int64(edge.GetFromId()), //nolint:gosec // G115: proto IDs fit int64
-				"end_node":   int64(edge.GetToId()),   //nolint:gosec // G115: proto IDs fit int64
-				"type":       edge.GetLabel(),
-				"properties": props,
-			}
+			return convertProtoEdge(k.EdgeVal)
 		}
 		return map[string]any(nil)
 	case *proto.Value_PathVal:
 		if k.PathVal != nil {
-			path := k.PathVal
-			nodes := make([]any, 0, len(path.GetNodes()))
-			for _, n := range path.GetNodes() {
-				nProps := make(map[string]any)
-				for _, entry := range n.GetProperties() {
-					nProps[entry.GetKey()] = convertProtoValue(entry.GetValue())
-				}
-				nodes = append(nodes, map[string]any{
-					"id":         int64(n.GetId()), //nolint:gosec // G115: proto IDs fit int64
-					"labels":     n.GetLabels(),
-					"properties": nProps,
-				})
-			}
-			edges := make([]any, 0, len(path.GetEdges()))
-			for _, e := range path.GetEdges() {
-				eProps := make(map[string]any)
-				for _, entry := range e.GetProperties() {
-					eProps[entry.GetKey()] = convertProtoValue(entry.GetValue())
-				}
-				edges = append(edges, map[string]any{
-					"id":         int64(e.GetId()),     //nolint:gosec // G115: proto IDs fit int64
-					"start_node": int64(e.GetFromId()), //nolint:gosec // G115: proto IDs fit int64
-					"end_node":   int64(e.GetToId()),   //nolint:gosec // G115: proto IDs fit int64
-					"type":       e.GetLabel(),
-					"properties": eProps,
-				})
-			}
-			return map[string]any{
-				"nodes": nodes,
-				"edges": edges,
-			}
+			return convertProtoPath(k.PathVal)
 		}
 		return map[string]any(nil)
 	case *proto.Value_ExtVal:
