@@ -340,3 +340,168 @@ func TestGQLType_GoType(t *testing.T) {
 		t.Error("BOOL should map to bool")
 	}
 }
+
+func TestConvertProtoValue_EdgeFields(t *testing.T) {
+	edge := &proto.EdgeValue{
+		Id:     100,
+		FromId: 1,
+		ToId:   2,
+		Label:  "KNOWS",
+		Properties: []*proto.MapEntry{
+			{Key: "since", Value: &proto.Value{Kind: &proto.Value_IntVal{IntVal: &proto.IntValue{Value: 2020}}}},
+		},
+	}
+	val := convertProtoValue(&proto.Value{Kind: &proto.Value_EdgeVal{EdgeVal: edge}})
+
+	m, ok := val.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map[string]any, got %T", val)
+	}
+
+	// Should use "type" not "label"
+	if m["type"] != "KNOWS" {
+		t.Errorf("expected type=KNOWS, got %v", m["type"])
+	}
+	if _, exists := m["label"]; exists {
+		t.Error("should not have 'label' field")
+	}
+
+	// Should use "start_node"/"end_node" not "from_id"/"to_id"
+	if m["start_node"] != int64(1) {
+		t.Errorf("expected start_node=1, got %v", m["start_node"])
+	}
+	if m["end_node"] != int64(2) {
+		t.Errorf("expected end_node=2, got %v", m["end_node"])
+	}
+	if _, exists := m["from_id"]; exists {
+		t.Error("should not have 'from_id' field")
+	}
+	if _, exists := m["to_id"]; exists {
+		t.Error("should not have 'to_id' field")
+	}
+
+	// Check properties
+	props, ok := m["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected properties to be map[string]any, got %T", m["properties"])
+	}
+	if props["since"] != int64(2020) {
+		t.Errorf("expected since=2020, got %v", props["since"])
+	}
+}
+
+func TestConvertProtoValue_NodeFields(t *testing.T) {
+	node := &proto.NodeValue{
+		Id:     42,
+		Labels: []string{"Person"},
+		Properties: []*proto.MapEntry{
+			{Key: "name", Value: &proto.Value{Kind: &proto.Value_StringVal{StringVal: &proto.StringValue{Value: "Alice"}}}},
+		},
+	}
+	val := convertProtoValue(&proto.Value{Kind: &proto.Value_NodeVal{NodeVal: node}})
+
+	m, ok := val.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map[string]any, got %T", val)
+	}
+	if m["id"] != int64(42) {
+		t.Errorf("expected id=42, got %v", m["id"])
+	}
+	labels, ok := m["labels"].([]string)
+	if !ok {
+		t.Fatalf("expected labels to be []string, got %T", m["labels"])
+	}
+	if len(labels) != 1 || labels[0] != "Person" {
+		t.Errorf("expected labels=[Person], got %v", labels)
+	}
+	props, ok := m["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected properties map, got %T", m["properties"])
+	}
+	if props["name"] != "Alice" {
+		t.Errorf("expected name=Alice, got %v", props["name"])
+	}
+}
+
+func TestConvertProtoValue_ListAndMap(t *testing.T) {
+	// Test list conversion
+	list := &proto.ListValue{
+		Values: []*proto.Value{
+			{Kind: &proto.Value_IntVal{IntVal: &proto.IntValue{Value: 1}}},
+			{Kind: &proto.Value_StringVal{StringVal: &proto.StringValue{Value: "two"}}},
+		},
+	}
+	listVal := convertProtoValue(&proto.Value{Kind: &proto.Value_ListVal{ListVal: list}})
+	arr, ok := listVal.([]any)
+	if !ok {
+		t.Fatalf("expected []any, got %T", listVal)
+	}
+	if len(arr) != 2 {
+		t.Errorf("expected 2 elements, got %d", len(arr))
+	}
+	if arr[0] != int64(1) {
+		t.Errorf("expected first=1, got %v", arr[0])
+	}
+	if arr[1] != "two" {
+		t.Errorf("expected second=two, got %v", arr[1])
+	}
+
+	// Test map conversion
+	mapv := &proto.MapValue{
+		Entries: []*proto.MapEntry{
+			{Key: "k1", Value: &proto.Value{Kind: &proto.Value_BoolVal{BoolVal: true}}},
+		},
+	}
+	mapVal := convertProtoValue(&proto.Value{Kind: &proto.Value_MapVal{MapVal: mapv}})
+	m, ok := mapVal.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map[string]any, got %T", mapVal)
+	}
+	if m["k1"] != true {
+		t.Errorf("expected k1=true, got %v", m["k1"])
+	}
+}
+
+func TestConvertProtoValue_PathFields(t *testing.T) {
+	path := &proto.PathValue{
+		Nodes: []*proto.NodeValue{
+			{Id: 1, Labels: []string{"A"}, Properties: nil},
+			{Id: 2, Labels: []string{"B"}, Properties: nil},
+		},
+		Edges: []*proto.EdgeValue{
+			{Id: 10, FromId: 1, ToId: 2, Label: "REL", Properties: nil},
+		},
+	}
+	val := convertProtoValue(&proto.Value{Kind: &proto.Value_PathVal{PathVal: path}})
+
+	m, ok := val.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map[string]any, got %T", val)
+	}
+
+	nodes, ok := m["nodes"].([]any)
+	if !ok {
+		t.Fatalf("expected nodes []any, got %T", m["nodes"])
+	}
+	if len(nodes) != 2 {
+		t.Errorf("expected 2 nodes, got %d", len(nodes))
+	}
+
+	edges, ok := m["edges"].([]any)
+	if !ok {
+		t.Fatalf("expected edges []any, got %T", m["edges"])
+	}
+	if len(edges) != 1 {
+		t.Errorf("expected 1 edge, got %d", len(edges))
+	}
+	e := edges[0].(map[string]any)
+	if e["type"] != "REL" {
+		t.Errorf("expected edge type=REL, got %v", e["type"])
+	}
+	if e["start_node"] != int64(1) {
+		t.Errorf("expected start_node=1, got %v", e["start_node"])
+	}
+	if e["end_node"] != int64(2) {
+		t.Errorf("expected end_node=2, got %v", e["end_node"])
+	}
+}
