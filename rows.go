@@ -19,10 +19,11 @@ type ColumnInfo struct {
 
 // Rows represents a result set from a query.
 type Rows struct {
-	conn     *Conn
-	ctx      context.Context
-	columns  []ColumnInfo
-	pageSize int
+	conn      *Conn
+	ctx       context.Context
+	columns   []ColumnInfo
+	pageSize  int
+	requestID uint64
 
 	protoBuffer []*proto.Row // Protobuf rows buffer
 	bufferIdx   int
@@ -225,14 +226,31 @@ func convertProtoValue(v *proto.Value) driver.Value {
 	}
 }
 
-// fetchNextPage fetches the next page of results from the server.
+// fetchNextPage fetches the next page of results from the server via PULL.
 func (r *Rows) fetchNextPage() error {
+	// Send a PullRequest to get the next page
+	r.requestID++
+	pullMsg := proto.NewPullMessage(&proto.PullRequest{
+		RequestId: r.requestID,
+		PageSize:  uint32(r.pageSize), //nolint:gosec // G115: page size fits uint32
+	})
+	if err := r.conn.transport.SendProto(r.ctx, pullMsg); err != nil {
+		return err
+	}
+
 	resp, err := r.conn.transport.ReceiveProto(r.ctx)
 	if err != nil {
 		return err
 	}
 
-	execResp := resp.GetExecute()
+	// Server sends pull data in pull.response, not execute
+	var execResp *proto.ExecutionResponse
+	if resp.GetPull() != nil {
+		execResp = resp.GetPull().GetResponse()
+	}
+	if execResp == nil {
+		execResp = resp.GetExecute()
+	}
 	if execResp == nil {
 		r.final = true
 		return io.EOF

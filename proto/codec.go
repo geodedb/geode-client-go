@@ -159,6 +159,13 @@ func NewCdcDiagMessage(req *CdcDiagnosticsRequest) *QuicClientMessage {
 	}
 }
 
+// NewPullMessage creates a QuicClientMessage with a PullRequest.
+func NewPullMessage(req *PullRequest) *QuicClientMessage {
+	return &QuicClientMessage{
+		Msg: &QuicClientMessage_Pull{Pull: req},
+	}
+}
+
 // NewCdcCtrlMessage creates a QuicClientMessage with a CdcControlRequest.
 func NewCdcCtrlMessage(req *CdcControlRequest) *QuicClientMessage {
 	return &QuicClientMessage{
