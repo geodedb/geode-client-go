@@ -587,36 +587,41 @@ func (c *Conn) CheckNamedValue(nv *driver.NamedValue) error {
 	return nil
 }
 
-// rewritePlaceholders replaces ? placeholders with $pN parameters.
+// rewritePlaceholders replaces ? placeholders by inlining argument values
+// directly into the query string. Named $param references are also collected
+// into the params map for server-side resolution.
+//
+// Inlining is necessary because the Geode server does not resolve $param
+// references inside property maps (e.g. CREATE/MERGE {key: $p1}) — only in
+// expression contexts (RETURN, WHERE). By inlining, all positional args work
+// regardless of GQL clause.
 func rewritePlaceholders(query string, args []driver.NamedValue) (string, map[string]any) {
 	params := make(map[string]any)
 
-	// Replace ? with $pN
 	var b strings.Builder
-	b.Grow(len(query) + 8*len(args))
+	b.Grow(len(query) + 32*len(args))
 
 	argi := 0
 	for i := 0; i < len(query); i++ {
 		ch := query[i]
 		if ch == '?' {
 			argi++
-			name := fmt.Sprintf("p%d", argi)
-			b.WriteByte('$')
-			b.WriteString(name)
 
-			// Find matching arg by ordinal
+			// Find matching arg by ordinal and inline its value.
+			var val any
 			for _, nv := range args {
 				if nv.Ordinal == argi {
-					params[name] = nv.Value
+					val = nv.Value
 					break
 				}
 			}
+			b.WriteString(inlineValue(val))
 		} else {
 			b.WriteByte(ch)
 		}
 	}
 
-	// Include explicitly named args
+	// Include explicitly named args for $name references in the query.
 	for _, nv := range args {
 		if nv.Name != "" {
 			params[nv.Name] = nv.Value
@@ -624,6 +629,50 @@ func rewritePlaceholders(query string, args []driver.NamedValue) (string, map[st
 	}
 
 	return b.String(), params
+}
+
+// inlineValue converts a Go value to a GQL literal string suitable for
+// embedding directly in a query. Strings are single-quoted with internal
+// single-quotes escaped by doubling (”).
+func inlineValue(val any) string {
+	if val == nil {
+		return "NULL"
+	}
+	switch v := val.(type) {
+	case string:
+		return "'" + strings.ReplaceAll(v, "'", "''") + "'"
+	case int:
+		return fmt.Sprintf("%d", v)
+	case int8:
+		return fmt.Sprintf("%d", v)
+	case int16:
+		return fmt.Sprintf("%d", v)
+	case int32:
+		return fmt.Sprintf("%d", v)
+	case int64:
+		return fmt.Sprintf("%d", v)
+	case uint:
+		return fmt.Sprintf("%d", v)
+	case uint8:
+		return fmt.Sprintf("%d", v)
+	case uint16:
+		return fmt.Sprintf("%d", v)
+	case uint32:
+		return fmt.Sprintf("%d", v)
+	case uint64:
+		return fmt.Sprintf("%d", v)
+	case float32:
+		return fmt.Sprintf("%g", v)
+	case float64:
+		return fmt.Sprintf("%g", v)
+	case bool:
+		if v {
+			return "TRUE"
+		}
+		return "FALSE"
+	default:
+		return "'" + strings.ReplaceAll(fmt.Sprintf("%v", v), "'", "''") + "'"
+	}
 }
 
 // countPlaceholders counts the number of ? placeholders in a query.
