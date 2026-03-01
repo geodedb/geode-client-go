@@ -631,16 +631,30 @@ func rewritePlaceholders(query string, args []driver.NamedValue) (string, map[st
 	return b.String(), params
 }
 
+// gqlStringEscaper escapes a Go string for safe embedding in a GQL
+// single-quoted string literal. Backslashes must be escaped first to
+// prevent sequences like \' from being misinterpreted as an escaped
+// quote by the GQL parser (which supports both ” and \' escaping).
+//
+//nolint:gochecknoglobals // package-level replacer avoids allocation per call
+var gqlStringEscaper = strings.NewReplacer(
+	`\`, `\\`,
+	"'", "''",
+	"\n", `\n`,
+	"\r", `\r`,
+	"\t", `\t`,
+)
+
 // inlineValue converts a Go value to a GQL literal string suitable for
-// embedding directly in a query. Strings are single-quoted with internal
-// single-quotes escaped by doubling (”).
+// embedding directly in a query. Strings are single-quoted with backslashes,
+// quotes, and control characters properly escaped.
 func inlineValue(val any) string {
 	if val == nil {
 		return "NULL"
 	}
 	switch v := val.(type) {
 	case string:
-		return "'" + strings.ReplaceAll(v, "'", "''") + "'"
+		return "'" + gqlStringEscaper.Replace(v) + "'"
 	case int:
 		return fmt.Sprintf("%d", v)
 	case int8:
@@ -671,7 +685,7 @@ func inlineValue(val any) string {
 		}
 		return "FALSE"
 	default:
-		return "'" + strings.ReplaceAll(fmt.Sprintf("%v", v), "'", "''") + "'"
+		return "'" + gqlStringEscaper.Replace(fmt.Sprintf("%v", v)) + "'"
 	}
 }
 
