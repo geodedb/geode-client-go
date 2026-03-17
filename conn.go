@@ -3,6 +3,7 @@ package geode
 import (
 	"context"
 	"database/sql/driver"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -16,6 +17,19 @@ import (
 // (Prepare, Begin, Exec, Query) that use context.Background(). This prevents
 // operations from hanging indefinitely. Use the Context variants for custom timeouts.
 const defaultDeprecatedMethodTimeout = 30 * time.Second
+
+// transportErrBadConn converts a *TransportError to driver.ErrBadConn so that
+// database/sql automatically discards the stale connection and retries the
+// operation on a fresh one. QUIC streams are closed by the server after idle
+// periods; the pool may hold a connection whose stream is already closed but
+// whose state still appears valid until the first write fails.
+func transportErrBadConn(err error) error {
+	var te *TransportError
+	if errors.As(err, &te) {
+		return driver.ErrBadConn
+	}
+	return err
+}
 
 // Conn represents a connection to a Geode database.
 type Conn struct {
@@ -326,13 +340,13 @@ func (c *Conn) ExecContext(ctx context.Context, query string, args []driver.Name
 		Params: protoParams,
 	})
 	if err := c.transport.SendProto(ctx, msg); err != nil {
-		return nil, err
+		return nil, transportErrBadConn(err)
 	}
 
 	// Read response
 	resp, err := c.transport.ReceiveProto(ctx)
 	if err != nil {
-		return nil, err
+		return nil, transportErrBadConn(err)
 	}
 
 	execResp := resp.GetExecute()
@@ -352,7 +366,7 @@ func (c *Conn) ExecContext(ctx context.Context, query string, args []driver.Name
 	// After the final data page, the server may send a metrics frame.
 	if execResp.GetSchema() != nil || execResp.GetPage() != nil {
 		if err := c.drainExecStream(ctx, execResp); err != nil {
-			return nil, err
+			return nil, transportErrBadConn(err)
 		}
 	}
 
@@ -401,14 +415,14 @@ func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.Nam
 	})
 	if err := c.transport.SendProto(ctx, msg); err != nil {
 		c.mu.Unlock()
-		return nil, err
+		return nil, transportErrBadConn(err)
 	}
 
 	// Read response (could be schema, page, error, etc.)
 	resp, err := c.transport.ReceiveProto(ctx)
 	if err != nil {
 		c.mu.Unlock()
-		return nil, err
+		return nil, transportErrBadConn(err)
 	}
 
 	execResp := resp.GetExecute()
