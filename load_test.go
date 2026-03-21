@@ -100,6 +100,29 @@ func loadCtx() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), 30*time.Second)
 }
 
+// createBulkNodes inserts count nodes with the given label in batches.
+// Each node has id (int), value (int=id*10), and category (int=id%5) properties.
+func createBulkNodes(t *testing.T, db *sql.DB, label string, count int) {
+	t.Helper()
+	batchSize := 100
+	for start := 0; start < count; start += batchSize {
+		end := start + batchSize
+		if end > count {
+			end = count
+		}
+		var parts []string
+		for i := start; i < end; i++ {
+			parts = append(parts, fmt.Sprintf(
+				"(:%s {id: %d, value: %d, category: %d})",
+				label, i+1, (i+1)*10, (i+1)%5))
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), loadTestTimeout)
+		_, err := db.ExecContext(ctx, "CREATE "+strings.Join(parts, ", "))
+		cancel()
+		require.NoError(t, err, "create batch starting at %d", start)
+	}
+}
+
 // ----------------------------------------------------------------------------
 // TestLoad_HighParallelismReads
 //
@@ -793,4 +816,159 @@ func TestLoad_MultiPageResults(t *testing.T) {
 		t.Logf("multi-page result: got %d/%d rows", got, nodeCount)
 		assert.Equal(t, nodeCount, got, "row count across %d pages", nodeCount/pageSize)
 	}()
+}
+
+// =============================================================================
+// GAP-0257: ORDER BY on large result sets regression tests
+// =============================================================================
+
+// TestLoad_GAP0257_OrderByLarge verifies ORDER BY works on 1000+ row result
+// sets without returning "58000: Internal Server Error".
+func TestLoad_GAP0257_OrderByLarge(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+
+	const label = "GAP0257OrderBy"
+	const nodeCount = 1000
+
+	cleanupLabel(t, db, label)
+	defer cleanupLabel(t, db, label)
+
+	t.Log("creating 1000 nodes...")
+	createBulkNodes(t, db, label, nodeCount)
+
+	t.Log("ORDER BY ASC on 1000 rows...")
+	ctx, cancel := context.WithTimeout(context.Background(), loadTestTimeout)
+	defer cancel()
+
+	rows, err := db.QueryContext(ctx, fmt.Sprintf(
+		"MATCH (n:%s) RETURN n.id AS id, n.value AS value ORDER BY n.id", label))
+	require.NoError(t, err,
+		"GAP-0257: MATCH+ORDER BY on 1000 rows returned error")
+
+	count := 0
+	prevID := int64(0)
+	for rows.Next() {
+		var id, value int64
+		require.NoError(t, rows.Scan(&id, &value))
+		count++
+		assert.Greater(t, id, prevID, "row %d: id should be ascending", count)
+		prevID = id
+	}
+	require.NoError(t, rows.Err())
+	rows.Close()
+	assert.Equal(t, nodeCount, count, "GAP-0257: expected %d sorted rows", nodeCount)
+}
+
+// TestLoad_GAP0257_OrderByDesc verifies ORDER BY DESC on 1000 nodes.
+func TestLoad_GAP0257_OrderByDesc(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+
+	const label = "GAP0257Desc"
+	const nodeCount = 1000
+
+	cleanupLabel(t, db, label)
+	defer cleanupLabel(t, db, label)
+
+	createBulkNodes(t, db, label, nodeCount)
+
+	ctx, cancel := context.WithTimeout(context.Background(), loadTestTimeout)
+	defer cancel()
+
+	rows, err := db.QueryContext(ctx, fmt.Sprintf(
+		"MATCH (n:%s) RETURN n.id AS id ORDER BY n.id DESC", label))
+	require.NoError(t, err, "ORDER BY DESC on 1000 rows failed")
+
+	count := 0
+	prevID := int64(nodeCount + 1)
+	for rows.Next() {
+		var id int64
+		require.NoError(t, rows.Scan(&id))
+		count++
+		assert.Less(t, id, prevID, "row %d: id should be descending", count)
+		prevID = id
+	}
+	require.NoError(t, rows.Err())
+	rows.Close()
+	assert.Equal(t, nodeCount, count)
+}
+
+// TestLoad_GAP0257_MultiPageOrderBy verifies ORDER BY on 2500 nodes spanning
+// multiple pages (default page_size=1000, so 3 pages).
+func TestLoad_GAP0257_MultiPageOrderBy(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+
+	const label = "GAP0257MultiPage"
+	const nodeCount = 2500
+
+	cleanupLabel(t, db, label)
+	defer cleanupLabel(t, db, label)
+
+	t.Logf("creating %d nodes...", nodeCount)
+	createBulkNodes(t, db, label, nodeCount)
+
+	ctx, cancel := context.WithTimeout(context.Background(), loadTestTimeout)
+	defer cancel()
+
+	rows, err := db.QueryContext(ctx, fmt.Sprintf(
+		"MATCH (n:%s) RETURN n.id AS id ORDER BY n.id", label))
+	require.NoError(t, err,
+		"GAP-0257: multi-page ORDER BY on %d rows returned error", nodeCount)
+
+	count := 0
+	prevID := int64(0)
+	for rows.Next() {
+		var id int64
+		require.NoError(t, rows.Scan(&id))
+		count++
+		assert.Greater(t, id, prevID, "row %d: ascending order broken", count)
+		prevID = id
+	}
+	require.NoError(t, rows.Err())
+	rows.Close()
+	assert.Equal(t, nodeCount, count,
+		"GAP-0257: expected %d sorted rows across multiple pages", nodeCount)
+}
+
+// TestLoad_GAP0257_OrderByMultiKey verifies multi-key ORDER BY on large data.
+func TestLoad_GAP0257_OrderByMultiKey(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+
+	const label = "GAP0257MultiKey"
+	const nodeCount = 1000
+
+	cleanupLabel(t, db, label)
+	defer cleanupLabel(t, db, label)
+
+	createBulkNodes(t, db, label, nodeCount)
+
+	ctx, cancel := context.WithTimeout(context.Background(), loadTestTimeout)
+	defer cancel()
+
+	rows, err := db.QueryContext(ctx, fmt.Sprintf(
+		"MATCH (n:%s) RETURN n.category AS cat, n.id AS id ORDER BY n.category, n.id",
+		label))
+	require.NoError(t, err, "ORDER BY multi-key on 1000 rows failed")
+
+	count := 0
+	prevCat := int64(-1)
+	prevID := int64(-1)
+	for rows.Next() {
+		var cat, id int64
+		require.NoError(t, rows.Scan(&cat, &id))
+		count++
+		if cat == prevCat {
+			assert.Greater(t, id, prevID, "within category %d, id should ascend", cat)
+		} else {
+			assert.GreaterOrEqual(t, cat, prevCat, "categories should ascend")
+		}
+		prevCat = cat
+		prevID = id
+	}
+	require.NoError(t, rows.Err())
+	rows.Close()
+	assert.Equal(t, nodeCount, count)
 }
