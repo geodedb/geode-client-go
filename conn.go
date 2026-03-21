@@ -714,19 +714,50 @@ func countPlaceholders(query string) int {
 	return count
 }
 
+// trailingFrameDrainTimeout is the maximum time spent in the blocking drain
+// inside releaseRows. The drain catches trailing server frames (metrics,
+// heartbeat) that were still in the QUIC socket when the non-blocking
+// TryReceiveProtoBuffered drain ran. In practice these frames arrive within
+// microseconds; the timeout only fires when the server sends none.
+//
+// Override in tests to keep the test suite fast.
+var trailingFrameDrainTimeout = 50 * time.Millisecond //nolint:gochecknoglobals // test override point
+
 // releaseRows is called by Rows.Close() to release the lock and update state.
 //
 //nolint:nestif // draining leftover frames requires checking nested conditions
 func (c *Conn) releaseRows(r *Rows) {
 	if c.activeRows == r {
-		// Drain any remaining frames (metrics, heartbeat) left in the stream
-		// after the final data page was read, to keep the stream in sync.
+		// Phase 1: drain frames already in the 64 KB bufio.Reader buffer
+		// (non-blocking — only checks bytes already read from the socket).
 		for {
 			msg, ok, err := c.transport.TryReceiveProtoBuffered()
 			if err != nil || !ok {
 				break
 			}
 			execResp := msg.GetExecute()
+			if execResp == nil {
+				break
+			}
+			if execResp.GetMetrics() != nil || execResp.GetHeartbeat() != nil {
+				continue
+			}
+			break
+		}
+
+		// Phase 2: short blocking drain to catch trailing frames that were
+		// still in the QUIC socket (not yet in the bufio buffer) when Phase 1
+		// ran. Without this, the stale frame is read by the next query's
+		// ReceiveProto call as if it were the response to the new EXECUTE,
+		// causing stream desynchronisation (BUG-0001 / GAP-0046).
+		drainCtx, drainCancel := context.WithTimeout(context.Background(), trailingFrameDrainTimeout)
+		defer drainCancel()
+		for {
+			resp, err := c.transport.ReceiveProto(drainCtx)
+			if err != nil {
+				break // deadline elapsed or transport closed — stream is clean
+			}
+			execResp := resp.GetExecute()
 			if execResp == nil {
 				break
 			}

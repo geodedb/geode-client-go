@@ -1,10 +1,10 @@
 # GAP Analysis
 
-Last updated: 2026-01-30
+Last updated: 2026-03-21
 Reviewed by: Adversarial Security Review Agent
 Repository: devnw/codepros/geode/geode-client-go
-Commit: b27e102
-Review type: Comprehensive adversarial security review (Round 6 - no new findings)
+Commit: b27e102 → (see git log)
+Review type: Comprehensive adversarial security review (Round 6 - no new findings); BUG-0001 closed 2026-03-21
 
 ## Summary
 
@@ -16,12 +16,28 @@ Open findings by severity:
 - Low: 0
 - Info: 0
 
-Closed findings: 27 (Issues #1-#23, #25-#28)
+Closed findings: 28 (Issues #1-#23, #25-#28; BUG-0001)
 Won't Do findings: 1 (Issue #24)
 
 Top risks (remaining):
 
-- None
+- None outstanding.
+
+## Open Findings
+
+No open findings.
+
+## Closed Findings
+
+### BUG-0001: QUIC stream desynchronization on sequential queries
+
+- **Severity:** Medium
+- **Component:** Transport / Connection
+- **Status:** **Closed** (fixed 2026-03-21)
+- **Documented:** [docs/BUG_STREAM_DESYNC.md](BUG_STREAM_DESYNC.md)
+- **Downstream impact:** divelife-api `GET /v1/feed` returns HTTP 500 intermittently ([GAP-0046](https://gitlab.com/devnw/sealife/divelife-api/-/issues/61))
+- **Root cause:** `releaseRows()` used only a non-blocking `TryReceiveProtoBuffered()` drain. Trailing server frames (metrics, heartbeat) still in the QUIC socket but not yet in the 64 KB `bufio.Reader` were missed, leaving them to be read as responses to the next query.
+- **Fix:** Added a Phase 2 short-deadline blocking drain in `releaseRows()` (`conn.go`). After the non-blocking pass, a `context.WithTimeout(…, trailingFrameDrainTimeout)` blocking `ReceiveProto` loop runs until no metrics/heartbeat frames remain or the deadline elapses. Tests in `conn_stream_desync_test.go` (8 cases) reproduce the exact desync and verify the fix.
 
 ## Stack-ranked findings
 

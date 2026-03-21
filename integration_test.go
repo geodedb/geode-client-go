@@ -14,46 +14,46 @@
 package geode
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/wait"
 )
 
 const (
 	// defaultGeodeImage is pinned to a specific version to prevent supply chain attacks.
 	// Update this version when upgrading the Geode server dependency.
 	// Override with GEODE_IMAGE environment variable if needed.
-	defaultGeodeImage    = "geodedb/geode:latest"
-	defaultGeodePort     = "3141/udp"
-	defaultGeodeGrpcPort = "50051/tcp"
-	startupTimeout       = 60 * time.Second
-	queryTimeout         = 30 * time.Second
-)
+	defaultGeodeImage = "geodedb/geode:latest"
+	defaultGeodePort  = "3141/udp"
+	startupTimeout    = 60 * time.Second
+	queryTimeout      = 30 * time.Second
 
-// geodeContainer holds the running Geode container instance.
-type geodeContainer struct {
-	testcontainers.Container
-	Host     string
-	Port     string
-	DSN      string
-	GrpcPort string
-	GrpcDSN  string
-}
+	// testHMACKey is a fixed 64-hex-char key injected into test containers via
+	// GEODE_AUTH_HMAC_KEY.  The server uses it to initialise the HMAC chain and
+	// auto-generates a random admin password printed to the log on first start.
+	testHMACKey = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 
-var (
-	sharedContainer *geodeContainer
-	containerMu     sync.Mutex
-	containerOnce   sync.Once
+	// testAdminUser is the username the server auto-creates when GEODE_AUTH_HMAC_KEY
+	// is provided and no prior auth state exists.
+	testAdminUser = "geode"
+
+	// testAdminPassphrase is the passphrase we reset the admin account to after
+	// startup so tests can use a stable, known credential.
+	// Must satisfy the server policy: ≥20 chars, ≥3 words, ≥1 uppercase letter.
+	testAdminPassphrase = "Correct horse battery staple"
 )
 
 // getGeodeImage returns the Docker image to use for testing.
@@ -64,109 +64,94 @@ func getGeodeImage() string {
 	return defaultGeodeImage
 }
 
-// startGeodeContainer starts a Geode container for testing.
-func startGeodeContainer(ctx context.Context) (*geodeContainer, error) {
-	req := testcontainers.ContainerRequest{
-		Image:        getGeodeImage(),
-		ExposedPorts: []string{defaultGeodePort, defaultGeodeGrpcPort},
-		// QUIC uses UDP, so we can't use ForListeningPort (TCP only)
-		// Use log-based waiting instead
-		WaitingFor: wait.ForLog("Server ready").WithStartupTimeout(startupTimeout),
-		Cmd: []string{
-			"serve",
-			"--listen", "0.0.0.0:3141",
-			"--listen-grpc", "0.0.0.0:50051",
-			"--log-level", "info",
-		},
+// parseAdminPassword extracts the auto-generated admin password from the
+// server log output.  The server prints exactly one line of the form:
+//
+//	*** Generated admin password: <password> ***
+//
+// when GEODE_AUTH_HMAC_KEY is set and no prior auth state exists.
+func parseAdminPassword(logOutput string) string {
+	const marker = "Generated admin password: "
+	idx := strings.Index(logOutput, marker)
+	if idx < 0 {
+		return ""
 	}
-
-	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: req,
-		Started:          true,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to start container: %w", err)
+	rest := logOutput[idx+len(marker):]
+	if end := strings.Index(rest, " ***"); end >= 0 {
+		rest = rest[:end]
 	}
-
-	host, err := container.Host(ctx)
-	if err != nil {
-		container.Terminate(ctx)
-		return nil, fmt.Errorf("failed to get container host: %w", err)
-	}
-
-	mappedPort, err := container.MappedPort(ctx, defaultGeodePort)
-	if err != nil {
-		container.Terminate(ctx)
-		return nil, fmt.Errorf("failed to get mapped port: %w", err)
-	}
-
-	grpcMapped, err := container.MappedPort(ctx, defaultGeodeGrpcPort)
-	if err != nil {
-		container.Terminate(ctx)
-		return nil, fmt.Errorf("failed to get gRPC mapped port: %w", err)
-	}
-
-	dsn := fmt.Sprintf("%s:%s?insecure=true", host, mappedPort.Port())
-	grpcDSN := fmt.Sprintf("grpc://%s:%s?tls=0", host, grpcMapped.Port())
-
-	return &geodeContainer{
-		Container: container,
-		Host:      host,
-		Port:      mappedPort.Port(),
-		DSN:       dsn,
-		GrpcPort:  grpcMapped.Port(),
-		GrpcDSN:   grpcDSN,
-	}, nil
+	return strings.TrimSpace(rest)
 }
 
-// getSharedContainer returns a shared container for all tests.
-// If GEODE_TEST_DSN is set, uses that DSN instead of starting a testcontainer.
-func getSharedContainer(t *testing.T) *geodeContainer {
-	containerMu.Lock()
-	defer containerMu.Unlock()
-
-	if sharedContainer != nil {
-		return sharedContainer
-	}
-
-	// Check if manual DSN is provided (skip testcontainers)
-	if dsn := os.Getenv("GEODE_TEST_DSN"); dsn != "" {
-		t.Logf("Using manual server: %s", dsn)
-		sharedContainer = &geodeContainer{
-			Container: nil, // No container to manage
-			DSN:       dsn,
-		}
-		return sharedContainer
-	}
-
-	ctx := context.Background()
-	container, err := startGeodeContainer(ctx)
+// readContainerLogs reads all current log output from the container and
+// returns it as a single string.  It handles the Docker log-stream
+// multiplexing format (8-byte header per frame).
+func readContainerLogs(ctx context.Context, container testcontainers.Container) (string, error) {
+	logReader, err := container.Logs(ctx)
 	if err != nil {
-		t.Fatalf("Failed to start Geode container: %v", err)
+		return "", fmt.Errorf("container.Logs: %w", err)
 	}
+	defer logReader.Close()
 
-	sharedContainer = container
-
-	// Register cleanup (only if we started a container)
-	t.Cleanup(func() {
-		containerMu.Lock()
-		defer containerMu.Unlock()
-		if sharedContainer != nil && sharedContainer.Container != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			sharedContainer.Terminate(ctx)
-			sharedContainer = nil
+	var buf bytes.Buffer
+	if _, err := stdcopy.StdCopy(&buf, &buf, logReader); err != nil {
+		// Not all environments multiplex; fall back to a raw read.
+		buf.Reset()
+		logReader2, err2 := container.Logs(ctx)
+		if err2 != nil {
+			return "", fmt.Errorf("container.Logs (retry): %w", err2)
 		}
-	})
-
-	return sharedContainer
+		defer logReader2.Close()
+		if _, err2 = io.Copy(&buf, logReader2); err2 != nil {
+			return "", fmt.Errorf("io.Copy logs: %w", err2)
+		}
+	}
+	return buf.String(), nil
 }
 
-// openTestDB opens a database connection to the test container.
+// setupContainerAuth reads the auto-generated admin password from the server
+// log and changes it to testAdminPassphrase so tests can use a stable DSN.
+//
+// Background: when GEODE_AUTH_HMAC_KEY is set, the server auto-creates the
+// "geode" admin user with a random one-time password on first boot.  That
+// password is printed to the log and must be changed before any queries can
+// run (the server enforces a "password reset required" policy on the initial
+// credential).
+func setupContainerAuth(ctx context.Context, container testcontainers.Container) error {
+	logs, err := readContainerLogs(ctx, container)
+	if err != nil {
+		return err
+	}
+
+	genPass := parseAdminPassword(logs)
+	if genPass == "" {
+		return fmt.Errorf("could not find generated admin password in container logs")
+	}
+
+	// Reset the admin password to a known, policy-compliant passphrase.
+	exitCode, _, execErr := container.Exec(ctx, []string{
+		"geode", "query",
+		"--server", "localhost:3141",
+		"--insecure-tls-skip-verify",
+		"--no-saved-session",
+		"--user", testAdminUser,
+		"--password", genPass,
+		fmt.Sprintf("ALTER USER %s SET PASSWORD '%s'", testAdminUser, testAdminPassphrase),
+	})
+	if execErr != nil || exitCode != 0 {
+		return fmt.Errorf("failed to reset admin password (exit %d): %w", exitCode, execErr)
+	}
+	return nil
+}
+
+// openTestDB opens a database connection to the shared test container.
 func openTestDB(t *testing.T) *sql.DB {
-	container := getSharedContainer(t)
+	t.Helper()
+	if sharedDSN == "" {
+		t.Fatal("sharedDSN not set: TestMain did not run or GEODE_TEST_DSN is unset")
+	}
 
-	db, err := sql.Open("geode", container.DSN)
+	db, err := sql.Open("geode", sharedDSN)
 	require.NoError(t, err, "Failed to open database connection")
 
 	db.SetMaxOpenConns(5)
@@ -1314,9 +1299,10 @@ func TestDocker_ForLoopWithFilter(t *testing.T) {
 // =============================================================================
 
 func TestDocker_ConnectionPooling(t *testing.T) {
-	container := getSharedContainer(t)
-
-	db, err := sql.Open("geode", container.DSN)
+	if sharedDSN == "" {
+		t.Fatal("sharedDSN not set")
+	}
+	db, err := sql.Open("geode", sharedDSN)
 	require.NoError(t, err)
 	defer db.Close()
 
@@ -1362,22 +1348,19 @@ var (
 )
 
 // getBenchDB returns a shared database connection for benchmarks.
+// Reuses the shared container started by TestMain.
 func getBenchDB(b *testing.B) *sql.DB {
+	b.Helper()
 	benchOnce.Do(func() {
-		ctx := context.Background()
-		container, err := startGeodeContainer(ctx)
-		if err != nil {
-			b.Fatalf("Failed to start Geode container: %v", err)
+		if sharedDSN == "" {
+			b.Fatal("sharedDSN not set: TestMain did not run or GEODE_TEST_DSN is unset")
 		}
-
-		db, err := sql.Open("geode", container.DSN)
+		db, err := sql.Open("geode", sharedDSN)
 		if err != nil {
 			b.Fatalf("Failed to open database: %v", err)
 		}
-
 		db.SetMaxOpenConns(10)
 		db.SetMaxIdleConns(5)
-
 		benchDB = db
 	})
 	return benchDB
