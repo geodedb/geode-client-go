@@ -21,12 +21,17 @@ GEODE_GRPC_PORT ?= 50051
 FUZZ_TIME ?= 30s
 
 .PHONY: all build clean test test-unit test-integration test-integration-docker test-integration-docker-manual test-all \
+        test-load test-load-docker \
         bench bench-integration lint fmt fmt-check vet doc coverage ci ci-quick ci-full \
         fuzz fuzz-dsn fuzz-frame fuzz-query fuzz-param fuzz-value fuzz-type \
         docker-start docker-stop docker-logs docker-status docker-pull docker-wait \
         pre-commit pre-commit-install pre-commit-run pre-commit-update \
         generate-proto \
         help deps update tidy
+
+# Load test timeout — longer than the default 10 min to allow multi-page and
+# high-parallelism tests to finish under slow CI environments.
+LOAD_TIMEOUT ?= 20m
 
 # Default target - run everything (except integration tests which require server)
 all: fmt-check vet lint test-unit bench-quick
@@ -56,11 +61,13 @@ help:
 	@echo "Test targets:"
 	@echo "  make test           - Run all tests (unit only)"
 	@echo "  make test-unit      - Run unit tests only (short mode)"
-	@echo "  make test-integration              - Run integration tests (requires manual Geode server)"
-	@echo "  make test-integration-docker       - Run integration tests with testcontainers (auto)"
+	@echo "  make test-integration              - Run integration + load tests (requires manual Geode server)"
+	@echo "  make test-integration-docker       - Run integration + load tests with testcontainers (auto)"
 	@echo "  make test-integration-docker-manual - Run integration tests with manual Docker container"
 	@echo "  make test-integration-grpc         - Run gRPC integration tests (requires manual server)"
 	@echo "  make test-integration-docker-grpc  - Run gRPC integration tests with testcontainers"
+	@echo "  make test-load                     - Run load tests only (requires manual Geode server)"
+	@echo "  make test-load-docker              - Run load tests only with testcontainers"
 	@echo "  make test-all       - Run unit + Docker integration tests"
 	@echo ""
 	@echo "Quality targets:"
@@ -182,24 +189,40 @@ test-unit:
 	@echo "✓ Unit tests complete"
 
 test-integration:
-	@echo "Running integration tests (manual server)..."
+	@echo "Running integration + load tests (manual server)..."
 	@echo ""
 	@echo "Connecting to Geode server at $(GEODE_HOST):$(GEODE_PORT)"
 	@echo "Start server first: cd ../geode && ./zig-out/bin/geode serve"
 	@echo "Or use: make test-integration-docker"
 	@echo ""
-	GEODE_TEST_DSN="$(GEODE_HOST):$(GEODE_PORT)?insecure=true" $(GO) test -v -tags=integration $(GOFLAGS) ./...
+	GEODE_TEST_DSN="$(GEODE_HOST):$(GEODE_PORT)?insecure=true" $(GO) test -v -tags=integration -timeout=$(LOAD_TIMEOUT) $(GOFLAGS) ./...
 	@echo ""
-	@echo "✓ Integration tests complete"
+	@echo "✓ Integration + load tests complete"
+
+test-load:
+	@echo "Running load tests only (manual server)..."
+	@echo ""
+	@echo "Connecting to Geode server at $(GEODE_HOST):$(GEODE_PORT)"
+	@echo ""
+	GEODE_TEST_DSN="$(GEODE_HOST):$(GEODE_PORT)?insecure=true" $(GO) test -v -tags=integration -timeout=$(LOAD_TIMEOUT) -run='^TestLoad_' $(GOFLAGS) ./...
+	@echo ""
+	@echo "✓ Load tests complete"
+
+test-load-docker:
+	@echo "Running load tests with Docker (testcontainers)..."
+	@echo ""
+	GEODE_IMAGE=$(GEODE_IMAGE) $(GO) test -v -tags=integration -timeout=$(LOAD_TIMEOUT) -run='^TestLoad_' $(GOFLAGS) ./...
+	@echo ""
+	@echo "✓ Docker load tests complete"
 
 test-integration-docker:
-	@echo "Running integration tests with Docker (testcontainers)..."
+	@echo "Running integration + load tests with Docker (testcontainers)..."
 	@echo ""
 	@echo "Using Docker image: $(GEODE_IMAGE)"
 	@echo ""
-	GEODE_IMAGE=$(GEODE_IMAGE) $(GO) test -v -tags=integration $(GOFLAGS) ./...
+	GEODE_IMAGE=$(GEODE_IMAGE) $(GO) test -v -tags=integration -timeout=$(LOAD_TIMEOUT) $(GOFLAGS) ./...
 	@echo ""
-	@echo "✓ Docker integration tests complete"
+	@echo "✓ Docker integration + load tests complete"
 
 # Manual Docker container management (like Zig client)
 test-integration-docker-manual: docker-start docker-wait
