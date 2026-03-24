@@ -560,6 +560,12 @@ func (c *Conn) ResetSession(ctx context.Context) error {
 		return driver.ErrBadConn
 	}
 
+	// Poisoned connection: still mid-fetch or has un-closed rows.
+	// Return ErrBadConn so database/sql discards rather than reuses.
+	if c.state == StateFetching || c.activeRows != nil {
+		return driver.ErrBadConn
+	}
+
 	// If in transaction, rollback
 	if c.inTx {
 		msg := proto.NewRollbackMessage(&proto.RollbackRequest{})
@@ -588,7 +594,8 @@ func (c *Conn) IsValid() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	return c.state != StateClosed && c.state != StateInError && !c.transport.IsClosed()
+	return c.state != StateClosed && c.state != StateInError && c.state != StateFetching &&
+		c.activeRows == nil && !c.transport.IsClosed()
 }
 
 // CheckNamedValue validates a named value before use.
@@ -742,6 +749,11 @@ func (c *Conn) releaseRows(r *Rows) {
 			if execResp.GetMetrics() != nil || execResp.GetHeartbeat() != nil {
 				continue
 			}
+			// Data page frame: consume it and continue draining.
+			// Trailing metrics/heartbeat may follow even after the final page.
+			if execResp.GetPage() != nil {
+				continue
+			}
 			break
 		}
 
@@ -762,6 +774,11 @@ func (c *Conn) releaseRows(r *Rows) {
 				break
 			}
 			if execResp.GetMetrics() != nil || execResp.GetHeartbeat() != nil {
+				continue
+			}
+			// Data page frame: consume it and continue draining.
+			// Trailing metrics/heartbeat may follow even after the final page.
+			if execResp.GetPage() != nil {
 				continue
 			}
 			break
