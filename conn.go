@@ -163,7 +163,58 @@ func connect(ctx context.Context, cfg *Config) (*Conn, error) {
 		return nil, err
 	}
 
+	// Auto-select graph if configured in DSN.
+	if cfg.Graph != "" {
+		if err := conn.execInit(ctx, "CREATE GRAPH IF NOT EXISTS "+cfg.Graph); err != nil {
+			_ = transport.Close()
+			return nil, fmt.Errorf("create graph %s: %w", cfg.Graph, err)
+		}
+		if err := conn.execInit(ctx, "USE GRAPH "+cfg.Graph); err != nil {
+			_ = transport.Close()
+			return nil, fmt.Errorf("use graph %s: %w", cfg.Graph, err)
+		}
+	}
+
 	return conn, nil
+}
+
+// execInit executes a GQL statement during connection initialization (before
+// the connection is handed to the pool). It does not acquire the mutex because
+// the connection is not yet shared. This is used for graph selection and other
+// post-HELLO setup queries.
+func (c *Conn) execInit(ctx context.Context, query string) error {
+	msg := proto.NewExecuteMessage(&proto.ExecuteRequest{
+		Query: query,
+	})
+	if err := c.transport.SendProto(ctx, msg); err != nil {
+		return err
+	}
+
+	resp, err := c.transport.ReceiveProto(ctx)
+	if err != nil {
+		return err
+	}
+
+	execResp := resp.GetExecute()
+	if execResp == nil {
+		return fmt.Errorf("expected Execute response for init query")
+	}
+
+	if execResp.GetError() != nil {
+		return &DriverError{
+			Code:    execResp.GetError().GetCode(),
+			Message: execResp.GetError().GetMessage(),
+		}
+	}
+
+	// Drain the full execution stream.
+	if execResp.GetSchema() != nil || execResp.GetPage() != nil {
+		if err := c.drainExecStream(ctx, execResp); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // hello performs the HELLO handshake with the server.

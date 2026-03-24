@@ -112,6 +112,13 @@ type Config struct {
 	//   db.SetConnMaxLifetime(d) - limits connection age
 	//   db.SetConnMaxIdleTime(d) - limits idle time
 	ConnectTimeout int // in seconds, 0 = no timeout
+
+	// Graph is the name of the graph to select after connecting.
+	// When set, the driver automatically executes
+	// CREATE GRAPH IF NOT EXISTS <graph> and USE GRAPH <graph>
+	// after the HELLO handshake. This ensures every pooled connection
+	// targets the correct graph without manual initialization.
+	Graph string
 }
 
 // Addr returns the server address in host:port format.
@@ -416,6 +423,9 @@ func applyQueryParams(params url.Values, cfg *Config) error {
 
 		case "pass", "password":
 			cfg.Password = val
+
+		case "graph":
+			cfg.Graph = val
 
 		default:
 			// Ignore unknown parameters for forward compatibility
