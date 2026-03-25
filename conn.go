@@ -219,10 +219,18 @@ func (c *Conn) execInit(ctx context.Context, query string) error {
 
 // hello performs the HELLO handshake with the server.
 func (c *Conn) hello(ctx context.Context) error {
-	msg := proto.NewHelloMessage(&proto.HelloRequest{
-		Username: c.cfg.Username,
-		Password: c.cfg.Password,
-	})
+	req := &proto.HelloRequest{
+		Username:          c.cfg.Username,
+		Password:          c.cfg.Password,
+		ClientName:        c.cfg.HelloName,
+		ClientVersion:     c.cfg.HelloVersion,
+		WantedConformance: c.cfg.Conformance,
+	}
+	if c.cfg.Graph != "" {
+		graph := c.cfg.Graph
+		req.Graph = &graph
+	}
+	msg := proto.NewHelloMessage(req)
 	if err := c.transport.SendProto(ctx, msg); err != nil {
 		return fmt.Errorf("failed to send HELLO: %w", err)
 	}

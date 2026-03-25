@@ -648,3 +648,33 @@ func isConfigError(err error, target **ConfigError) bool {
 	}
 	return false
 }
+
+// TestParseDSN_GraphPath tests URL path-based graph binding.
+func TestParseDSN_GraphPath(t *testing.T) {
+	tests := []struct {
+		name      string
+		dsn       string
+		wantGraph string
+	}{
+		{"quic path", "quic://localhost:3141/mygraph", "mygraph"},
+		{"grpc path", "grpc://localhost:50051/testgraph", "testgraph"},
+		{"path with hyphen", "quic://localhost:3141/my-graph", "my-graph"},
+		{"path with underscore", "quic://localhost:3141/my_graph", "my_graph"},
+		{"no path", "quic://localhost:3141", ""},
+		{"root path only", "quic://localhost:3141/", ""},
+		{"query param graph", "quic://localhost:3141?graph=querygraph", "querygraph"},
+		{"path takes priority over no-param", "quic://localhost:3141/pathgraph", "pathgraph"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := ParseDSN(tt.dsn)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.Graph != tt.wantGraph {
+				t.Errorf("Graph = %q, want %q", cfg.Graph, tt.wantGraph)
+			}
+		})
+	}
+}

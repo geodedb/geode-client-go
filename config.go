@@ -264,6 +264,11 @@ func parseURLDSN(dsn string, cfg *Config) (*Config, error) {
 
 	cfg.Host = host
 
+	// Extract graph from URL path (e.g. quic://host:3141/mygraph)
+	if u.Path != "" && u.Path != "/" {
+		cfg.Graph = strings.TrimPrefix(u.Path, "/")
+	}
+
 	// Extract credentials from URL userinfo (user:pass@host)
 	if u.User != nil {
 		if username := u.User.Username(); username != "" {
