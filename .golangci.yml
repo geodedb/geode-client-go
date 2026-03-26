@@ -174,6 +174,11 @@ linters:
       - sqlclosecheck
       - rowserrcheck
       path: ^(example|cmd/benchmark)/
+    # crypto/ package name intentionally matches stdlib; callers import as geocrypto
+    - linters:
+      - revive
+      text: avoid package names that conflict
+      path: ^crypto/
     paths:
     - testdata
     - third_party$
