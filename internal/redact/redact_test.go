@@ -99,6 +99,16 @@ func TestDSN(t *testing.T) {
 			dsn:  "localhost:3141",
 			want: "localhost:3141",
 		},
+		{
+			name: "bare user:pass@host without scheme",
+			dsn:  "admin:secret@localhost:3141",
+			want: "***:***@localhost:3141",
+		},
+		{
+			name: "bare user@host without scheme",
+			dsn:  "admin@localhost:3141",
+			want: "***@localhost:3141",
+		},
 	}
 
 	for _, tt := range tests {
