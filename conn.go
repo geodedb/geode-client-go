@@ -122,6 +122,79 @@ func newConn(cfg *Config, transport Transport) *Conn {
 	}
 }
 
+// connectPooled creates a new logical connection using a QUIC stream from the
+// shared pool. The HELLO handshake is only performed on the first stream of
+// each underlying QUIC connection; subsequent streams skip it.
+func connectPooled(ctx context.Context, cfg *Config, pool *QUICPool) (*Conn, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+
+	if cfg.ConnectTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(cfg.ConnectTimeout)*time.Second)
+		defer cancel()
+	}
+
+	transport, err := NewPooledQUICTransport(ctx, pool)
+	if err != nil {
+		return nil, err
+	}
+
+	conn := newConn(cfg, transport)
+
+	if err := pooledHello(ctx, conn, transport, pool); err != nil {
+		_ = transport.Close()
+		return nil, err
+	}
+
+	if err := pooledGraphInit(ctx, conn, cfg); err != nil {
+		_ = transport.Close()
+		return nil, err
+	}
+
+	return conn, nil
+}
+
+// pooledHello performs the HELLO handshake if this is the first stream on the
+// QUIC connection. Uses double-checked locking to ensure exactly one HELLO.
+func pooledHello(ctx context.Context, conn *Conn, transport *QUICTransport, pool *QUICPool) error {
+	if transport.pc.isAuthed() {
+		return nil
+	}
+
+	// Double-check under lock to avoid racing with a concurrent first stream.
+	transport.pc.mu.Lock()
+	alreadyAuthed := transport.pc.authed
+	transport.pc.mu.Unlock()
+
+	if alreadyAuthed {
+		return nil
+	}
+
+	if _, err := conn.hello(ctx); err != nil {
+		pool.remove(transport.pc)
+		return err
+	}
+	transport.pc.markAuthed()
+	return nil
+}
+
+// pooledGraphInit handles graph creation and selection for pooled connections.
+// Each stream needs its own USE GRAPH since graph context is per-session.
+func pooledGraphInit(ctx context.Context, conn *Conn, cfg *Config) error {
+	if cfg.Graph == "" {
+		return nil
+	}
+	if err := conn.execInit(ctx, "CREATE GRAPH IF NOT EXISTS "+cfg.Graph); err != nil {
+		return fmt.Errorf("create graph %s: %w", cfg.Graph, err)
+	}
+	if err := conn.execInit(ctx, "USE GRAPH "+cfg.Graph); err != nil {
+		return fmt.Errorf("use graph %s: %w", cfg.Graph, err)
+	}
+	return nil
+}
+
 // connect establishes a connection to the server and performs the HELLO handshake.
 func connect(ctx context.Context, cfg *Config) (*Conn, error) {
 	// Validate config
@@ -157,14 +230,17 @@ func connect(ctx context.Context, cfg *Config) (*Conn, error) {
 
 	conn := newConn(cfg, transport)
 
-	// Perform HELLO handshake
-	if err := conn.hello(ctx); err != nil {
+	// Perform HELLO handshake. If the server binds the graph during HELLO
+	// (server ≥ v0.2.x), serverGraph will be non-empty and we skip the
+	// explicit CREATE/USE GRAPH statements below.
+	serverGraph, err := conn.hello(ctx)
+	if err != nil {
 		_ = transport.Close()
 		return nil, err
 	}
 
-	// Auto-select graph if configured in DSN.
-	if cfg.Graph != "" {
+	// Auto-select graph if configured in DSN and not already bound by server.
+	if cfg.Graph != "" && serverGraph == "" {
 		if err := conn.execInit(ctx, "CREATE GRAPH IF NOT EXISTS "+cfg.Graph); err != nil {
 			_ = transport.Close()
 			return nil, fmt.Errorf("create graph %s: %w", cfg.Graph, err)
@@ -218,7 +294,9 @@ func (c *Conn) execInit(ctx context.Context, query string) error {
 }
 
 // hello performs the HELLO handshake with the server.
-func (c *Conn) hello(ctx context.Context) error {
+// It returns the graph name bound by the server (from HelloResponse.Graph),
+// or "" if the server did not bind a graph during the handshake.
+func (c *Conn) hello(ctx context.Context) (string, error) {
 	req := &proto.HelloRequest{
 		Username:          c.cfg.Username,
 		Password:          c.cfg.Password,
@@ -232,28 +310,28 @@ func (c *Conn) hello(ctx context.Context) error {
 	}
 	msg := proto.NewHelloMessage(req)
 	if err := c.transport.SendProto(ctx, msg); err != nil {
-		return fmt.Errorf("failed to send HELLO: %w", err)
+		return "", fmt.Errorf("failed to send HELLO: %w", err)
 	}
 
 	// Read and validate HELLO response
 	resp, err := c.transport.ReceiveProto(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to receive HELLO response: %w", err)
+		return "", fmt.Errorf("failed to receive HELLO response: %w", err)
 	}
 
 	helloResp := resp.GetHello()
 	if helloResp == nil {
-		return fmt.Errorf("expected HELLO response")
+		return "", fmt.Errorf("expected HELLO response")
 	}
 
 	if !helloResp.GetSuccess() {
-		return &DriverError{
+		return "", &DriverError{
 			Code:    "AUTH",
 			Message: helloResp.GetErrorMessage(),
 		}
 	}
 
-	return nil
+	return helloResp.GetGraph(), nil
 }
 
 // Prepare returns a prepared statement.

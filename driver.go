@@ -99,28 +99,49 @@ func (d *Driver) Open(name string) (driver.Conn, error) {
 
 // OpenConnector returns a Connector for the given DSN.
 // This allows for connection pooling with context support.
+//
+// For QUIC transport, a shared connection pool is created so that multiple
+// database/sql connections can multiplex streams over a small number of
+// underlying QUIC connections, avoiding per-query TLS handshake overhead.
 func (d *Driver) OpenConnector(name string) (driver.Connector, error) {
 	cfg, err := ParseDSN(name)
 	if err != nil {
 		return nil, err
 	}
-	return &Connector{
+
+	c := &Connector{
 		driver: d,
 		cfg:    cfg,
-	}, nil
+	}
+
+	// Create a shared QUIC pool for stream multiplexing
+	if cfg.Transport == TransportQUIC {
+		c.quicPool = NewQUICPool(cfg, DefaultQUICPoolSize)
+	}
+
+	return c, nil
 }
 
 // Connector implements driver.Connector.
 type Connector struct {
-	driver *Driver
-	cfg    *Config
+	driver   *Driver
+	cfg      *Config
+	quicPool *QUICPool // shared QUIC connection pool for stream multiplexing
 }
 
 // Compile-time interface check.
 var _ driver.Connector = (*Connector)(nil)
 
 // Connect returns a new connection to the database.
+//
+// For QUIC transport with a shared pool, this opens a new QUIC stream on a
+// pooled connection rather than dialing a new QUIC connection. The HELLO
+// handshake is performed once per underlying QUIC connection, and subsequent
+// streams inherit the authenticated state.
 func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
+	if c.quicPool != nil {
+		return connectPooled(ctx, c.cfg, c.quicPool)
+	}
 	return connect(ctx, c.cfg)
 }
 

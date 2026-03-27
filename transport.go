@@ -47,8 +47,22 @@ type Transport interface {
 }
 
 // QUICTransport implements Transport over QUIC with TLS using length-prefixed protobuf.
+//
+// QUICTransport operates in one of two modes:
+//   - Standalone mode: owns a dedicated QUIC connection (conn != nil, pool == nil).
+//     Created via NewQUICTransport. Close() shuts down both stream and connection.
+//   - Pooled mode: uses a stream on a shared pooled connection (pool != nil, pc != nil).
+//     Created via NewPooledQUICTransport. Close() shuts down only the stream and
+//     releases the pooled connection back to the pool.
 type QUICTransport struct {
-	conn   *quic.Conn
+	// Standalone mode fields (legacy, one-connection-per-transport)
+	conn *quic.Conn
+
+	// Pooled mode fields (stream multiplexing)
+	pool *QUICPool
+	pc   *pooledConn
+
+	// Shared fields
 	stream *quic.Stream
 	br     *bufio.Reader
 
@@ -119,6 +133,30 @@ func NewQUICTransport(ctx context.Context, cfg *Config) (*QUICTransport, error) 
 	}
 
 	return t, nil
+}
+
+// NewPooledQUICTransport creates a new QUIC transport that uses a stream from a
+// shared QUIC connection pool. This avoids the TLS handshake overhead for each
+// new database/sql connection.
+func NewPooledQUICTransport(ctx context.Context, pool *QUICPool) (*QUICTransport, error) {
+	pc, err := pool.acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	stream, err := pc.openStream(ctx)
+	if err != nil {
+		pool.release(pc)
+		return nil, err
+	}
+
+	return &QUICTransport{
+		pool:   pool,
+		pc:     pc,
+		stream: stream,
+		br:     bufio.NewReaderSize(stream, quicReadBufferSize),
+		addr:   pc.addr,
+	}, nil
 }
 
 // SendProto writes a length-prefixed protobuf message to the server.
@@ -337,6 +375,10 @@ func (t *QUICTransport) TryReceiveProtoBuffered() (*proto.QuicServerMessage, boo
 }
 
 // Close closes the transport.
+//
+// In standalone mode, both the stream and QUIC connection are closed.
+// In pooled mode, only the stream is closed and the pooled connection is
+// released back to the pool for reuse by other transports.
 func (t *QUICTransport) Close() error {
 	t.mu.Lock()
 	if t.closed {
@@ -355,8 +397,11 @@ func (t *QUICTransport) Close() error {
 		}
 	}
 
-	// Close the connection
-	if t.conn != nil {
+	if t.pool != nil {
+		// Pooled mode: release the connection back to the pool (don't close it)
+		t.pool.release(t.pc)
+	} else if t.conn != nil {
+		// Standalone mode: close the dedicated QUIC connection
 		if err := t.conn.CloseWithError(0, "closing"); err != nil && firstErr == nil {
 			firstErr = err
 		}
