@@ -864,8 +864,14 @@ func countPlaceholders(query string) int {
 // TryReceiveProtoBuffered drain ran. In practice these frames arrive within
 // microseconds; the timeout only fires when the server sends none.
 //
+// Reduced from 50ms to 1ms (#540): the Geode server does not send trailing
+// metrics/heartbeat frames after the final data page, so the blocking drain
+// was always hitting the full timeout. 1ms is sufficient to catch any
+// in-flight frames on localhost while reducing per-query overhead from 50ms
+// to 1ms (19 QPS → ~500 QPS improvement at c=1).
+//
 // Override in tests to keep the test suite fast.
-var trailingFrameDrainTimeout = 50 * time.Millisecond //nolint:gochecknoglobals // test override point
+var trailingFrameDrainTimeout = 1 * time.Millisecond //nolint:gochecknoglobals // test override point
 
 // releaseRows is called by Rows.Close() to release the lock and update state.
 //
@@ -899,6 +905,12 @@ func (c *Conn) releaseRows(r *Rows) {
 		// ran. Without this, the stale frame is read by the next query's
 		// ReceiveProto call as if it were the response to the new EXECUTE,
 		// causing stream desynchronisation (BUG-0001 / GAP-0046).
+		//
+		// Phase 2: short blocking drain (1ms) to catch trailing frames.
+		// The timeout was reduced from 50ms to 1ms since Geode's server
+		// does not send trailing metrics/heartbeat frames after the final
+		// data page in normal operation. 1ms is sufficient to catch any
+		// in-flight frames while keeping per-query overhead minimal.
 		drainCtx, drainCancel := context.WithTimeout(context.Background(), trailingFrameDrainTimeout)
 		defer drainCancel()
 		for {
@@ -913,8 +925,6 @@ func (c *Conn) releaseRows(r *Rows) {
 			if execResp.GetMetrics() != nil || execResp.GetHeartbeat() != nil {
 				continue
 			}
-			// Data page frame: consume it and continue draining.
-			// Trailing metrics/heartbeat may follow even after the final page.
 			if execResp.GetPage() != nil {
 				continue
 			}
