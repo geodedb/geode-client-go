@@ -181,14 +181,18 @@ func pooledHello(ctx context.Context, conn *Conn, transport *QUICTransport, pool
 }
 
 // pooledGraphInit handles graph creation and selection for pooled connections.
-// Each stream needs its own USE GRAPH since graph context is per-session.
+// When the server already bound the graph via HELLO (DSN path), USE GRAPH
+// is a no-op on the server (same-graph idempotent). For connections where
+// the graph was set via ?graph= query parameter, we still need CREATE + USE.
 func pooledGraphInit(ctx context.Context, conn *Conn, cfg *Config) error {
 	if cfg.Graph == "" {
 		return nil
 	}
+	// CREATE GRAPH is idempotent — safe even if server already created it.
 	if err := conn.execInit(ctx, "CREATE GRAPH IF NOT EXISTS "+cfg.Graph); err != nil {
 		return fmt.Errorf("create graph %s: %w", cfg.Graph, err)
 	}
+	// USE GRAPH is idempotent when matching the bound graph (server v0.2.25+).
 	if err := conn.execInit(ctx, "USE GRAPH "+cfg.Graph); err != nil {
 		return fmt.Errorf("use graph %s: %w", cfg.Graph, err)
 	}
