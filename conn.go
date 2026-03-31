@@ -148,7 +148,7 @@ func connectPooled(ctx context.Context, cfg *Config, pool *QUICPool) (*Conn, err
 		return nil, err
 	}
 
-	if err := pooledGraphInit(ctx, conn, cfg); err != nil {
+	if err := pooledGraphInit(ctx, conn, cfg, transport); err != nil {
 		_ = transport.Close()
 		return nil, err
 	}
@@ -172,27 +172,33 @@ func pooledHello(ctx context.Context, conn *Conn, transport *QUICTransport, pool
 		return nil
 	}
 
-	if _, err := conn.hello(ctx); err != nil {
+	serverGraph, err := conn.hello(ctx)
+	if err != nil {
 		pool.remove(transport.pc)
 		return err
 	}
-	transport.pc.markAuthed()
+	transport.pc.markAuthed(serverGraph)
 	return nil
 }
 
 // pooledGraphInit handles graph creation and selection for pooled connections.
 // When the server already bound the graph via HELLO (DSN path), USE GRAPH
-// is a no-op on the server (same-graph idempotent). For connections where
-// the graph was set via ?graph= query parameter, we still need CREATE + USE.
-func pooledGraphInit(ctx context.Context, conn *Conn, cfg *Config) error {
+// must be skipped — the server rejects it for DSN-bound sessions.
+func pooledGraphInit(ctx context.Context, conn *Conn, cfg *Config, transport *QUICTransport) error {
 	if cfg.Graph == "" {
 		return nil
 	}
+
+	// If the server bound the graph during HELLO (DSN path), skip
+	// CREATE/USE GRAPH — the session is already targeting the correct graph.
+	if transport.pc.isGraphBound() {
+		return nil
+	}
+
 	// CREATE GRAPH is idempotent — safe even if server already created it.
 	if err := conn.execInit(ctx, "CREATE GRAPH IF NOT EXISTS "+cfg.Graph); err != nil {
 		return fmt.Errorf("create graph %s: %w", cfg.Graph, err)
 	}
-	// USE GRAPH is idempotent when matching the bound graph (server v0.2.25+).
 	if err := conn.execInit(ctx, "USE GRAPH "+cfg.Graph); err != nil {
 		return fmt.Errorf("use graph %s: %w", cfg.Graph, err)
 	}

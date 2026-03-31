@@ -77,10 +77,23 @@ func TestPooledConn_AuthState(t *testing.T) {
 		t.Error("new pooled connection should not be authed")
 	}
 
-	pc.markAuthed()
+	pc.markAuthed("")
 
 	if !pc.isAuthed() {
 		t.Error("pooled connection should be authed after markAuthed")
+	}
+
+	if pc.isGraphBound() {
+		t.Error("pooled connection should not be graph-bound with empty serverGraph")
+	}
+}
+
+func TestPooledConn_GraphBound(t *testing.T) {
+	pc := &pooledConn{}
+	pc.markAuthed("my_graph")
+
+	if !pc.isGraphBound() {
+		t.Error("pooled connection should be graph-bound after markAuthed with graph")
 	}
 }
 

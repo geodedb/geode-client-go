@@ -28,11 +28,12 @@ type QUICPool struct {
 
 // pooledConn wraps a single QUIC connection with metadata for stream management.
 type pooledConn struct {
-	qConn  *quic.Conn
-	mu     sync.Mutex
-	active int32  // atomic: number of active streams
-	authed bool   // HELLO handshake completed on this connection
-	addr   string // remote address for diagnostics
+	qConn      *quic.Conn
+	mu         sync.Mutex
+	active     int32  // atomic: number of active streams
+	authed     bool   // HELLO handshake completed on this connection
+	graphBound bool   // server bound graph during HELLO (DSN path)
+	addr       string // remote address for diagnostics
 }
 
 // NewQUICPool creates a new QUIC connection pool for the given config.
@@ -202,11 +203,22 @@ func isQUICConnAlive(qConn *quic.Conn) bool {
 }
 
 // markAuthed marks a pooled connection as having completed the HELLO handshake.
+// If serverGraph is non-empty the server bound the graph during HELLO (DSN
+// path) and subsequent USE GRAPH must be skipped.
 // Thread-safe.
-func (pc *pooledConn) markAuthed() {
+func (pc *pooledConn) markAuthed(serverGraph string) {
 	pc.mu.Lock()
 	pc.authed = true
+	pc.graphBound = serverGraph != ""
 	pc.mu.Unlock()
+}
+
+// isGraphBound returns whether the server bound the graph during HELLO.
+// Thread-safe.
+func (pc *pooledConn) isGraphBound() bool {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	return pc.graphBound
 }
 
 // isAuthed returns whether the HELLO handshake has been completed.
