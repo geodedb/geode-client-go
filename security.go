@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 )
 
 // maxCertFileSize is the maximum size for certificate files (1MB).
@@ -148,6 +149,7 @@ func loadClientCertificate(certPath, keyPath string) (tls.Certificate, error) {
 }
 
 func readLimitedFile(path, label string) ([]byte, error) {
+	path = filepath.Clean(path)
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, &SecurityError{

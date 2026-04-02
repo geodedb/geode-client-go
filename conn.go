@@ -884,62 +884,18 @@ func countPlaceholders(query string) int {
 var trailingFrameDrainTimeout = 1 * time.Millisecond //nolint:gochecknoglobals // test override point
 
 // releaseRows is called by Rows.Close() to release the lock and update state.
-//
-//nolint:nestif // draining leftover frames requires checking nested conditions
 func (c *Conn) releaseRows(r *Rows) {
 	if c.activeRows == r {
 		// Phase 1: drain frames already in the 64 KB bufio.Reader buffer
 		// (non-blocking — only checks bytes already read from the socket).
-		for {
-			msg, ok, err := c.transport.TryReceiveProtoBuffered()
-			if err != nil || !ok {
-				break
-			}
-			execResp := msg.GetExecute()
-			if execResp == nil {
-				break
-			}
-			if execResp.GetMetrics() != nil || execResp.GetHeartbeat() != nil {
-				continue
-			}
-			// Data page frame: consume it and continue draining.
-			// Trailing metrics/heartbeat may follow even after the final page.
-			if execResp.GetPage() != nil {
-				continue
-			}
-			break
-		}
+		c.drainBufferedFrames()
 
 		// Phase 2: short blocking drain to catch trailing frames that were
 		// still in the QUIC socket (not yet in the bufio buffer) when Phase 1
 		// ran. Without this, the stale frame is read by the next query's
 		// ReceiveProto call as if it were the response to the new EXECUTE,
 		// causing stream desynchronisation (BUG-0001 / GAP-0046).
-		//
-		// Phase 2: short blocking drain (1ms) to catch trailing frames.
-		// The timeout was reduced from 50ms to 1ms since Geode's server
-		// does not send trailing metrics/heartbeat frames after the final
-		// data page in normal operation. 1ms is sufficient to catch any
-		// in-flight frames while keeping per-query overhead minimal.
-		drainCtx, drainCancel := context.WithTimeout(context.Background(), trailingFrameDrainTimeout)
-		defer drainCancel()
-		for {
-			resp, err := c.transport.ReceiveProto(drainCtx)
-			if err != nil {
-				break // deadline elapsed or transport closed — stream is clean
-			}
-			execResp := resp.GetExecute()
-			if execResp == nil {
-				break
-			}
-			if execResp.GetMetrics() != nil || execResp.GetHeartbeat() != nil {
-				continue
-			}
-			if execResp.GetPage() != nil {
-				continue
-			}
-			break
-		}
+		c.drainTrailingFrames()
 
 		c.activeRows = nil
 		if c.inTx {
@@ -949,4 +905,52 @@ func (c *Conn) releaseRows(r *Rows) {
 		}
 	}
 	c.mu.Unlock()
+}
+
+// drainBufferedFrames consumes execute response frames already present in the
+// bufio.Reader buffer without blocking on the network.
+func (c *Conn) drainBufferedFrames() {
+	for {
+		msg, ok, err := c.transport.TryReceiveProtoBuffered()
+		if err != nil || !ok {
+			return
+		}
+		execResp := msg.GetExecute()
+		if execResp == nil {
+			return
+		}
+		if execResp.GetMetrics() != nil || execResp.GetHeartbeat() != nil {
+			continue
+		}
+		if execResp.GetPage() != nil {
+			continue
+		}
+		return
+	}
+}
+
+// drainTrailingFrames performs a short blocking drain (1ms) to catch trailing
+// frames still in the QUIC socket. The timeout was reduced from 50ms to 1ms
+// since Geode's server does not send trailing metrics/heartbeat frames after
+// the final data page in normal operation.
+func (c *Conn) drainTrailingFrames() {
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), trailingFrameDrainTimeout)
+	defer drainCancel()
+	for {
+		resp, err := c.transport.ReceiveProto(drainCtx)
+		if err != nil {
+			return // deadline elapsed or transport closed — stream is clean
+		}
+		execResp := resp.GetExecute()
+		if execResp == nil {
+			return
+		}
+		if execResp.GetMetrics() != nil || execResp.GetHeartbeat() != nil {
+			continue
+		}
+		if execResp.GetPage() != nil {
+			continue
+		}
+		return
+	}
 }
