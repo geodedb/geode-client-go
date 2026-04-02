@@ -20,12 +20,12 @@ include:
 
   - component: gitlab.com/devnw/ci-catalog/go-build@v1.9.15
     inputs:
-      go_version: "1.24.12"
+      go_version: "1.25.8"
       stage: build
 
   - component: gitlab.com/devnw/ci-catalog/go-test@v1.9.15
     inputs:
-      go_version: "1.24.12"
+      go_version: "1.25.8"
       stage: test
       # Unit tests (with -short flag) must pass. Integration tests that
       # require a running Geode server are skipped with -short.
