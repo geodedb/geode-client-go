@@ -14,7 +14,7 @@ import (
 
 // QUIC transport configuration constants.
 const (
-	quicMaxIdleTimeout                 = 30 * time.Second
+	quicMaxIdleTimeout                 = 120 * time.Second
 	quicKeepAlivePeriod                = 10 * time.Second
 	quicInitialStreamReceiveWindow     = 4 * 1024 * 1024  // 4MB initial stream window
 	quicMaxStreamReceiveWindow         = 16 * 1024 * 1024 // 16MB max stream window
@@ -257,9 +257,6 @@ func (t *QUICTransport) ReceiveProto(ctx context.Context) (*proto.QuicServerMess
 
 	// Read 4-byte length prefix (big endian)
 	if _, err := io.ReadFull(t.br, t.lenBuf[:]); err != nil {
-		if err == io.EOF {
-			return nil, io.EOF
-		}
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -284,9 +281,6 @@ func (t *QUICTransport) ReceiveProto(ctx context.Context) (*proto.QuicServerMess
 	// Read message body
 	msgBuf := make([]byte, msgLen)
 	if _, err := io.ReadFull(t.br, msgBuf); err != nil {
-		if err == io.EOF {
-			return nil, io.EOF
-		}
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}

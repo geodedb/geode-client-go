@@ -5,6 +5,7 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"time"
@@ -18,14 +19,21 @@ import (
 // operations from hanging indefinitely. Use the Context variants for custom timeouts.
 const defaultDeprecatedMethodTimeout = 30 * time.Second
 
-// transportErrBadConn converts a *TransportError to driver.ErrBadConn so that
-// database/sql automatically discards the stale connection and retries the
+// transportErrBadConn converts transport-layer errors to driver.ErrBadConn so
+// that database/sql automatically discards the stale connection and retries the
 // operation on a fresh one. QUIC streams are closed by the server after idle
 // periods; the pool may hold a connection whose stream is already closed but
 // whose state still appears valid until the first write fails.
+//
+// Both *TransportError (which wraps io.EOF and other stream errors) and raw
+// io.EOF (which may surface from drainExecStream) are treated as bad-connection
+// indicators.
 func transportErrBadConn(err error) error {
 	var te *TransportError
 	if errors.As(err, &te) {
+		return driver.ErrBadConn
+	}
+	if errors.Is(err, io.EOF) {
 		return driver.ErrBadConn
 	}
 	return err
