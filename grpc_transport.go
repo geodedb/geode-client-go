@@ -59,6 +59,21 @@ func (t *GRPCTransport) closeConnLocked() {
 	t.rpcCount = 0
 }
 
+func (t *GRPCTransport) abortExecute() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.execCancel != nil {
+		t.execCancel()
+		t.execCancel = nil
+	}
+	if t.execStream != nil {
+		_ = t.execStream.CloseSend()
+		t.execStream = nil
+	}
+	t.closeConnLocked()
+}
+
 func (t *GRPCTransport) ensureClient(_ context.Context) error {
 	t.mu.Lock()
 	if t.closed {
@@ -261,7 +276,6 @@ func (t *GRPCTransport) SendProto(ctx context.Context, msg *proto.QuicClientMess
 			_ = t.execStream.CloseSend()
 			t.execStream = nil
 		}
-		t.closeConnLocked()
 		t.mu.Unlock()
 
 		client, err := t.prepareClient(ctx)

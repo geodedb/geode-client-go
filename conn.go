@@ -894,6 +894,20 @@ var trailingFrameDrainTimeout = 1 * time.Millisecond //nolint:gochecknoglobals /
 // releaseRows is called by Rows.Close() to release the lock and update state.
 func (c *Conn) releaseRows(r *Rows) {
 	if c.activeRows == r {
+		if gt, ok := c.transport.(*GRPCTransport); ok {
+			if !r.final || r.bufferIdx < len(r.protoBuffer) {
+				gt.abortExecute()
+			}
+			c.activeRows = nil
+			if c.inTx {
+				c.state = StateInTransaction
+			} else {
+				c.state = StateIdle
+			}
+			c.mu.Unlock()
+			return
+		}
+
 		// Phase 1: drain frames already in the 64 KB bufio.Reader buffer
 		// (non-blocking — only checks bytes already read from the socket).
 		c.drainBufferedFrames()
