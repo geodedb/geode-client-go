@@ -12,21 +12,113 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
+const grpcMaxRPCsPerConn = 64
+
 // GRPCTransport implements Transport over gRPC.
 type GRPCTransport struct {
-	conn   *grpc.ClientConn
-	client proto.GeodeServiceClient
+	conn        *grpc.ClientConn
+	client      proto.GeodeServiceClient
+	dialOptions []grpc.DialOption
+	rpcCount    int
 
 	// Session state
 	sessionID string
 
 	// Response buffering for streaming Execute
 	execStream   proto.GeodeService_ExecuteClient
+	execCancel   context.CancelFunc
 	lastResponse *proto.QuicServerMessage
 
 	mu     sync.Mutex
 	closed bool
 	addr   string
+}
+
+func grpcExecuteStreamComplete(resp *proto.ExecutionResponse) bool {
+	if resp == nil {
+		return false
+	}
+	if resp.GetError() != nil {
+		return true
+	}
+	if page := resp.GetPage(); page != nil && page.GetFinal() {
+		return true
+	}
+	if resp.GetHeartbeat() != nil {
+		return true
+	}
+	return false
+}
+
+func (t *GRPCTransport) closeConnLocked() {
+	if t.conn != nil {
+		_ = t.conn.Close()
+		t.conn = nil
+		t.client = nil
+	}
+	t.rpcCount = 0
+}
+
+func (t *GRPCTransport) ensureClient(_ context.Context) error {
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		return ErrClosed
+	}
+	if t.client != nil {
+		t.mu.Unlock()
+		return nil
+	}
+	opts := append([]grpc.DialOption(nil), t.dialOptions...)
+	addr := t.addr
+	t.mu.Unlock()
+
+	conn, err := grpc.NewClient(addr, opts...)
+	if err != nil {
+		return &TransportError{
+			Op:    "dial",
+			Addr:  addr,
+			cause: err,
+		}
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed {
+		_ = conn.Close()
+		return ErrClosed
+	}
+	if t.client != nil {
+		_ = conn.Close()
+		return nil
+	}
+	t.conn = conn
+	t.client = proto.NewGeodeServiceClient(conn)
+	return nil
+}
+
+func (t *GRPCTransport) prepareClient(ctx context.Context) (proto.GeodeServiceClient, error) {
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		return nil, ErrClosed
+	}
+	if t.client != nil && t.rpcCount >= grpcMaxRPCsPerConn {
+		t.closeConnLocked()
+	}
+	t.mu.Unlock()
+
+	if err := t.ensureClient(ctx); err != nil {
+		return nil, err
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed || t.client == nil {
+		return nil, ErrClosed
+	}
+	t.rpcCount++
+	return t.client, nil
 }
 
 // NewGRPCTransport creates a new gRPC transport to the Geode server.
@@ -56,20 +148,9 @@ func NewGRPCTransport(_ context.Context, cfg *Config) (*GRPCTransport, error) {
 		opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)))
 	}
 
-	// Connect using NewClient (lazy connection, established on first RPC)
-	conn, err := grpc.NewClient(addr, opts...)
-	if err != nil {
-		return nil, &TransportError{
-			Op:    "dial",
-			Addr:  addr,
-			cause: err,
-		}
-	}
-
 	t := &GRPCTransport{
-		conn:   conn,
-		client: proto.NewGeodeServiceClient(conn),
-		addr:   addr,
+		addr:        addr,
+		dialOptions: opts,
 	}
 
 	return t, nil
@@ -120,8 +201,15 @@ func (t *GRPCTransport) SendProto(ctx context.Context, msg *proto.QuicClientMess
 	// Handle different message types via gRPC methods
 	switch m := msg.GetMsg().(type) {
 	case *proto.QuicClientMessage_Hello:
-		resp, err := t.client.Handshake(ctx, m.Hello)
+		client, err := t.prepareClient(ctx)
 		if err != nil {
+			return err
+		}
+		resp, err := client.Handshake(ctx, m.Hello)
+		if err != nil {
+			t.mu.Lock()
+			t.closeConnLocked()
+			t.mu.Unlock()
 			return &TransportError{
 				Op:    "handshake",
 				Addr:  t.addr,
@@ -137,8 +225,15 @@ func (t *GRPCTransport) SendProto(ctx context.Context, msg *proto.QuicClientMess
 		return nil
 
 	case *proto.QuicClientMessage_Ping:
-		resp, err := t.client.Ping(ctx, m.Ping)
+		client, err := t.prepareClient(ctx)
 		if err != nil {
+			return err
+		}
+		resp, err := client.Ping(ctx, m.Ping)
+		if err != nil {
+			t.mu.Lock()
+			t.closeConnLocked()
+			t.mu.Unlock()
 			return &TransportError{
 				Op:    "ping",
 				Addr:  t.addr,
@@ -157,8 +252,30 @@ func (t *GRPCTransport) SendProto(ctx context.Context, msg *proto.QuicClientMess
 		req := m.Execute
 		req.SessionId = t.sessionID
 
-		stream, err := t.client.Execute(ctx, req)
+		t.mu.Lock()
+		if t.execCancel != nil {
+			t.execCancel()
+			t.execCancel = nil
+		}
+		if t.execStream != nil {
+			_ = t.execStream.CloseSend()
+			t.execStream = nil
+		}
+		t.closeConnLocked()
+		t.mu.Unlock()
+
+		client, err := t.prepareClient(ctx)
 		if err != nil {
+			return err
+		}
+
+		execCtx, execCancel := context.WithCancel(ctx)
+		stream, err := client.Execute(execCtx, req)
+		if err != nil {
+			execCancel()
+			t.mu.Lock()
+			t.closeConnLocked()
+			t.mu.Unlock()
 			return &TransportError{
 				Op:    "execute",
 				Addr:  t.addr,
@@ -167,16 +284,29 @@ func (t *GRPCTransport) SendProto(ctx context.Context, msg *proto.QuicClientMess
 		}
 		t.mu.Lock()
 		t.execStream = stream
+		t.execCancel = execCancel
 		t.lastResponse = nil
 		t.mu.Unlock()
 		return nil
 
+	case *proto.QuicClientMessage_Pull:
+		// Execute is server-streaming over gRPC, so additional pages are read
+		// from the active Execute stream rather than via a separate Pull RPC.
+		return nil
+
 	case *proto.QuicClientMessage_Begin:
+		client, err := t.prepareClient(ctx)
+		if err != nil {
+			return err
+		}
 		req := m.Begin
 		req.SessionId = t.sessionID
 
-		resp, err := t.client.Begin(ctx, req)
+		resp, err := client.Begin(ctx, req)
 		if err != nil {
+			t.mu.Lock()
+			t.closeConnLocked()
+			t.mu.Unlock()
 			return &TransportError{
 				Op:    "begin",
 				Addr:  t.addr,
@@ -191,11 +321,18 @@ func (t *GRPCTransport) SendProto(ctx context.Context, msg *proto.QuicClientMess
 		return nil
 
 	case *proto.QuicClientMessage_Commit:
+		client, err := t.prepareClient(ctx)
+		if err != nil {
+			return err
+		}
 		req := m.Commit
 		req.SessionId = t.sessionID
 
-		resp, err := t.client.Commit(ctx, req)
+		resp, err := client.Commit(ctx, req)
 		if err != nil {
+			t.mu.Lock()
+			t.closeConnLocked()
+			t.mu.Unlock()
 			return &TransportError{
 				Op:    "commit",
 				Addr:  t.addr,
@@ -210,11 +347,18 @@ func (t *GRPCTransport) SendProto(ctx context.Context, msg *proto.QuicClientMess
 		return nil
 
 	case *proto.QuicClientMessage_Rollback:
+		client, err := t.prepareClient(ctx)
+		if err != nil {
+			return err
+		}
 		req := m.Rollback
 		req.SessionId = t.sessionID
 
-		resp, err := t.client.Rollback(ctx, req)
+		resp, err := client.Rollback(ctx, req)
 		if err != nil {
+			t.mu.Lock()
+			t.closeConnLocked()
+			t.mu.Unlock()
 			return &TransportError{
 				Op:    "rollback",
 				Addr:  t.addr,
@@ -229,8 +373,15 @@ func (t *GRPCTransport) SendProto(ctx context.Context, msg *proto.QuicClientMess
 		return nil
 
 	case *proto.QuicClientMessage_CdcDiag:
-		resp, err := t.client.GetCdcDiagnostics(ctx, m.CdcDiag)
+		client, err := t.prepareClient(ctx)
 		if err != nil {
+			return err
+		}
+		resp, err := client.GetCdcDiagnostics(ctx, m.CdcDiag)
+		if err != nil {
+			t.mu.Lock()
+			t.closeConnLocked()
+			t.mu.Unlock()
 			return &TransportError{
 				Op:    "cdc_diag",
 				Addr:  t.addr,
@@ -245,8 +396,15 @@ func (t *GRPCTransport) SendProto(ctx context.Context, msg *proto.QuicClientMess
 		return nil
 
 	case *proto.QuicClientMessage_CdcCtrl:
-		resp, err := t.client.ControlCdc(ctx, m.CdcCtrl)
+		client, err := t.prepareClient(ctx)
 		if err != nil {
+			return err
+		}
+		resp, err := client.ControlCdc(ctx, m.CdcCtrl)
+		if err != nil {
+			t.mu.Lock()
+			t.closeConnLocked()
+			t.mu.Unlock()
 			return &TransportError{
 				Op:    "cdc_ctrl",
 				Addr:  t.addr,
@@ -266,7 +424,9 @@ func (t *GRPCTransport) SendProto(ctx context.Context, msg *proto.QuicClientMess
 }
 
 // ReceiveProto reads a protobuf message from the gRPC stream.
-func (t *GRPCTransport) ReceiveProto(_ context.Context) (*proto.QuicServerMessage, error) {
+//
+//nolint:gocognit // stream receive needs explicit handling for cached, active, and terminal states
+func (t *GRPCTransport) ReceiveProto(ctx context.Context) (*proto.QuicServerMessage, error) {
 	t.mu.Lock()
 	if t.closed {
 		t.mu.Unlock()
@@ -286,17 +446,63 @@ func (t *GRPCTransport) ReceiveProto(_ context.Context) (*proto.QuicServerMessag
 	t.mu.Unlock()
 
 	if stream != nil {
-		resp, err := stream.Recv()
-		if err != nil {
-			return nil, &TransportError{
-				Op:    "recv",
-				Addr:  t.addr,
-				cause: err,
-			}
+		type recvResult struct {
+			resp *proto.ExecutionResponse
+			err  error
 		}
-		return &proto.QuicServerMessage{
-			Msg: &proto.QuicServerMessage_Execute{Execute: resp},
-		}, nil
+
+		done := make(chan recvResult, 1)
+		go func() {
+			resp, err := stream.Recv()
+			done <- recvResult{resp: resp, err: err}
+		}()
+
+		select {
+		case <-ctx.Done():
+			t.mu.Lock()
+			if t.execCancel != nil {
+				t.execCancel()
+				t.execCancel = nil
+			}
+			if t.execStream == stream {
+				t.execStream = nil
+			}
+			t.closeConnLocked()
+			t.mu.Unlock()
+			return nil, ctx.Err()
+		case result := <-done:
+			if result.err != nil {
+				t.mu.Lock()
+				if t.execStream == stream {
+					t.execStream = nil
+				}
+				if t.execCancel != nil {
+					t.execCancel()
+					t.execCancel = nil
+				}
+				t.closeConnLocked()
+				t.mu.Unlock()
+				return nil, &TransportError{
+					Op:    "recv",
+					Addr:  t.addr,
+					cause: result.err,
+				}
+			}
+			if grpcExecuteStreamComplete(result.resp) {
+				t.mu.Lock()
+				if t.execStream == stream {
+					t.execStream = nil
+				}
+				if t.execCancel != nil {
+					t.execCancel()
+					t.execCancel = nil
+				}
+				t.mu.Unlock()
+			}
+			return &proto.QuicServerMessage{
+				Msg: &proto.QuicServerMessage_Execute{Execute: result.resp},
+			}, nil
+		}
 	}
 
 	return nil, fmt.Errorf("no response available")
@@ -337,9 +543,14 @@ func (t *GRPCTransport) Close() error {
 		_ = t.execStream.CloseSend()
 		t.execStream = nil
 	}
+	if t.execCancel != nil {
+		t.execCancel()
+		t.execCancel = nil
+	}
+	t.closeConnLocked()
 	t.mu.Unlock()
 
-	return t.conn.Close()
+	return nil
 }
 
 // IsClosed returns true if the transport is closed.

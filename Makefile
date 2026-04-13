@@ -3,7 +3,7 @@
 # Convenient shortcuts for build, test, lint, bench, and integration operations
 # =============================================================================
 
-GO ?= go
+GO ?= $(if $(wildcard $(GOROOT)/bin/go),$(GOROOT)/bin/go,go)
 GOFLAGS ?=
 GOLANGCI_LINT ?= golangci-lint
 
@@ -16,6 +16,8 @@ GEODE_CONTAINER ?= geode-go-test
 GEODE_HOST ?= 127.0.0.1
 GEODE_PORT ?= 3141
 GEODE_GRPC_PORT ?= 50051
+GEODE_USERNAME ?= geode
+GEODE_PASSWORD ?= GeodeTestPassword123!
 
 # Fuzz duration (default 30 seconds)
 FUZZ_TIME ?= 30s
@@ -195,7 +197,7 @@ test-integration:
 	@echo "Start server first: cd ../geode && ./zig-out/bin/geode serve"
 	@echo "Or use: make test-integration-docker"
 	@echo ""
-	GEODE_TEST_DSN="$(GEODE_HOST):$(GEODE_PORT)?insecure=true" $(GO) test -v -tags=integration -timeout=$(LOAD_TIMEOUT) $(GOFLAGS) ./...
+	GEODE_TEST_DSN="$(GEODE_HOST):$(GEODE_PORT)?insecure=true&user=$(GEODE_USERNAME)&pass=$(GEODE_PASSWORD)" $(GO) test -v -tags=integration -timeout=$(LOAD_TIMEOUT) $(GOFLAGS) ./...
 	@echo ""
 	@echo "✓ Integration + load tests complete"
 
@@ -204,7 +206,7 @@ test-load:
 	@echo ""
 	@echo "Connecting to Geode server at $(GEODE_HOST):$(GEODE_PORT)"
 	@echo ""
-	GEODE_TEST_DSN="$(GEODE_HOST):$(GEODE_PORT)?insecure=true" $(GO) test -v -tags=integration -timeout=$(LOAD_TIMEOUT) -run='^TestLoad_' $(GOFLAGS) ./...
+	GEODE_TEST_DSN="$(GEODE_HOST):$(GEODE_PORT)?insecure=true&user=$(GEODE_USERNAME)&pass=$(GEODE_PASSWORD)" $(GO) test -v -tags=integration -timeout=$(LOAD_TIMEOUT) -run='^TestLoad_' $(GOFLAGS) ./...
 	@echo ""
 	@echo "✓ Load tests complete"
 
@@ -228,7 +230,7 @@ test-integration-docker:
 test-integration-docker-manual: docker-start docker-wait
 	@echo "Running integration tests against Docker container..."
 	@echo ""
-	GEODE_TEST_DSN="$(GEODE_HOST):$(GEODE_PORT)?insecure=true" $(GO) test -v -tags=integration $(GOFLAGS) ./... || ($(MAKE) docker-stop && exit 1)
+	GEODE_TEST_DSN="$(GEODE_HOST):$(GEODE_PORT)?insecure=true&user=$(GEODE_USERNAME)&pass=$(GEODE_PASSWORD)" $(GO) test -v -tags=integration $(GOFLAGS) ./... || ($(MAKE) docker-stop && exit 1)
 	@echo ""
 	@echo "✓ Docker integration tests complete"
 	$(MAKE) docker-stop
@@ -240,7 +242,7 @@ test-integration-grpc:
 	@echo "Start server first: cd ../geode && ./zig-out/bin/geode serve --listen-grpc 0.0.0.0:50051"
 	@echo "Or use: make docker-start"
 	@echo ""
-	GEODE_TEST_DSN="grpc://$(GEODE_HOST):$(GEODE_GRPC_PORT)?tls=0" $(GO) test -v -tags=integration $(GOFLAGS) ./...
+	GEODE_TEST_DSN="grpc://$(GEODE_HOST):$(GEODE_GRPC_PORT)?insecure=true&user=$(GEODE_USERNAME)&pass=$(GEODE_PASSWORD)" $(GO) test -v -tags=integration $(GOFLAGS) ./...
 	@echo ""
 	@echo "✓ gRPC integration tests complete"
 
@@ -356,6 +358,9 @@ docker-start:
 	$(DOCKER) run -d --name $(GEODE_CONTAINER) \
 		-p $(GEODE_PORT):3141/udp \
 		-p $(GEODE_GRPC_PORT):50051/tcp \
+		-e GEODE_DEFAULT_PASSWORD=$(GEODE_PASSWORD) \
+		-e GEODE_ADMIN_PASSWORD=$(GEODE_PASSWORD) \
+		-e GEODE_DISABLE_AUDIT=1 \
 		$(GEODE_IMAGE) \
 		serve --listen 0.0.0.0:3141 --listen-grpc 0.0.0.0:50051 --log-level info
 	@echo "✓ Geode container started"
