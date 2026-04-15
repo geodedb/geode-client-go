@@ -1,11 +1,14 @@
 package geode
 
 import (
-	"os"
 	"testing"
 )
 
 func TestParseDSN_Empty(t *testing.T) {
+	t.Setenv("GEODE_HOST", "")
+	t.Setenv("GEODE_PORT", "")
+	t.Setenv("GEODE_TLS_CA", "")
+
 	cfg, err := ParseDSN("")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -387,15 +390,9 @@ func TestParseDSN_MTLSValidation(t *testing.T) {
 }
 
 func TestParseDSN_EnvVars(t *testing.T) {
-	// Set environment variables
-	os.Setenv("GEODE_HOST", "envhost")
-	os.Setenv("GEODE_PORT", "9999")
-	os.Setenv("GEODE_TLS_CA", "/env/ca.crt")
-	defer func() {
-		os.Unsetenv("GEODE_HOST")
-		os.Unsetenv("GEODE_PORT")
-		os.Unsetenv("GEODE_TLS_CA")
-	}()
+	t.Setenv("GEODE_HOST", "envhost")
+	t.Setenv("GEODE_PORT", "9999")
+	t.Setenv("GEODE_TLS_CA", "/env/ca.crt")
 
 	cfg, err := ParseDSN("")
 	if err != nil {

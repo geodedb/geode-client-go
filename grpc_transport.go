@@ -12,7 +12,11 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-const grpcMaxRPCsPerConn = 64
+// Long-lived grpc-go channels start returning malformed Execute requests after
+// roughly a dozen RPCs in Geode integration runs. Recycle early, but defer the
+// recycle while a transaction is active so session-bound work stays coherent.
+const grpcMaxRPCsPerConn = 10
+const grpcTxRPCBudget = 7
 
 // GRPCTransport implements Transport over gRPC.
 type GRPCTransport struct {
@@ -23,11 +27,13 @@ type GRPCTransport struct {
 
 	// Session state
 	sessionID string
+	inTx      bool
 
 	// Response buffering for streaming Execute
 	execStream   proto.GeodeService_ExecuteClient
 	execCancel   context.CancelFunc
 	lastResponse *proto.QuicServerMessage
+	recycleAfter bool
 
 	mu     sync.Mutex
 	closed bool
@@ -57,6 +63,40 @@ func (t *GRPCTransport) closeConnLocked() {
 		t.client = nil
 	}
 	t.rpcCount = 0
+	t.recycleAfter = false
+}
+
+func (t *GRPCTransport) maybeRecycleLocked() {
+	if t.client == nil || t.rpcCount < grpcMaxRPCsPerConn {
+		return
+	}
+	if t.inTx || t.execStream != nil {
+		t.recycleAfter = true
+		return
+	}
+	t.closeConnLocked()
+}
+
+func (t *GRPCTransport) setTransactionState(inTx bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	t.inTx = inTx
+	if !inTx && t.recycleAfter && t.execStream == nil {
+		t.closeConnLocked()
+	}
+}
+
+func (t *GRPCTransport) prepareForTransaction() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.closed || t.execStream != nil {
+		return
+	}
+	if t.client != nil && t.rpcCount >= grpcMaxRPCsPerConn-grpcTxRPCBudget {
+		t.closeConnLocked()
+	}
 }
 
 func (t *GRPCTransport) abortExecute() {
@@ -118,9 +158,7 @@ func (t *GRPCTransport) prepareClient(ctx context.Context) (proto.GeodeServiceCl
 		t.mu.Unlock()
 		return nil, ErrClosed
 	}
-	if t.client != nil && t.rpcCount >= grpcMaxRPCsPerConn {
-		t.closeConnLocked()
-	}
+	t.maybeRecycleLocked()
 	t.mu.Unlock()
 
 	if err := t.ensureClient(ctx); err != nil {

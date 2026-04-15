@@ -73,6 +73,7 @@ func (t *Tx) finish(msg *proto.QuicClientMessage, opName string) error {
 	t.done = true
 	t.conn.inTx = false
 	t.conn.state = StateIdle
+	t.conn.setGRPCTransactionStateLocked(false)
 
 	return nil
 }

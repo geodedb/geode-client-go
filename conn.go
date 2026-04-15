@@ -130,6 +130,12 @@ func newConn(cfg *Config, transport Transport) *Conn {
 	}
 }
 
+func (c *Conn) setGRPCTransactionStateLocked(inTx bool) {
+	if gt, ok := c.transport.(*GRPCTransport); ok {
+		gt.setTransactionState(inTx)
+	}
+}
+
 // connectPooled creates a new logical connection using a QUIC stream from the
 // shared pool. The HELLO handshake is only performed on the first stream of
 // each underlying QUIC connection; subsequent streams skip it.
@@ -435,6 +441,10 @@ func (c *Conn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, e
 		return nil, ErrQueryInProgress
 	}
 
+	if gt, ok := c.transport.(*GRPCTransport); ok {
+		gt.prepareForTransaction()
+	}
+
 	// Send BEGIN
 	msg := proto.NewBeginMessage(&proto.BeginRequest{
 		ReadOnly: opts.ReadOnly,
@@ -455,6 +465,7 @@ func (c *Conn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, e
 
 	c.inTx = true
 	c.state = StateInTransaction
+	c.setGRPCTransactionStateLocked(true)
 
 	return &Tx{conn: c, ctx: ctx}, nil
 }
@@ -612,7 +623,7 @@ func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.Nam
 		pageResp, err := c.transport.ReceiveProto(ctx)
 		if err != nil {
 			c.mu.Unlock()
-			return nil, err
+			return nil, transportErrBadConn(err)
 		}
 		pageExecResp := pageResp.GetExecute()
 		if pageExecResp != nil && pageExecResp.GetError() != nil {
@@ -738,6 +749,7 @@ func (c *Conn) ResetSession(ctx context.Context) error {
 		}
 
 		c.inTx = false
+		c.setGRPCTransactionStateLocked(false)
 	}
 
 	c.state = StateIdle

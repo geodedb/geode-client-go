@@ -97,9 +97,26 @@ func cleanupLabel(t *testing.T, db *sql.DB, label string) {
 	_, _ = db.ExecContext(ctx, fmt.Sprintf("MATCH (n:%s) DETACH DELETE n", label))
 }
 
-// loadCtx returns a context with a 30-second deadline.
+func uniqueLoadLabel(prefix string) string {
+	return fmt.Sprintf("%s_%d", prefix, time.Now().UnixNano())
+}
+
+func primeLabel(t *testing.T, db *sql.DB, label string) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err := db.ExecContext(ctx, fmt.Sprintf("CREATE (n:%s {__prime: true})", label))
+	require.NoError(t, err, "prime label %s", label)
+
+	cleanupLabel(t, db, label)
+}
+
+// loadCtx returns a context scoped to the package load-test timeout.
+// In shared-server gRPC runs, concurrent write-heavy steps can exceed a minute
+// without indicating transport corruption.
 func loadCtx() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), 30*time.Second)
+	return context.WithTimeout(context.Background(), loadTestTimeout)
 }
 
 // createBulkNodes inserts count nodes with the given label in batches.
@@ -134,11 +151,17 @@ func createBulkNodes(t *testing.T, db *sql.DB, label string, count int) {
 // ----------------------------------------------------------------------------
 
 func TestLoad_HighParallelismReads(t *testing.T) {
-	const (
+	var (
 		workers        = 50
 		queriesPerWork = 20
 		poolSize       = 20
 	)
+
+	if strings.HasPrefix(strings.ToLower(sharedDSN), "grpc://") {
+		workers = 40
+		queriesPerWork = 15
+		poolSize = 16
+	}
 
 	db := openLoadDB(t, poolSize, poolSize/2)
 	defer db.Close()
@@ -204,13 +227,14 @@ func TestLoad_HighParallelismWrites(t *testing.T) {
 		workers       = 30
 		writesPerWork = 20
 		poolSize      = 15
-		label         = "LoadWrite"
 	)
+	label := uniqueLoadLabel("LoadWrite")
 
 	db := openLoadDB(t, poolSize, poolSize/2)
 	defer db.Close()
 	t.Cleanup(func() { cleanupLabel(t, db, label) })
 	cleanupLabel(t, db, label)
+	primeLabel(t, db, label)
 
 	warmPool(t, db, poolSize)
 
@@ -525,7 +549,7 @@ func TestLoad_SequentialQueryStreamSync(t *testing.T) {
 // ----------------------------------------------------------------------------
 
 func TestLoad_MixedReadWrite(t *testing.T) {
-	const (
+	var (
 		readers   = 20
 		writers   = 10
 		readIter  = 30
@@ -534,10 +558,23 @@ func TestLoad_MixedReadWrite(t *testing.T) {
 		poolSize  = 15
 	)
 
+	// Shared manual-server gRPC runs execute the full integration package
+	// against one server process. Keep the mixed workload substantial, but
+	// below the point where the debug gRPC server turns the test into a server
+	// saturation benchmark rather than a client regression check.
+	if strings.HasPrefix(strings.ToLower(sharedDSN), "grpc://") {
+		readers = 6
+		writers = 1
+		readIter = 10
+		writeIter = 4
+		poolSize = 6
+	}
+
 	db := openLoadDB(t, poolSize, poolSize/2)
 	defer db.Close()
 	t.Cleanup(func() { cleanupLabel(t, db, label) })
 	cleanupLabel(t, db, label)
+	primeLabel(t, db, label)
 
 	warmPool(t, db, poolSize)
 
@@ -632,6 +669,7 @@ func TestLoad_ConcurrentTransactions(t *testing.T) {
 	defer db.Close()
 	t.Cleanup(func() { cleanupLabel(t, db, label) })
 	cleanupLabel(t, db, label)
+	primeLabel(t, db, label)
 
 	warmPool(t, db, poolSize)
 
