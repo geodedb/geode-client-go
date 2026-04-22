@@ -39,6 +39,30 @@ func transportErrBadConn(err error) error {
 	return err
 }
 
+// markConnFailed transitions the connection into StateInError and
+// conservatively clears every piece of client-side state that could
+// otherwise leak stale server-side reality into the next pool user.
+//
+// Called when an operation (Tx.Commit, Tx.Rollback, ExecContext,
+// QueryContext) has committed bytes to the wire but the transport
+// then fails — the server may or may not have completed the request,
+// so *inTx in particular is unknowable client-side*. The previous
+// behavior (leaving inTx=true) caused the next BeginTx on the same
+// pooled conn to fail with ErrTxInProgress even though the client
+// never actually observed a BEGIN response (R4 regression: Go driver
+// leaks inTx=true on transport failure).
+//
+// IsValid() already rejects StateInError, and ResetSession also
+// returns driver.ErrBadConn for it, so the conn is guaranteed to be
+// evicted instead of recycled.
+//
+// Callers must hold c.mu.
+func (c *Conn) markConnFailed() {
+	c.state = StateInError
+	c.inTx = false
+	c.activeRows = nil
+}
+
 // Conn represents a connection to a Geode database.
 type Conn struct {
 	cfg       *Config
@@ -495,17 +519,26 @@ func (c *Conn) ExecContext(ctx context.Context, query string, args []driver.Name
 		Params: protoParams,
 	})
 	if err := c.transport.SendProto(ctx, msg); err != nil {
+		// Bytes went onto the wire but we couldn't confirm what (if
+		// anything) the server observed. Mark the conn failed so the
+		// pool evicts it — critical inside an active tx where leaving
+		// inTx=true would leak into the next BeginTx (R4).
+		c.markConnFailed()
 		return nil, transportErrBadConn(err)
 	}
 
 	// Read response
 	resp, err := c.transport.ReceiveProto(ctx)
 	if err != nil {
+		c.markConnFailed()
 		return nil, transportErrBadConn(err)
 	}
 
 	execResp := resp.GetExecute()
 	if execResp == nil {
+		// Unexpected payload shape signals stream desync; the conn
+		// is no longer trustworthy for tx-state reconciliation.
+		c.markConnFailed()
 		return nil, fmt.Errorf("expected Execute response")
 	}
 
@@ -521,6 +554,7 @@ func (c *Conn) ExecContext(ctx context.Context, query string, args []driver.Name
 	// After the final data page, the server may send a metrics frame.
 	if execResp.GetSchema() != nil || execResp.GetPage() != nil {
 		if err := c.drainExecStream(ctx, execResp); err != nil {
+			c.markConnFailed()
 			return nil, transportErrBadConn(err)
 		}
 	}
@@ -569,6 +603,10 @@ func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.Nam
 		Params: protoParams,
 	})
 	if err := c.transport.SendProto(ctx, msg); err != nil {
+		// See ExecContext: transport failure inside an active tx
+		// leaked inTx=true before this fix (R4). markConnFailed
+		// clears the inTx bit and flags the conn for eviction.
+		c.markConnFailed()
 		c.mu.Unlock()
 		return nil, transportErrBadConn(err)
 	}
@@ -576,12 +614,14 @@ func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.Nam
 	// Read response (could be schema, page, error, etc.)
 	resp, err := c.transport.ReceiveProto(ctx)
 	if err != nil {
+		c.markConnFailed()
 		c.mu.Unlock()
 		return nil, transportErrBadConn(err)
 	}
 
 	execResp := resp.GetExecute()
 	if execResp == nil {
+		c.markConnFailed()
 		c.mu.Unlock()
 		return nil, fmt.Errorf("expected Execute response")
 	}
@@ -611,8 +651,9 @@ func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.Nam
 	if execResp.GetSchema() != nil {
 		pageResp, err := c.transport.ReceiveProto(ctx)
 		if err != nil {
+			c.markConnFailed()
 			c.mu.Unlock()
-			return nil, err
+			return nil, transportErrBadConn(err)
 		}
 		pageExecResp := pageResp.GetExecute()
 		if pageExecResp != nil && pageExecResp.GetError() != nil {
@@ -715,26 +756,41 @@ func (c *Conn) ResetSession(ctx context.Context) error {
 		return driver.ErrBadConn
 	}
 
+	// Prior operation left the conn in an irrecoverable state
+	// (transport failure, stream desync, aborted tx). Don't try to
+	// reconcile; return ErrBadConn so database/sql discards.
+	if c.state == StateInError {
+		return driver.ErrBadConn
+	}
+
 	// Poisoned connection: still mid-fetch or has un-closed rows.
 	// Return ErrBadConn so database/sql discards rather than reuses.
 	if c.state == StateFetching || c.activeRows != nil {
 		return driver.ErrBadConn
 	}
 
-	// If in transaction, rollback
+	// If in transaction, rollback. On any rollback-path failure the
+	// conn's tx state is unknowable (server may or may not have
+	// completed the rollback), so we flip to StateInError and return
+	// ErrBadConn to force eviction. Leaving inTx=true here was the
+	// original R4 leak: a subsequent BeginTx on the same pooled conn
+	// saw inTx=true and returned ErrTxInProgress.
 	if c.inTx {
 		msg := proto.NewRollbackMessage(&proto.RollbackRequest{})
 		if err := c.transport.SendProto(ctx, msg); err != nil {
-			return err
+			c.markConnFailed()
+			return driver.ErrBadConn
 		}
 
 		resp, err := c.transport.ReceiveProto(ctx)
 		if err != nil {
-			return err
+			c.markConnFailed()
+			return driver.ErrBadConn
 		}
 
 		if resp.GetRollback() == nil {
-			return fmt.Errorf("expected ROLLBACK response")
+			c.markConnFailed()
+			return driver.ErrBadConn
 		}
 
 		c.inTx = false
