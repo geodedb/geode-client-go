@@ -11,8 +11,21 @@ import (
 
 // Default QUIC pool settings.
 const (
-	// DefaultQUICPoolSize is the maximum number of QUIC connections in the pool.
-	DefaultQUICPoolSize = 4
+	// DefaultQUICPoolSize is the maximum number of QUIC connections in the
+	// shared pool that streams multiplex over.  Each `db.Conn(ctx)` returns
+	// a stream-level handle on one of these QUIC connections, so the
+	// effective parallelism of concurrent transactions is bounded by this
+	// pool size when callers pin many sql.Conn handles.
+	//
+	// 2026-04-28: bumped from 4 to 16.  The previous value of 4 silently
+	// capped concurrent transaction throughput at 4 regardless of how many
+	// sql.Conn handles an application pinned via db.Conn(ctx); applications
+	// using msft-graph-style parallel pipelines stalled at exactly 4
+	// connections worth of forward progress no matter how high they set
+	// `--workers`.  16 matches a typical CPU core count and is enough to
+	// avoid the ceiling for almost all real workloads while keeping per-
+	// process resource usage bounded.  Override via DSN `?pool_size=N`.
+	DefaultQUICPoolSize = 16
 )
 
 // QUICPool manages a small pool of persistent QUIC connections.
