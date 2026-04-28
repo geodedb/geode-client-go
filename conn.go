@@ -459,28 +459,96 @@ func (c *Conn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, e
 		return nil, ErrQueryInProgress
 	}
 
+	// 2026-04-28: stream-state desync guard.  If the previous request on
+	// this stream left buffered bytes (e.g. an undrained metrics or
+	// heartbeat frame), a fresh BeginTx would read those stale bytes as
+	// if they were the BEGIN response and fail with a confusing
+	// "expected BEGIN response" — and worse, leave the stream in a
+	// permanently-desynced state.  Detect that here and fail fast with
+	// ErrBadConn so database/sql evicts the conn instead of letting it
+	// poison subsequent BeginTx calls.
+	if t, ok := c.transport.(*QUICTransport); ok && t.HasBufferedData() {
+		c.markConnFailed()
+		return nil, transportErrBadConn(fmt.Errorf("stream desync: %d unconsumed bytes from prior request", t.BufferedLen()))
+	}
+
 	// Send BEGIN
 	msg := proto.NewBeginMessage(&proto.BeginRequest{
 		ReadOnly: opts.ReadOnly,
 	})
 	if err := c.transport.SendProto(ctx, msg); err != nil {
+		c.markConnFailed()
 		return nil, err
 	}
 
 	// Read response
 	resp, err := c.transport.ReceiveProto(ctx)
 	if err != nil {
+		c.markConnFailed()
 		return nil, err
 	}
 
 	if resp.GetBegin() == nil {
-		return nil, fmt.Errorf("expected BEGIN response")
+		// Stream returned an unexpected variant.  Identify which one so
+		// future incident analysis can see it without re-instrumenting.
+		// Then mark the conn bad so database/sql evicts it — leaving
+		// the conn in the pool with a desynced stream is worse than
+		// the eviction churn, because every subsequent BeginTx on it
+		// will fail the same way.
+		c.markConnFailed()
+		return nil, fmt.Errorf("expected BEGIN response, got %s", describeServerMessage(resp))
 	}
 
 	c.inTx = true
 	c.state = StateInTransaction
 
 	return &Tx{conn: c, ctx: ctx}, nil
+}
+
+// describeServerMessage returns a short tag for the variant inside the
+// QuicServerMessage oneof so error messages can identify what the server
+// actually sent when a different variant was expected.  Used by BeginTx /
+// Commit / Rollback / Exec error paths.
+func describeServerMessage(resp *proto.QuicServerMessage) string {
+	if resp == nil {
+		return "nil"
+	}
+	switch {
+	case resp.GetHello() != nil:
+		return "hello"
+	case resp.GetExecute() != nil:
+		ex := resp.GetExecute()
+		if ex.GetError() != nil {
+			return fmt.Sprintf("execute(error=%s)", ex.GetError().GetMessage())
+		}
+		return "execute"
+	case resp.GetPull() != nil:
+		return "pull"
+	case resp.GetPing() != nil:
+		return "ping"
+	case resp.GetBegin() != nil:
+		return "begin"
+	case resp.GetCommit() != nil:
+		return "commit"
+	case resp.GetRollback() != nil:
+		return "rollback"
+	case resp.GetSavepoint() != nil:
+		return "savepoint"
+	case resp.GetRollbackTo() != nil:
+		return "rollback_to"
+	case resp.GetCdcDiag() != nil:
+		return "cdc_diag"
+	case resp.GetCdcCtrl() != nil:
+		return "cdc_ctrl"
+	case resp.GetBackup() != nil:
+		return "backup"
+	case resp.GetRestore() != nil:
+		return "restore"
+	case resp.GetUploadBackup() != nil:
+		return "upload_backup"
+	default:
+		return "unknown"
+	}
 }
 
 // ExecContext executes a query that doesn't return rows.

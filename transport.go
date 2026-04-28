@@ -415,3 +415,31 @@ func (t *QUICTransport) IsClosed() bool {
 func (t *QUICTransport) Addr() string {
 	return t.addr
 }
+
+// HasBufferedData reports whether the read buffer holds any unconsumed
+// bytes from a prior request.  At the start of a fresh request the buffer
+// MUST be empty — non-zero buffered data after a request finishes
+// indicates a stream-state desync (e.g., an undrained metrics or
+// heartbeat frame).  Callers (BeginTx, ExecContext) use this as a guard
+// to fail fast with ErrBadConn instead of letting the next protocol
+// message land in the wrong place.
+//
+// Not part of the Transport interface — interface embedders that don't
+// expose buffered state will simply skip the desync check.
+func (t *QUICTransport) HasBufferedData() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.br != nil && t.br.Buffered() > 0
+}
+
+// BufferedLen returns the number of unconsumed bytes in the read buffer.
+// Used in error messages alongside HasBufferedData to surface the size
+// of any desync to the operator.
+func (t *QUICTransport) BufferedLen() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.br == nil {
+		return 0
+	}
+	return t.br.Buffered()
+}
