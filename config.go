@@ -119,6 +119,16 @@ type Config struct {
 	// after the HELLO handshake. This ensures every pooled connection
 	// targets the correct graph without manual initialization.
 	Graph string
+
+	// PoolSize is the maximum number of underlying QUIC connections in the
+	// shared pool that streams multiplex over.  Each `db.Conn(ctx)` returns
+	// a stream-level handle on one of these QUIC connections, so the
+	// effective parallelism of concurrent transactions is bounded by this
+	// pool size when callers pin many sql.Conn handles.  Zero or negative
+	// values fall back to DefaultQUICPoolSize.
+	//
+	// Tune via DSN: `?pool_size=16`.
+	PoolSize int
 }
 
 // Addr returns the server address in host:port format.
@@ -372,6 +382,17 @@ func applyQueryParams(params url.Values, cfg *Config) error {
 				}
 			}
 			cfg.PageSize = n
+
+		case "pool_size":
+			n, err := strconv.Atoi(val)
+			if err != nil || n <= 0 {
+				return &ConfigError{
+					Field:   "pool_size",
+					Value:   val,
+					Message: "must be a positive integer",
+				}
+			}
+			cfg.PoolSize = n
 
 		case "hello_name":
 			if val == "" {

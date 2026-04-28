@@ -114,9 +114,21 @@ func (d *Driver) OpenConnector(name string) (driver.Connector, error) {
 		cfg:    cfg,
 	}
 
-	// Create a shared QUIC pool for stream multiplexing
+	// Create a shared QUIC pool for stream multiplexing.
+	// Honor cfg.PoolSize when set (via DSN ?pool_size=N); fall back to
+	// DefaultQUICPoolSize when zero.  The previous hard-coded 4-connection
+	// pool was a hidden ceiling on parallelism: callers using
+	// `db.Conn(ctx)` to pin many sql.Conn handles all multiplexed onto
+	// 4 underlying QUIC connections, which capped concurrent transaction
+	// throughput at c=4 regardless of how many goroutines or workers
+	// the application configured (e.g. msft-graph --workers 16 stalled
+	// because workers 5-16 contended for the same 4 connections).
 	if cfg.Transport == TransportQUIC {
-		c.quicPool = NewQUICPool(cfg, DefaultQUICPoolSize)
+		size := cfg.PoolSize
+		if size <= 0 {
+			size = DefaultQUICPoolSize
+		}
+		c.quicPool = NewQUICPool(cfg, size)
 	}
 
 	return c, nil
