@@ -129,6 +129,19 @@ type Config struct {
 	//
 	// Tune via DSN: `?pool_size=16`.
 	PoolSize int
+
+	// MaxStreams bounds the total number of in-flight QUIC streams across
+	// all pooled connections.  Stream creation blocks (context-aware) when
+	// at this limit.  Zero or negative values fall back to DefaultMaxStreams.
+	//
+	// This is driver-side backpressure for applications that use
+	// sql.Open("geode", dsn) directly without setting MaxOpenConns on the
+	// *sql.DB they receive.  Geode 0.5.x's per-stream BufferedProtoReader
+	// saturates around ~50 concurrent streams; the default (64) leaves a
+	// modest spike margin without risking pollLoop overload.
+	//
+	// Tune via DSN: `?max_streams=64`.
+	MaxStreams int
 }
 
 // Addr returns the server address in host:port format.
@@ -356,7 +369,7 @@ func parseSimpleDSN(dsn string, cfg *Config) (*Config, error) {
 
 // applyQueryParams applies URL query parameters to the config.
 //
-//nolint:gocognit,gocyclo,cyclop // This is a straightforward switch statement for parsing DSN parameters.
+//nolint:gocognit,gocyclo,cyclop,funlen // This is a straightforward switch statement for parsing DSN parameters.
 func applyQueryParams(params url.Values, cfg *Config) error {
 	for key, values := range params {
 		if len(values) == 0 {
@@ -393,6 +406,17 @@ func applyQueryParams(params url.Values, cfg *Config) error {
 				}
 			}
 			cfg.PoolSize = n
+
+		case "max_streams":
+			n, err := strconv.Atoi(val)
+			if err != nil || n <= 0 {
+				return &ConfigError{
+					Field:   "max_streams",
+					Value:   val,
+					Message: "must be a positive integer",
+				}
+			}
+			cfg.MaxStreams = n
 
 		case "hello_name":
 			if val == "" {
