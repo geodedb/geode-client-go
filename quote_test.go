@@ -27,7 +27,7 @@ func TestSanitizeGraphName(t *testing.T) {
 }
 
 func TestQuoteIdent(t *testing.T) {
-	ok := []string{"abc", "ABC", "_foo", "foo_bar", "foo-bar", "foo9"}
+	ok := []string{"abc", "ABC", "_foo", "foo_bar", "foo-bar", "foo9", "9starts", "005_add_index"}
 	for _, name := range ok {
 		got, err := geode.QuoteIdent(name)
 		if err != nil {
@@ -38,7 +38,7 @@ func TestQuoteIdent(t *testing.T) {
 		}
 	}
 
-	bad := []string{"", "9starts", "-starts", "has space", "has;semi", "has\x00null"}
+	bad := []string{"", "-starts", "has space", "has;semi", "has\x00null"}
 	for _, name := range bad {
 		if _, err := geode.QuoteIdent(name); err == nil {
 			t.Errorf("QuoteIdent(%q) expected error, got nil", name)

@@ -33,9 +33,13 @@ func SanitizeGraphName(name string) string {
 }
 
 // QuoteIdent validates and returns name in a form safe to inline into a
-// GQL admin statement that takes an identifier (CREATE USER, ALTER USER, etc.).
-// Valid identifiers match [A-Za-z_][A-Za-z_0-9-]*. Returns ErrInvalidIdent
-// for empty strings or inputs containing characters outside this set.
+// GQL admin statement that takes an identifier (CREATE USER, ALTER USER,
+// CREATE MIGRATION, etc.). Valid identifiers consist of letters, digits,
+// underscore, and hyphen, and must not start with a hyphen. Digits are
+// permitted at any position, including the first character, because some
+// upstream catalogs use digit-prefixed names (e.g. migration names like
+// "005_add_index"). Returns ErrInvalidIdent for empty strings or inputs
+// containing characters outside this set.
 func QuoteIdent(name string) (string, error) {
 	if name == "" {
 		return "", ErrInvalidIdent
@@ -46,11 +50,11 @@ func QuoteIdent(name string) (string, error) {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r == '_':
 			// Always allowed.
 		case r >= '0' && r <= '9':
-			// Digits allowed anywhere except as the first character.
-			if first {
-				return "", ErrInvalidIdent
-			}
+			// Digits allowed anywhere, including as the first character
+			// (digit-prefixed migration/catalog names).
 		case r == '-':
+			// Hyphen allowed except as the first character to avoid
+			// option-confusion if a downstream emitter splits args.
 			if first {
 				return "", ErrInvalidIdent
 			}
