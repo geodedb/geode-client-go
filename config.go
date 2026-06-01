@@ -158,6 +158,72 @@ func (c *Config) Clone() *Config {
 	return &clone
 }
 
+// FormatDSN serialises the Config back to a DSN string suitable for
+// ParseDSN. It is the inverse of ParseDSN.
+//
+// Only non-default values are emitted as query parameters to keep the
+// DSN minimal. Credentials are embedded in the userinfo segment
+// (scheme://user:pass@host:port) which ParseDSN already handles.
+func (c *Config) FormatDSN() string {
+	scheme := c.Transport.String()
+
+	host := net.JoinHostPort(c.Host, c.Port)
+
+	var userinfo string
+	if c.Username != "" && c.Password != "" {
+		userinfo = url.UserPassword(c.Username, c.Password).String() + "@"
+	} else if c.Username != "" {
+		userinfo = url.User(c.Username).String() + "@"
+	}
+
+	q := url.Values{}
+	if c.PageSize != 0 && c.PageSize != DefaultPageSize {
+		q.Set("page_size", strconv.Itoa(c.PageSize))
+	}
+	if c.HelloName != "" && c.HelloName != DefaultHelloName {
+		q.Set("hello_name", c.HelloName)
+	}
+	if c.HelloVersion != "" && c.HelloVersion != DefaultHelloVersion {
+		q.Set("hello_ver", c.HelloVersion)
+	}
+	if c.Conformance != "" && c.Conformance != DefaultConformance {
+		q.Set("conformance", c.Conformance)
+	}
+	if c.TLSCA != "" {
+		q.Set("ca", c.TLSCA)
+	}
+	if c.TLSCert != "" {
+		q.Set("cert", c.TLSCert)
+	}
+	if c.TLSKey != "" {
+		q.Set("key", c.TLSKey)
+	}
+	if c.InsecureSkipVerify {
+		q.Set("insecure_tls_skip_verify", "true")
+	}
+	if c.TLSDisabled {
+		q.Set("tls", "0")
+	}
+	if c.Graph != "" {
+		q.Set("graph", c.Graph)
+	}
+	if c.ConnectTimeout != 0 {
+		q.Set("connect_timeout", strconv.Itoa(c.ConnectTimeout))
+	}
+	if c.PoolSize > 0 && c.PoolSize != DefaultQUICPoolSize {
+		q.Set("pool_size", strconv.Itoa(c.PoolSize))
+	}
+	if c.MaxStreams > 0 && c.MaxStreams != DefaultMaxStreams {
+		q.Set("max_streams", strconv.Itoa(c.MaxStreams))
+	}
+
+	dsn := scheme + "://" + userinfo + host
+	if len(q) > 0 {
+		dsn += "?" + q.Encode()
+	}
+	return dsn
+}
+
 // ParseDSN parses a data source name into a Config.
 //
 // See geode/docs/DSN.md for the complete DSN specification.

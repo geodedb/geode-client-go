@@ -678,3 +678,55 @@ func TestParseDSN_GraphPath(t *testing.T) {
 		})
 	}
 }
+
+func TestConfig_FormatDSN_RoundTrip(t *testing.T) {
+	tests := []struct {
+		name string
+		dsn  string
+	}{
+		{"quic bare", "quic://localhost:3141"},
+		{"grpc no tls", "grpc://db.example.com:50051?tls=0"},
+		{"with graph", "quic://localhost:3141?graph=mydb"},
+		{"with page size", "quic://localhost:3141?page_size=500"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := ParseDSN(tc.dsn)
+			if err != nil {
+				t.Fatalf("ParseDSN(%q): %v", tc.dsn, err)
+			}
+			formatted := cfg.FormatDSN()
+			cfg2, err := ParseDSN(formatted)
+			if err != nil {
+				t.Fatalf("ParseDSN(FormatDSN(%q)): %v — got: %q", tc.dsn, err, formatted)
+			}
+			if cfg.Host != cfg2.Host || cfg.Port != cfg2.Port || cfg.Transport != cfg2.Transport {
+				t.Errorf("round-trip host/port/transport mismatch: orig=%q formatted=%q", tc.dsn, formatted)
+			}
+			if cfg.Graph != cfg2.Graph {
+				t.Errorf("round-trip graph mismatch: orig=%q formatted=%q", cfg.Graph, cfg2.Graph)
+			}
+			if cfg.PageSize != cfg2.PageSize {
+				t.Errorf("round-trip page_size mismatch: orig=%d formatted %d", cfg.PageSize, cfg2.PageSize)
+			}
+		})
+	}
+}
+
+func TestConfig_FormatDSN_Credentials(t *testing.T) {
+	cfg := &Config{
+		Transport: TransportQUIC,
+		Host:      "localhost",
+		Port:      DefaultPort,
+		Username:  "alice",
+		Password:  "s3cr3t",
+	}
+	dsn := cfg.FormatDSN()
+	cfg2, err := ParseDSN(dsn)
+	if err != nil {
+		t.Fatalf("ParseDSN(FormatDSN with creds): %v — dsn=%q", err, dsn)
+	}
+	if cfg2.Username != "alice" || cfg2.Password != "s3cr3t" {
+		t.Errorf("credential round-trip: got user=%q pass=%q", cfg2.Username, cfg2.Password)
+	}
+}
