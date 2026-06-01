@@ -169,13 +169,6 @@ func (c *Config) FormatDSN() string {
 
 	host := net.JoinHostPort(c.Host, c.Port)
 
-	var userinfo string
-	if c.Username != "" && c.Password != "" {
-		userinfo = url.UserPassword(c.Username, c.Password).String() + "@"
-	} else if c.Username != "" {
-		userinfo = url.User(c.Username).String() + "@"
-	}
-
 	q := url.Values{}
 	if c.PageSize != 0 && c.PageSize != DefaultPageSize {
 		q.Set("page_size", strconv.Itoa(c.PageSize))
@@ -215,6 +208,17 @@ func (c *Config) FormatDSN() string {
 	}
 	if c.MaxStreams > 0 && c.MaxStreams != DefaultMaxStreams {
 		q.Set("max_streams", strconv.Itoa(c.MaxStreams))
+	}
+
+	var userinfo string
+	switch {
+	case c.Username != "" && c.Password != "":
+		userinfo = url.UserPassword(c.Username, c.Password).String() + "@"
+	case c.Username != "":
+		userinfo = url.User(c.Username).String() + "@"
+	case c.Password != "":
+		// password-only: userinfo requires a username, so use query param
+		q.Set("pass", c.Password)
 	}
 
 	dsn := scheme + "://" + userinfo + host

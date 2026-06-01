@@ -730,3 +730,20 @@ func TestConfig_FormatDSN_Credentials(t *testing.T) {
 		t.Errorf("credential round-trip: got user=%q pass=%q", cfg2.Username, cfg2.Password)
 	}
 }
+
+func TestConfig_FormatDSN_PasswordOnly(t *testing.T) {
+	// ParseDSN accepts pass-only; FormatDSN must round-trip it.
+	dsn := "quic://localhost:3141?pass=s3cr3t"
+	cfg, err := ParseDSN(dsn)
+	if err != nil {
+		t.Fatalf("ParseDSN: %v", err)
+	}
+	formatted := cfg.FormatDSN()
+	cfg2, err := ParseDSN(formatted)
+	if err != nil {
+		t.Fatalf("ParseDSN(FormatDSN): %v — got: %q", err, formatted)
+	}
+	if cfg2.Password != "s3cr3t" {
+		t.Errorf("password round-trip failed: got %q, want %q", cfg2.Password, "s3cr3t")
+	}
+}
