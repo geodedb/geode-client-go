@@ -82,6 +82,10 @@ func (r *Rows) Next(dest []driver.Value) error {
 			row := r.protoBuffer[r.bufferIdx]
 			r.bufferIdx++
 
+			if isNoMatchRow(row, r.columns) {
+				continue
+			}
+
 			// Copy values to dest
 			for i := range r.columns {
 				if i < len(row.GetValues()) {
@@ -305,4 +309,32 @@ func (r *Rows) IsOrdered() bool {
 // OrderKeys returns the order keys for the result set.
 func (r *Rows) OrderKeys() []string {
 	return r.orderKeys
+}
+
+// isNoMatchRow reports whether row is a server-emitted no-match sentinel.
+// The Geode server emits a single null-valued row for NODE/EDGE/PATH columns
+// when MATCH finds no results, instead of an empty DataPage. Skip these rows
+// and return io.EOF so database/sql surfaces sql.ErrNoRows to the caller.
+func isNoMatchRow(row *proto.Row, columns []ColumnInfo) bool {
+	if len(columns) == 0 {
+		return false
+	}
+	vals := row.GetValues()
+	hasRefCol := false
+	for i, col := range columns {
+		if col.Type != GQLTypeNode && col.Type != GQLTypeEdge && col.Type != GQLTypePath {
+			continue
+		}
+		hasRefCol = true
+		var v *proto.Value
+		if i < len(vals) {
+			v = vals[i]
+		}
+		if v != nil {
+			if _, isNull := v.GetKind().(*proto.Value_NullVal); !isNull {
+				return false // reference column has a real value
+			}
+		}
+	}
+	return hasRefCol
 }
