@@ -69,8 +69,15 @@ import (
 	"database/sql/driver"
 )
 
+// registeredDriver is the singleton driver instance used by sql.Register.
+// It is shared across all connections opened via sql.Open/sql.OpenDB
+// to ensure consistent driver reference semantics.
+//
+//nolint:gochecknoglobals // Driver registration requires a global singleton
+var registeredDriver Driver
+
 func init() {
-	sql.Register("geode", &Driver{})
+	sql.Register("geode", &registeredDriver)
 }
 
 // Driver implements driver.Driver and driver.DriverContext.
@@ -131,6 +138,65 @@ func (d *Driver) OpenConnector(name string) (driver.Connector, error) {
 		c.quicPool = NewQUICPool(cfg, size)
 	}
 
+	return c, nil
+}
+
+// NewConnector creates a Connector from a programmatic Config without
+// requiring a DSN string. This is the preferred constructor when
+// connection parameters are assembled from structured config rather
+// than a DSN string.
+//
+// The returned Connector can be passed to sql.OpenDB:
+//
+//	c, err := geode.NewConnector(&geode.Config{
+//	    Host: "localhost", Port: "3141", Transport: geode.TransportQUIC,
+//	})
+//	if err != nil {
+//	    return err
+//	}
+//	db := sql.OpenDB(c)
+func NewConnector(cfg *Config) (*Connector, error) {
+	if cfg == nil {
+		return nil, &ConfigError{Field: "config", Message: "config must not be nil"}
+	}
+
+	// Clone first so we never mutate the caller's Config, then backfill
+	// unset optional fields with the same defaults applied by ParseDSN.
+	// This keeps NewConnector ergonomic: a caller assembling a Config
+	// programmatically only needs to set the fields they care about
+	// (e.g. Host/Port/Transport) and still passes Validate.
+	out := cfg.Clone()
+	if out.Port == "" {
+		out.Port = DefaultPort
+	}
+	if out.PageSize <= 0 {
+		out.PageSize = DefaultPageSize
+	}
+	if out.HelloName == "" {
+		out.HelloName = DefaultHelloName
+	}
+	if out.HelloVersion == "" {
+		out.HelloVersion = DefaultHelloVersion
+	}
+	if out.Conformance == "" {
+		out.Conformance = DefaultConformance
+	}
+
+	if err := out.Validate(); err != nil {
+		return nil, err
+	}
+
+	c := &Connector{
+		driver: &registeredDriver,
+		cfg:    out,
+	}
+	if out.Transport == TransportQUIC {
+		size := out.PoolSize
+		if size <= 0 {
+			size = DefaultQUICPoolSize
+		}
+		c.quicPool = NewQUICPool(out, size)
+	}
 	return c, nil
 }
 

@@ -2,6 +2,7 @@ package geode
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -261,5 +262,57 @@ func TestIsRetryableError(t *testing.T) {
 
 	if IsRetryableError(errors.New("random error")) {
 		t.Error("IsRetryableError should return false for non-Error interface")
+	}
+}
+
+func TestIsAuthError(t *testing.T) {
+	// StatusClass() returns e.Class, so construct with Class set.
+	authErr := &DriverError{Class: StatusAuth, Message: "test error"}
+
+	// Test direct error
+	if !IsAuthError(authErr) {
+		t.Error("IsAuthError(28000 DriverError) = false, want true")
+	}
+	// Test wrapped error (errors.As must unwrap)
+	if !IsAuthError(fmt.Errorf("wrap: %w", authErr)) {
+		t.Error("IsAuthError(wrapped 28000) = false, want true")
+	}
+	// Test Geode-specific 08P01 password-reset-required extension
+	if !IsAuthError(&DriverError{Class: "08P01", Message: "password reset required"}) {
+		t.Error("IsAuthError(08P01) = false, want true")
+	}
+	// Test wrong class
+	syntaxErr := &DriverError{Class: StatusSyntax, Message: "test error"}
+	if IsAuthError(syntaxErr) {
+		t.Error("IsAuthError(42000) = true, want false")
+	}
+	// Test nil
+	if IsAuthError(nil) {
+		t.Error("IsAuthError(nil) = true, want false")
+	}
+	// Test non-driver error
+	if IsAuthError(errors.New("plain error")) {
+		t.Error("IsAuthError(non-driver) = true, want false")
+	}
+}
+
+func TestIsSyntaxError(t *testing.T) {
+	syntaxErr := &DriverError{Class: StatusSyntax, Message: "test error"}
+	if !IsSyntaxError(syntaxErr) {
+		t.Error("IsSyntaxError(42000) = false, want true")
+	}
+	if !IsSyntaxError(fmt.Errorf("wrap: %w", syntaxErr)) {
+		t.Error("IsSyntaxError(wrapped 42000) = false, want true")
+	}
+	authErr := &DriverError{Class: StatusAuth, Message: "test error"}
+	if IsSyntaxError(authErr) {
+		t.Error("IsSyntaxError(28000) = true, want false")
+	}
+	if IsSyntaxError(nil) {
+		t.Error("IsSyntaxError(nil) = true, want false")
+	}
+	// Test non-driver error
+	if IsSyntaxError(errors.New("plain error")) {
+		t.Error("IsSyntaxError(non-driver) = true, want false")
 	}
 }

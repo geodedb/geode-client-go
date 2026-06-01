@@ -269,3 +269,38 @@ func IsRetryableError(err error) bool {
 	}
 	return false
 }
+
+// IsAuthError reports whether err is a Geode authentication or
+// authorization failure (GQL status class 28000 or the Geode-specific
+// 08P01 password-reset-required extension). Returns false for nil and
+// for errors that do not carry a driver status class.
+func IsAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var de *DriverError
+	if !errors.As(err, &de) {
+		return false
+	}
+	switch de.StatusClass() {
+	case StatusAuth, // "28000"
+		"08P01": // password reset required (Geode-specific)
+		return true
+	}
+	return false
+}
+
+// IsSyntaxError reports whether err is a GQL parse or syntax error
+// (status class 42000). The Geode engine returns 42000 for unrecognised
+// statements, including admin DDL verbs not yet implemented in the
+// connected server build. Handlers can use this to degrade gracefully.
+func IsSyntaxError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var de *DriverError
+	if !errors.As(err, &de) {
+		return false
+	}
+	return de.StatusClass() == StatusSyntax // "42000"
+}
