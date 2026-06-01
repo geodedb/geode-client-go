@@ -882,6 +882,33 @@ func TestDocker_NonExistentProperty(t *testing.T) {
 	assert.Nil(t, value)
 }
 
+// TestDocker_NoMatch_QueryRowReturnsErrNoRows is the integration-level
+// reproduction for the "no-match null row" bug: a MATCH that finds no node must
+// surface as sql.ErrNoRows from QueryRow().Scan, not a scan error.
+//
+// Before the fix the server's single null-row DataPage was passed through, so
+// Scan(&dest) failed assigning nil to a non-nullable destination (a 500-class
+// error). After the fix the null NODE row is skipped and QueryRow returns
+// sql.ErrNoRows (a clean 404-class result).
+func TestDocker_NoMatch_QueryRowReturnsErrNoRows(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	defer cleanupTestData(t, db)
+
+	ctx, cancel := queryCtx()
+	defer cancel()
+
+	var dest interface{}
+	err := db.QueryRowContext(ctx,
+		"MATCH (n {id: ?}) RETURN n",
+		"completely-nonexistent-id-xyz",
+	).Scan(&dest)
+
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("no-match QueryRow should return sql.ErrNoRows, got err=%v dest=%v", err, dest)
+	}
+}
+
 // =============================================================================
 // Prepared Statement Tests
 // =============================================================================
