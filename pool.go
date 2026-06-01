@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"time"
+
+	"geodedb.com/geode/internal/redact"
 )
 
 // Default pool settings tuned for Geode's QUIC transport.
@@ -146,6 +148,37 @@ func NewPool(dsn string, opts ...PoolOption) (*Pool, error) {
 	return &Pool{db: db, cfg: cfg}, nil
 }
 
+// NewPoolFromConfig creates a connection pool from a programmatic Config
+// without requiring a DSN string. The pool is immediately validated with
+// a ping. This is the preferred constructor when connection parameters
+// are assembled from structured config rather than a DSN string.
+func NewPoolFromConfig(cfg *Config, opts ...PoolOption) (*Pool, error) {
+	c, err := NewConnector(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	pc := defaultPoolConfig()
+	for _, opt := range opts {
+		opt(&pc)
+	}
+
+	db := sql.OpenDB(c)
+	db.SetMaxOpenConns(pc.maxOpenConns)
+	db.SetMaxIdleConns(pc.maxIdleConns)
+	db.SetConnMaxLifetime(pc.connMaxLifetime)
+	db.SetConnMaxIdleTime(pc.connMaxIdleTime)
+
+	ctx, cancel := context.WithTimeout(context.Background(), DefaultPingTimeout)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
+		db.Close()
+		return nil, err
+	}
+
+	return &Pool{db: db, cfg: cfg.Clone()}, nil
+}
+
 // DB returns the underlying *sql.DB for advanced use cases such as
 // running transactions or using sql.Conn for connection-pinned operations.
 func (p *Pool) DB() *sql.DB {
@@ -190,4 +223,35 @@ func (p *Pool) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error
 // Stats returns pool statistics.
 func (p *Pool) Stats() sql.DBStats {
 	return p.db.Stats()
+}
+
+// TX executes fn inside a transaction. If fn returns nil the transaction
+// is committed; if fn returns an error or panics, the transaction is
+// rolled back. tx.Rollback is always deferred; database/sql silently
+// ignores Rollback after a successful Commit.
+func (p *Pool) TX(ctx context.Context, opts *sql.TxOptions, fn func(*sql.Tx) error) (retErr error) {
+	tx, err := p.db.BeginTx(ctx, opts)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if rec := recover(); rec != nil {
+			_ = tx.Rollback()
+			panic(rec)
+		}
+		if retErr != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// RedactDSN returns the DSN with credentials masked for safe logging.
+// It handles URI userinfo (user:pass@host) and query-parameter
+// credentials (?user=x&pass=y).
+func RedactDSN(dsn string) string {
+	return redact.DSN(dsn)
 }
