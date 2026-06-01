@@ -69,8 +69,15 @@ import (
 	"database/sql/driver"
 )
 
+// registeredDriver is the singleton driver instance used by sql.Register.
+// It is shared across all connections opened via sql.Open/sql.OpenDB
+// to ensure consistent driver reference semantics.
+//
+//nolint:gochecknoglobals // Driver registration requires a global singleton
+var registeredDriver Driver
+
 func init() {
-	sql.Register("geode", &Driver{})
+	sql.Register("geode", &registeredDriver)
 }
 
 // Driver implements driver.Driver and driver.DriverContext.
@@ -180,7 +187,7 @@ func NewConnector(cfg *Config) (*Connector, error) {
 	}
 
 	c := &Connector{
-		driver: &Driver{},
+		driver: &registeredDriver,
 		cfg:    out,
 	}
 	if out.Transport == TransportQUIC {

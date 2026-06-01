@@ -42,3 +42,37 @@ func TestNewConnector_NilConfig(t *testing.T) {
 		t.Fatal("NewConnector(nil): expected error, got nil")
 	}
 }
+
+func TestNewConnector_DriverNotNil(t *testing.T) {
+	cfg := &geode.Config{
+		Transport: geode.TransportQUIC,
+		Host:      "localhost",
+		Port:      geode.DefaultPort,
+	}
+	c, err := geode.NewConnector(cfg)
+	if err != nil {
+		t.Fatalf("NewConnector: %v", err)
+	}
+	if c.Driver() == nil {
+		t.Error("Connector.Driver() is nil")
+	}
+}
+
+func TestNewConnector_GRPCTransport(t *testing.T) {
+	cfg := &geode.Config{
+		Transport: geode.TransportGRPC,
+		Host:      "localhost",
+		Port:      geode.DefaultGRPCPort,
+	}
+	c, err := geode.NewConnector(cfg)
+	if err != nil {
+		t.Fatalf("NewConnector gRPC: %v", err)
+	}
+	if c == nil {
+		t.Fatal("NewConnector gRPC returned nil")
+	}
+	got := c.Config()
+	if got.Transport != geode.TransportGRPC {
+		t.Errorf("Config.Transport = %v, want TransportGRPC", got.Transport)
+	}
+}
