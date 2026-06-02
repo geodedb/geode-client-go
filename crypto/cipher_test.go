@@ -216,6 +216,20 @@ func TestHMACHex_DifferentKeys(t *testing.T) {
 	}
 }
 
+func TestDecryptString_InvalidBase64(t *testing.T) {
+	t.Parallel()
+
+	c, err := geocrypto.NewCipher(testKey)
+	if err != nil {
+		t.Fatalf("NewCipher: %v", err)
+	}
+
+	_, err = c.DecryptString("not-valid-base64!!!")
+	if err == nil {
+		t.Fatal("expected error for invalid base64 input, got nil")
+	}
+}
+
 func TestEncryptDecrypt_EmptyPlaintext(t *testing.T) {
 	t.Parallel()
 
