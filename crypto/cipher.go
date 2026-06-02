@@ -129,11 +129,12 @@ func (c *Cipher) DecryptString(encoded string) (string, error) {
 	return string(pt), nil
 }
 
-// HMACHex computes an HMAC-SHA256 of input using the derived HMAC key and
-// returns the result as a lowercase hex string. The output is deterministic —
-// the same input always produces the same output.
-func (c *Cipher) HMACHex(input string) string {
+// HMACHex computes HMAC-SHA256 of data using the derived HMAC key and returns
+// a 64-character lowercase hex digest. Use this for deterministic lookups on
+// encrypted fields (e.g., storing email_hash alongside an encrypted email
+// column so equality queries remain possible without decrypting).
+func (c *Cipher) HMACHex(data string) string {
 	mac := hmac.New(sha256.New, c.hmacKey)
-	mac.Write([]byte(input))
+	mac.Write([]byte(data))
 	return hex.EncodeToString(mac.Sum(nil))
 }
