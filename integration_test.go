@@ -1598,3 +1598,90 @@ func BenchmarkDocker_LargeResult(b *testing.B) {
 		rows.Close()
 	}
 }
+
+// =============================================================================
+// BatchExec Integration Tests
+// =============================================================================
+
+func TestDocker_BatchExec_AllSucceed(t *testing.T) {
+	db := openTestDB(t)
+	defer cleanupTestData(t, db)
+	pool := &Pool{db: db, cfg: &Config{}}
+
+	stmts := []Statement{
+		{Query: `CREATE (n:BatchNode {id: 1, tag: "batch_test"})`},
+		{Query: `CREATE (n:BatchNode {id: 2, tag: "batch_test"})`},
+		{Query: `CREATE (n:BatchNode {id: 3, tag: "batch_test"})`},
+	}
+
+	ctx, cancel := queryCtx()
+	defer cancel()
+
+	err := pool.BatchExec(ctx, stmts)
+	require.NoError(t, err, "BatchExec should succeed")
+
+	ctx2, cancel2 := queryCtx()
+	defer cancel2()
+
+	row := db.QueryRowContext(ctx2, `MATCH (n:BatchNode {tag: "batch_test"}) RETURN COUNT(n) AS c`)
+	var count int
+	require.NoError(t, row.Scan(&count))
+	require.Equal(t, 3, count, "expected 3 BatchNode rows after BatchExec")
+}
+
+func TestDocker_BatchExec_RollbackOnError(t *testing.T) {
+	db := openTestDB(t)
+	defer cleanupTestData(t, db)
+	pool := &Pool{db: db, cfg: &Config{}}
+
+	stmts := []Statement{
+		{Query: `CREATE (n:RollbackNode {id: 1})`},
+		{Query: `THIS IS INVALID GQL !!!`},
+	}
+
+	ctx, cancel := queryCtx()
+	defer cancel()
+
+	err := pool.BatchExec(ctx, stmts)
+	require.Error(t, err, "BatchExec with invalid statement should return error")
+
+	ctx2, cancel2 := queryCtx()
+	defer cancel2()
+
+	row := db.QueryRowContext(ctx2, `MATCH (n:RollbackNode) RETURN COUNT(n) AS c`)
+	var count int
+	require.NoError(t, row.Scan(&count))
+	require.Equal(t, 0, count, "RollbackNode rows should be 0 after BatchExec rollback")
+}
+
+// =============================================================================
+// PipelineExec Integration Tests
+// =============================================================================
+
+func TestDocker_PipelineExec_BulkCreate(t *testing.T) {
+	db := openTestDB(t)
+	defer cleanupTestData(t, db)
+	pool := &Pool{db: db, cfg: &Config{}}
+
+	const total = 50
+	stmts := make([]Statement, total)
+	for i := range stmts {
+		stmts[i] = Statement{
+			Query: fmt.Sprintf(`CREATE (n:PipelineNode {seq: %d, run: "pipeline_test"})`, i),
+		}
+	}
+
+	ctx, cancel := queryCtx()
+	defer cancel()
+
+	err := pool.PipelineExec(ctx, stmts, 10, 4)
+	require.NoError(t, err, "PipelineExec should succeed")
+
+	ctx2, cancel2 := queryCtx()
+	defer cancel2()
+
+	row := db.QueryRowContext(ctx2, `MATCH (n:PipelineNode {run: "pipeline_test"}) RETURN COUNT(n) AS c`)
+	var count int
+	require.NoError(t, row.Scan(&count))
+	require.Equal(t, total, count, "expected %d PipelineNode rows after PipelineExec", total)
+}
