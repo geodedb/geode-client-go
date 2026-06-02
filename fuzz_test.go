@@ -2,6 +2,7 @@ package geode
 
 import (
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"geodedb.com/geode/internal/validate"
@@ -122,5 +123,21 @@ func FuzzScanTime(f *testing.F) {
 		var dest time.Time
 		// Must not panic; error is expected for arbitrary input
 		_ = ScanTime(&dest).Scan(s)
+	})
+}
+
+func FuzzParseSchemaFS(f *testing.F) {
+	f.Add("CREATE NODE TYPE Person (name STRING)")
+	f.Add("// comment\nCREATE (n:A)\nCREATE (n:B)")
+	f.Add("CREATE (a); CREATE (b); CREATE (c)")
+	f.Add("")
+	f.Add("-- SQL comment\nSELECT * FROM foo")
+
+	f.Fuzz(func(t *testing.T, content string) {
+		fs := fstest.MapFS{
+			"fuzz.gql": {Data: []byte(content)},
+		}
+		// Must not panic
+		_, _ = ParseSchemaFS(fs, ".")
 	})
 }
