@@ -49,7 +49,7 @@ func FuzzDecrypt(f *testing.F) {
 		f.Fatal(err)
 	}
 
-	f.Fuzz(func(t *testing.T, data []byte) {
+	f.Fuzz(func(_ *testing.T, data []byte) {
 		// Must not panic; error is expected for arbitrary data
 		_, _ = c.Decrypt(data)
 	})

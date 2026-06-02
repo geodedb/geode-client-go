@@ -133,7 +133,7 @@ func FuzzParseSchemaFS(f *testing.F) {
 	f.Add("")
 	f.Add("-- SQL comment\nSELECT * FROM foo")
 
-	f.Fuzz(func(t *testing.T, content string) {
+	f.Fuzz(func(_ *testing.T, content string) {
 		fs := fstest.MapFS{
 			"fuzz.gql": {Data: []byte(content)},
 		}
