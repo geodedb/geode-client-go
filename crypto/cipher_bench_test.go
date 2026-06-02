@@ -75,6 +75,7 @@ func BenchmarkDecryptString(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
+	b.SetBytes(int64(len(enc)))
 	b.ReportAllocs()
 	for b.Loop() {
 		if _, err := benchCipher.DecryptString(enc); err != nil {
