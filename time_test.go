@@ -164,3 +164,70 @@ func TestParseTime(t *testing.T) {
 		})
 	}
 }
+
+func TestScanTime(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		src     any
+		wantErr bool
+		want    time.Time
+	}{
+		{
+			name: "nil src sets zero time",
+			src:  nil,
+			want: time.Time{},
+		},
+		{
+			name: "time.Time src is passed through",
+			src:  time.Date(2024, 3, 1, 12, 0, 0, 0, time.UTC),
+			want: time.Date(2024, 3, 1, 12, 0, 0, 0, time.UTC),
+		},
+		{
+			name: "empty string sets zero time",
+			src:  "",
+			want: time.Time{},
+		},
+		{
+			name: "valid RFC3339 string is parsed",
+			src:  "2024-01-15T10:30:00Z",
+			want: time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC),
+		},
+		{
+			name: "datetime string with monotonic suffix",
+			src:  "2024-06-01T00:00:00Z m=+12.345",
+			want: time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC),
+		},
+		{
+			name:    "unparseable string returns error",
+			src:     "not-a-time",
+			wantErr: true,
+		},
+		{
+			name:    "integer src returns error",
+			src:     int64(12345),
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var dest time.Time
+			err := ScanTime(&dest).Scan(tc.src)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("Scan(%T(%v)) expected error, got nil", tc.src, tc.src)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Scan(%T(%v)) unexpected error: %v", tc.src, tc.src, err)
+			}
+			if !dest.Equal(tc.want) {
+				t.Errorf("Scan(%v) = %v, want %v", tc.src, dest, tc.want)
+			}
+		})
+	}
+}

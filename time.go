@@ -47,3 +47,46 @@ func ParseTime(s string) (time.Time, error) {
 
 	return time.Time{}, fmt.Errorf("geode: ParseTime: cannot parse %q as a time value", s)
 }
+
+// TimeScanner implements [sql.Scanner] for Geode time strings.
+// Construct one with [ScanTime] and pass it directly to rows.Scan:
+//
+//	var t time.Time
+//	rows.Scan(geode.ScanTime(&t))
+type TimeScanner struct {
+	dest *time.Time
+}
+
+// ScanTime returns a [sql.Scanner] that parses a Geode time string into dest.
+// Geode encodes time.Time values as strings (via fmt.Sprintf("%v", t)), so they
+// arrive as strings like "2006-01-02 15:04:05.999999999 -0700 MST". The
+// monotonic clock suffix "m=..." is stripped before parsing.
+func ScanTime(dest *time.Time) *TimeScanner {
+	return &TimeScanner{dest: dest}
+}
+
+// Scan implements [sql.Scanner].
+func (ts *TimeScanner) Scan(src any) error {
+	if src == nil {
+		*ts.dest = time.Time{}
+		return nil
+	}
+	switch v := src.(type) {
+	case time.Time:
+		*ts.dest = v
+		return nil
+	case string:
+		if v == "" {
+			*ts.dest = time.Time{}
+			return nil
+		}
+		t, err := ParseTime(v)
+		if err != nil {
+			return fmt.Errorf("geode: ScanTime: %w", err)
+		}
+		*ts.dest = t
+		return nil
+	default:
+		return fmt.Errorf("geode: ScanTime: unsupported type %T", src)
+	}
+}

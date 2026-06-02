@@ -2,6 +2,7 @@ package geode
 
 import (
 	"testing"
+	"time"
 
 	"geodedb.com/geode/internal/validate"
 	"geodedb.com/geode/proto"
@@ -107,5 +108,19 @@ func FuzzParseGQLType(f *testing.F) {
 		// Should never panic
 		gqlType := ParseGQLType(typeStr)
 		_ = gqlType.GoType()
+	})
+}
+
+func FuzzScanTime(f *testing.F) {
+	f.Add("")
+	f.Add("2024-01-15T10:30:00Z")
+	f.Add("2024-01-15 10:30:00")
+	f.Add("not-a-time")
+	f.Add("2024-01-15T10:30:00Z m=+1.234")
+
+	f.Fuzz(func(_ *testing.T, s string) {
+		var dest time.Time
+		// Must not panic; error is expected for arbitrary input
+		_ = ScanTime(&dest).Scan(s)
 	})
 }
