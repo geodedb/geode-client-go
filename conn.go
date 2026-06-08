@@ -350,6 +350,14 @@ func (c *Conn) hello(ctx context.Context) (string, error) {
 		graph := c.cfg.Graph
 		req.Graph = &graph
 	}
+	if c.cfg.Tenant != "" {
+		tenant := c.cfg.Tenant
+		req.TenantId = &tenant
+	}
+	if c.cfg.Role != "" {
+		role := c.cfg.Role
+		req.Role = &role
+	}
 	msg := proto.NewHelloMessage(req)
 	if err := c.transport.SendProto(ctx, msg); err != nil {
 		return "", fmt.Errorf("failed to send HELLO: %w", err)

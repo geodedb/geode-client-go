@@ -80,6 +80,19 @@ type Config struct {
 	// Password for authentication.
 	Password string
 
+	// Tenant is the tenant identifier sent in HELLO (tenant_id). When set, the
+	// connection is bound to this tenant for multi-tenant isolation; when empty,
+	// the server places the connection on its default tenant.
+	//
+	// Tune via DSN: `?tenant=acme`.
+	Tenant string
+
+	// Role is the FLE (field-level encryption) role sent in HELLO. When set, the
+	// server uses it for field-level access control; when empty, no role is sent.
+	//
+	// Tune via DSN: `?role=analyst`.
+	Role string
+
 	// PageSize is the number of rows to fetch per page.
 	PageSize int
 
@@ -200,6 +213,12 @@ func (c *Config) FormatDSN() string {
 	if c.Graph != "" {
 		q.Set("graph", c.Graph)
 	}
+	if c.Tenant != "" {
+		q.Set("tenant", c.Tenant)
+	}
+	if c.Role != "" {
+		q.Set("role", c.Role)
+	}
 	if c.ConnectTimeout != 0 {
 		q.Set("connect_timeout", strconv.Itoa(c.ConnectTimeout))
 	}
@@ -253,6 +272,8 @@ func (c *Config) FormatDSN() string {
 //   - key: Path to client key (for mTLS)
 //   - insecure_tls_skip_verify: Skip TLS verification (testing only, aliases: insecure, skip_verify)
 //   - tls: Enable/disable TLS ("0" or "false" to disable, gRPC only)
+//   - tenant: Tenant identifier sent in HELLO (alias: tenant_id)
+//   - role: FLE role sent in HELLO for field-level access control
 //
 // Environment variables:
 //   - GEODE_HOST: Default host if DSN is empty
@@ -546,6 +567,12 @@ func applyQueryParams(params url.Values, cfg *Config) error {
 
 		case "graph":
 			cfg.Graph = val
+
+		case "tenant", "tenant_id":
+			cfg.Tenant = val
+
+		case "role":
+			cfg.Role = val
 
 		default:
 			// Ignore unknown parameters for forward compatibility

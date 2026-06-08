@@ -176,6 +176,15 @@ generate-proto:
 	@echo "Generated files:"
 	@ls -la proto/geode.pb.go proto/geode_grpc.pb.go
 
+# proto-check verifies the vendored proto/geode.proto has not drifted from the
+# canonical server proto (GAP-0841). Runs the always-on reflection drift guard
+# plus, when the sibling geode repo is on disk, the source-level HelloRequest
+# field-set comparison.
+proto-check:
+	@echo "Checking vendored proto against canonical server proto..."
+	GEODE_CANONICAL_PROTO=$(CANONICAL_PROTO) $(GO) test -run 'TestHelloRequest_HasTenantAndRole|TestHelloRequest_TenantAndRoleSettable|TestVendoredProtoMatchesCanonical' -v ./...
+	@echo "✓ Proto drift check complete"
+
 # =============================================================================
 # Test Targets
 # =============================================================================

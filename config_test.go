@@ -307,6 +307,39 @@ func TestParseDSN_Options(t *testing.T) {
 	}
 }
 
+// TestParseDSN_TenantAndRole verifies the tenant/role DSN params (GAP-0841)
+// parse into Config and survive a FormatDSN round-trip.
+func TestParseDSN_TenantAndRole(t *testing.T) {
+	cfg, err := ParseDSN("localhost:3141?tenant=acme&role=analyst")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Tenant != "acme" {
+		t.Errorf("expected tenant 'acme', got %q", cfg.Tenant)
+	}
+	if cfg.Role != "analyst" {
+		t.Errorf("expected role 'analyst', got %q", cfg.Role)
+	}
+
+	// tenant_id alias
+	cfg2, err := ParseDSN("localhost:3141?tenant_id=beta")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg2.Tenant != "beta" {
+		t.Errorf("expected tenant_id alias 'beta', got %q", cfg2.Tenant)
+	}
+
+	// round-trip through FormatDSN
+	rt, err := ParseDSN(cfg.FormatDSN())
+	if err != nil {
+		t.Fatalf("round-trip parse: %v", err)
+	}
+	if rt.Tenant != "acme" || rt.Role != "analyst" {
+		t.Errorf("round-trip lost tenant/role: tenant=%q role=%q", rt.Tenant, rt.Role)
+	}
+}
+
 func TestParseDSN_InvalidPageSize(t *testing.T) {
 	tests := []string{
 		"localhost:3141?page_size=0",
