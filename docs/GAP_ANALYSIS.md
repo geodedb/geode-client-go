@@ -11,9 +11,9 @@ Review type: Comprehensive adversarial security review (Round 6 - no new finding
 Open findings by severity:
 
 - Critical: 0
-- High: 1 (BUG-0002)
+- High: 0
 - Medium: 0
-- Low: 0
+- Low: 1 (BUG-0002 — downgraded 2026-06-17)
 - Info: 0
 
 Closed findings: 28 (Issues #1-#23, #25-#28; BUG-0001)
@@ -21,17 +21,38 @@ Won't Do findings: 1 (Issue #24)
 
 Top risks (remaining):
 
-- **BUG-0002** — a single `*sql.DB` with `SetMaxOpenConns` > ~16 (the QUIC pool
-  size) deadlocks/stalls bulk workloads: connections beyond the pool fail their
-  HELLO handshake. Caps real ingest concurrency per client process.
+- **BUG-0002 (Low, downgraded)** — when a single `*sql.DB` opens MORE concurrent
+  connections than the QUIC `pool_size` (default 16), multiple streams multiplex
+  over each pooled connection and a small fraction of operations intermittently
+  time out (~0.06% at 32-over-16; non-crashing, surviving ops continue at full
+  rate). The CATASTROPHIC symptom originally attributed here — bulk ingests
+  freezing to ~0 nodes/sec — was actually a **geode SERVER crash** (checkpoint vs
+  concurrent-writer data race), fixed server-side in geode commit `7dcac17e`. The
+  remaining driver behaviour is a robustness nit; mitigate by keeping concurrent
+  connections ≤ `pool_size` (divelife `data-ingest` clamps to 16).
 
 ## Open Findings
 
 ### BUG-0002: high-concurrency connection establishment stalls (MaxOpenConns > QUIC pool)
 
-- **Severity:** High
+- **Severity:** Low (downgraded 2026-06-17 — see update below; was High)
 - **Component:** Transport / Connection pool (`quic_pool.go`, connector/HELLO path)
-- **Status:** **Open** (filed 2026-06-17)
+- **Status:** **Open** (filed 2026-06-17), **downgraded 2026-06-17**
+- **2026-06-17 UPDATE — root cause was server-side, not the driver:** the
+  catastrophic symptom (bulk ingest freezing to ~0 nodes/sec, connections dying)
+  was a **geode SERVER CRASH** — `checkpointAll` held `mg.rwlock` SHARED while
+  bulk writers also held it SHARED and mutated the indexes, so the checkpoint's
+  `label_index.scan()` raced `addNode()` and panicked (`index out of bounds`),
+  killing the process under load. Fixed in geode commit `7dcac17e` (checkpoint
+  now takes the EXCLUSIVE lock); validated crash-free at 64 concurrent writers on
+  host and in a container. With the server fixed, the driver no longer "stalls":
+  a single `sql.DB` at 32–64 connections over the default 16-conn pool now sustains
+  full throughput with only a small fraction (~0.06%) of intermittent per-op
+  timeouts from stream multiplexing — a robustness nit, hence the downgrade to
+  **Low**. The originally-reported HELLO/open_stream deadline errors were
+  predominantly the server dying mid-handshake. Recommended driver follow-up
+  (optional): when concurrent demand exceeds `pool_size`, either grow the pool or
+  fail fast with a clear error instead of intermittently timing out.
 - **Symptom:** A single `sql.DB` opened against one geode endpoint with
   `db.SetMaxOpenConns(N)` for N greater than the QUIC pool size
   (`DefaultQUICPoolSize = 16`) **stalls**: many connections fail to establish
