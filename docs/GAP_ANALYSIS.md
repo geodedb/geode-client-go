@@ -1,17 +1,17 @@
 # GAP Analysis
 
-Last updated: 2026-03-21
-Reviewed by: Adversarial Security Review Agent
+Last updated: 2026-06-17
+Reviewed by: Adversarial Security Review Agent (2026-03-21); divelife bulk-seed investigation (2026-06-17)
 Repository: devnw/codepros/geode/geode-client-go
-Commit: b27e102 → (see git log)
-Review type: Comprehensive adversarial security review (Round 6 - no new findings); BUG-0001 closed 2026-03-21
+Commit: b27e102 → acf49a2 (see git log)
+Review type: Comprehensive adversarial security review (Round 6 - no new findings); BUG-0001 closed 2026-03-21; BUG-0002 filed 2026-06-17 (high-concurrency connection-establishment stall)
 
 ## Summary
 
 Open findings by severity:
 
 - Critical: 0
-- High: 0
+- High: 1 (BUG-0002)
 - Medium: 0
 - Low: 0
 - Info: 0
@@ -21,11 +21,61 @@ Won't Do findings: 1 (Issue #24)
 
 Top risks (remaining):
 
-- None outstanding.
+- **BUG-0002** — a single `*sql.DB` with `SetMaxOpenConns` > ~16 (the QUIC pool
+  size) deadlocks/stalls bulk workloads: connections beyond the pool fail their
+  HELLO handshake. Caps real ingest concurrency per client process.
 
 ## Open Findings
 
-No open findings.
+### BUG-0002: high-concurrency connection establishment stalls (MaxOpenConns > QUIC pool)
+
+- **Severity:** High
+- **Component:** Transport / Connection pool (`quic_pool.go`, connector/HELLO path)
+- **Status:** **Open** (filed 2026-06-17)
+- **Symptom:** A single `sql.DB` opened against one geode endpoint with
+  `db.SetMaxOpenConns(N)` for N greater than the QUIC pool size
+  (`DefaultQUICPoolSize = 16`) **stalls**: many connections fail to establish
+  with `failed to receive HELLO response: context deadline exceeded` /
+  `transport read_length ... deadline exceeded`, and (with a larger
+  `pool_size`) `open_stream ... deadline exceeded`. Surfaced by the divelife
+  14.27M bulk seed (`data-ingest ingest --from-dump --workers 32`), which froze
+  at ~0 nodes/sec.
+- **Reproduction (minimal):** open `sql.Open("geode", "<host>?graph=g&insecure=true")`,
+  `db.SetMaxOpenConns(32)`, launch 32 goroutines each looping
+  `db.ExecContext(ctx, "MERGE (x:T {k: ?}) SET x.a = ?", key, "v")` with unique
+  keys against a host (non-Docker) geode server.
+  - **N=16:** clean, ~3100 ops/sec.
+  - **N=32 (default pool):** ~8+ goroutines die on HELLO deadline; survivors continue.
+  - **N=32 with `?pool_size=64&max_streams=256`:** WORSE — more goroutines fail
+    with `open_stream` deadlines. So naively raising the pool size does NOT fix
+    it; the limit is concurrent QUIC connection establishment from a single
+    client endpoint, not pool slots.
+- **Isolation (NOT the geode server):** the geode server handles 32 connections
+  fine when they come from TWO client endpoints (two processes × 16 workers,
+  same graph, ~259 nodes/sec sustained). Only a single client endpoint
+  establishing >~16 QUIC connections at once fails. So the defect is on the Go
+  driver side (QUIC connection establishment under burst / pool interaction),
+  or in how the connector maps `database/sql` connections onto the QUIC pool.
+- **Hypotheses to investigate:** (1) each `sql.Conn` requires a dedicated QUIC
+  connection for its HELLO session and the pool's hard `maxSize` (16) cannot
+  host more, so the 17th+ `Connector.Connect` blocks/times out on HELLO rather
+  than multiplexing or failing fast; (2) a burst of ~32 simultaneous QUIC
+  handshakes from one client transport overwhelms the dial/handshake path
+  (client `quic-go` and/or server accept). Note `acquire()` already multiplexes
+  *streams* over existing conns once at `maxSize`, so the failure is most likely
+  in the per-`sql.Conn` HELLO/connection establishment, not stream admission.
+- **Downstream impact / current mitigation:** divelife `data-ingest` now clamps
+  its `*sql.DB` pool + worker fan-out to 16 (`maxGeodeConns`) so cranking
+  `--workers` cannot deadlock the ingest (commit `126bef7`). This is a
+  workaround; the driver should either (a) multiplex many `sql.Conn` sessions
+  over the QUIC pool without a hard per-process connection ceiling, (b) grow the
+  pool to satisfy `MaxOpenConns` (bounded), or at minimum (c) fail fast with a
+  clear "connection pool exhausted (N > pool_size)" error instead of a 30 s
+  HELLO timeout that presents as a hang.
+- **Required completion:** profile the connector/HELLO path under a 32-connection
+  single-endpoint burst (client `quic-go` dial + server accept), implement one
+  of (a)/(b)/(c), and add a regression test that a single `sql.DB` with
+  `SetMaxOpenConns(64)` sustains throughput (or fails fast) without stalling.
 
 ## Closed Findings
 
