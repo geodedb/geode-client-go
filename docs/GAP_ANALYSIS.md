@@ -76,6 +76,39 @@ Top risks (remaining):
   single-endpoint burst (client `quic-go` dial + server accept), implement one
   of (a)/(b)/(c), and add a regression test that a single `sql.DB` with
   `SetMaxOpenConns(64)` sustains throughput (or fails fast) without stalling.
+- **2026-06-17 update — sharpened root cause + two approaches tried & reverted:**
+  - **Decisive finding: multiplexing concurrent streams over one QUIC connection
+    does not work against the current server.** Forcing 4 streams onto 1
+    connection (`pool_size=1`, `MaxOpenConns=4`) → 3 of 4 concurrent
+    `ExecContext` callers fail with `context deadline exceeded`; only ~1 stream
+    per connection makes progress. This is why exactly `N - pool_size` callers
+    fail: with `pool_size` connections each carrying `ceil(N/pool_size)` streams,
+    all but one stream per connection wedge. (The driver's whole pool model —
+    "many `sql.Conn` streams multiplexed over a few QUIC connections" — is
+    therefore incompatible with the server's per-connection stream handling.)
+  - **Approach 1 (tried, reverted): dial off-lock.** `acquire()` held `p.mu`
+    across `dialLocked()`'s QUIC handshake, serializing establishment; this
+    explains why `pool_size=64` made the stall WORSE (more serial dials). I
+    rewrote `acquire()` to dial outside the lock. It built + passed the unit
+    suite but did NOT fix the stall (because the default `pool_size=16` still
+    forces multi-stream, the real blocker) — reverted to keep the tree clean.
+  - **Approach 2 (tried, reverted): serialize HELLO under `pc.mu`.** Hypothesised
+    a concurrent-HELLO race; holding `pc.mu` across `conn.hello()` did NOT help
+    and made `N=64` worse (the failure is stream multiplexing, not HELLO) —
+    reverted.
+  - **Likely correct fix (NOT yet implemented — needs care, possibly server-side
+    too):** make the driver use **one QUIC connection per active `sql.Conn`** (no
+    concurrent stream multiplexing) AND dial off-lock so establishing many
+    connections is parallel; size/grow the pool to `MaxOpenConns` rather than
+    capping at 16. This must be validated against the server's ability to accept
+    a burst of N QUIC connections from a single client endpoint (a 2-endpoint
+    test of 32 total connections works today; a 1-endpoint test of 32 needs
+    confirmation), and may require a complementary server-side fix to support
+    concurrent streams per connection. Treat as a dedicated transport workstream,
+    not a single-spot patch.
+  - **Current safe mitigation in production:** divelife `data-ingest` clamps its
+    pool + worker fan-out to 16 (commit `126bef7`), which is validated to keep
+    bulk ingest stall-free.
 
 ## Closed Findings
 
