@@ -3,9 +3,61 @@ package graph
 import (
 	"context"
 	"fmt"
+	"os"
+	"strings"
 
 	geode "geodedb.com/geode"
 )
+
+// batchConcurrentEnabled reports whether GAP-0900 concurrent batch submission
+// is opted in via GEODE_BATCH_CONCURRENT (1/true/yes/on). When enabled, a
+// BatchExec whose statements are all simple node MERGEs is sent to the server
+// as ONE `/*+BATCH*/`-prefixed multi-statement request, so the server submits
+// every op to the group-commit coordinator concurrently (coalescing fsyncs)
+// instead of one round-trip per statement. Default off → unchanged behaviour.
+func batchConcurrentEnabled() bool {
+	switch strings.ToLower(os.Getenv("GEODE_BATCH_CONCURRENT")) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// nodeMergeBatchable reports whether every statement is a node-only MERGE (no
+// relationship arrow), the shape the server's `/*+BATCH*/` fast path accepts.
+// A mixed/edge batch would make the server fall back to the serial general
+// executor (slower than the normal path), so we only take the concurrent path
+// when the whole chunk qualifies.
+func nodeMergeBatchable(stmts []Statement) bool {
+	for i := range stmts {
+		q := stmts[i].Query
+		if strings.Contains(q, "->") || strings.Contains(q, "<-") {
+			return false
+		}
+		if !strings.Contains(strings.ToUpper(q), "MERGE") {
+			return false
+		}
+	}
+	return true
+}
+
+// execConcurrentBatch sends all statements as a single `/*+BATCH*/` request.
+// The driver inlines each statement's `?` args positionally, so concatenating
+// queries (joined by `;`) and args yields one literal multi-statement program.
+func (c *Conn) execConcurrentBatch(ctx context.Context, stmts []Statement) error {
+	var b strings.Builder
+	b.Grow(len(stmts) * 96)
+	b.WriteString("/*+BATCH*/ ")
+	args := make([]any, 0, len(stmts)*8)
+	for i := range stmts {
+		q := strings.TrimRight(strings.TrimSpace(stmts[i].Query), ";")
+		b.WriteString(q)
+		b.WriteString(";\n")
+		args = append(args, stmts[i].Args...)
+	}
+	_, err := c.db.ExecContext(ctx, b.String(), args...)
+	return err
+}
 
 // retryMultiplier is the exponential backoff multiplier used in the retry
 // policy built from Conn options.

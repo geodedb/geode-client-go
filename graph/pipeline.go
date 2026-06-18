@@ -64,6 +64,15 @@ func (c *Conn) PipelineExec(ctx context.Context, stmts []Statement, opts ...Pipe
 		Multiplier:     retryMultiplier,
 	}
 
+	// GAP-0900 lever (c): when opted in (GEODE_BATCH_CONCURRENT) and the whole
+	// pipeline is node-only MERGEs, send the work as `/*+BATCH*/` chunks — one
+	// round-trip per chunk that the server submits to the group-commit
+	// coordinator concurrently — instead of one round-trip per statement. Edge
+	// and mixed pipelines keep the per-statement fan-out below unchanged.
+	if batchConcurrentEnabled() && nodeMergeBatchable(stmts) {
+		return c.pipelineConcurrentBatch(ctx, stmts, workers, policy, cfg)
+	}
+
 	total := len(stmts)
 
 	// childCtx is cancelled on the first error to stop remaining goroutines.
@@ -125,5 +134,85 @@ func (c *Conn) PipelineExec(ctx context.Context, stmts []Statement, opts ...Pipe
 	}
 	result.Failed = result.Total - result.Succeeded
 
+	return result, firstErr
+}
+
+// pipelineConcurrentBatch is the GAP-0900 lever (c) fast path for node-merge
+// pipelines: it groups statements into chunks (Conn BatchSize, default 100) and
+// runs the chunks across the worker pool, each chunk sent as one
+// `/*+BATCH*/` request via execConcurrentBatch. The server submits every op in
+// a chunk to the group-commit coordinator concurrently, collapsing N round-trips
+// (and, in sync_each_commit, N fsyncs) into roughly one per chunk.
+func (c *Conn) pipelineConcurrentBatch(
+	ctx context.Context,
+	stmts []Statement,
+	workers int,
+	policy geode.RetryPolicy,
+	cfg *pipelineConfig,
+) (PipelineResult, error) {
+	total := len(stmts)
+
+	chunkSize := c.opts.BatchSize
+	if chunkSize <= 0 {
+		chunkSize = 100
+	}
+
+	childCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var (
+		wg        sync.WaitGroup
+		once      sync.Once
+		firstErr  error
+		succeeded atomic.Int64
+	)
+
+	sem := make(chan struct{}, workers)
+
+	for start := 0; start < total; start += chunkSize {
+		end := start + chunkSize
+		if end > total {
+			end = total
+		}
+		chunk := stmts[start:end]
+
+		wg.Add(1)
+		go func(chunk []Statement) {
+			defer wg.Done()
+
+			select {
+			case sem <- struct{}{}:
+			case <-childCtx.Done():
+				once.Do(func() { firstErr = childCtx.Err() })
+				return
+			}
+			defer func() { <-sem }()
+
+			execErr := geode.Retry(childCtx, policy, func(ctx context.Context) error {
+				return c.execConcurrentBatch(ctx, chunk)
+			})
+			if execErr != nil {
+				once.Do(func() {
+					firstErr = fmt.Errorf("graph: pipeline batch: %w", execErr)
+				})
+				cancel()
+				return
+			}
+
+			n := int(succeeded.Add(int64(len(chunk))))
+			if cfg.progressFn != nil {
+				cfg.progressFn(n, total)
+			}
+		}(chunk)
+	}
+
+	wg.Wait()
+
+	result := PipelineResult{
+		Total:     total,
+		Succeeded: int(succeeded.Load()),
+		Err:       firstErr,
+	}
+	result.Failed = result.Total - result.Succeeded
 	return result, firstErr
 }
