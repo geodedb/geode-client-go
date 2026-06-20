@@ -84,6 +84,22 @@ func (m *mockTransport) ReceiveProto(ctx context.Context) (*proto.QuicServerMess
 	}
 	m.mu.Unlock()
 
+	// Prefer a frame that is already queued over a (possibly simultaneously)
+	// expired context deadline. Go's select picks a ready case at random, so
+	// without this priority check the short blocking drain in releaseRows would
+	// drop an in-flight trailing frame ~50% of the time whenever its 1ms
+	// deadline and the queued frame became ready together — the source of the
+	// CI flake in TestConn_SequentialQueries_NoDesync. This race is a mock
+	// artifact: the real QUICTransport returns bytes already available on the
+	// socket rather than coin-flipping against the read deadline. Returning a
+	// queued frame first faithfully models that and makes the drain
+	// deterministic.
+	select {
+	case msg := <-m.recv:
+		return msg, nil
+	default:
+	}
+
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
