@@ -25,7 +25,7 @@ func TestRedactDSN(t *testing.T) {
 		// credentials that must NOT appear in output
 		forbidden []string
 	}{
-		{
+		{ //nolint:gosec // test DSN uses intentionally fake credentials for redaction testing
 			name:      "userinfo",
 			in:        "quic://alice:s3cr3t@localhost:3141",
 			forbidden: []string{"alice", "s3cr3t"},

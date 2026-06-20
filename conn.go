@@ -19,6 +19,18 @@ import (
 // operations from hanging indefinitely. Use the Context variants for custom timeouts.
 const defaultDeprecatedMethodTimeout = 30 * time.Second
 
+// Operation name constants used in SecurityError.Type fields and the
+// describeServerMessage helper.
+const (
+	constOpInput    = "input"
+	constOpHello    = "hello"
+	constOpExecute  = "execute"
+	constOpPing     = "ping"
+	constOpBegin    = "begin"
+	constOpCommit   = "commit"
+	constOpRollback = "rollback"
+)
+
 // transportErrBadConn converts transport-layer errors to driver.ErrBadConn so
 // that database/sql automatically discards the stale connection and retries the
 // operation on a fresh one. QUIC streams are closed by the server after idle
@@ -408,7 +420,7 @@ func (c *Conn) PrepareContext(_ context.Context, query string) (driver.Stmt, err
 	// Validate query
 	if err := validate.Query(query); err != nil {
 		return nil, &SecurityError{
-			Type:    "input",
+			Type:    constOpInput,
 			Message: err.Error(),
 		}
 	}
@@ -523,23 +535,23 @@ func describeServerMessage(resp *proto.QuicServerMessage) string {
 	}
 	switch {
 	case resp.GetHello() != nil:
-		return "hello"
+		return constOpHello
 	case resp.GetExecute() != nil:
 		ex := resp.GetExecute()
 		if ex.GetError() != nil {
 			return fmt.Sprintf("execute(error=%s)", ex.GetError().GetMessage())
 		}
-		return "execute"
+		return constOpExecute
 	case resp.GetPull() != nil:
 		return "pull"
 	case resp.GetPing() != nil:
-		return "ping"
+		return constOpPing
 	case resp.GetBegin() != nil:
-		return "begin"
+		return constOpBegin
 	case resp.GetCommit() != nil:
-		return "commit"
+		return constOpCommit
 	case resp.GetRollback() != nil:
-		return "rollback"
+		return constOpRollback
 	case resp.GetSavepoint() != nil:
 		return "savepoint"
 	case resp.GetRollbackTo() != nil:
@@ -555,7 +567,7 @@ func describeServerMessage(resp *proto.QuicServerMessage) string {
 	case resp.GetUploadBackup() != nil:
 		return "upload_backup"
 	default:
-		return "unknown"
+		return constUnknown
 	}
 }
 
@@ -575,7 +587,7 @@ func (c *Conn) ExecContext(ctx context.Context, query string, args []driver.Name
 	// Validate query
 	if err := validate.Query(query); err != nil {
 		return nil, &SecurityError{
-			Type:    "input",
+			Type:    constOpInput,
 			Message: err.Error(),
 		}
 	}
@@ -659,7 +671,7 @@ func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.Nam
 	if err := validate.Query(query); err != nil {
 		c.mu.Unlock()
 		return nil, &SecurityError{
-			Type:    "input",
+			Type:    constOpInput,
 			Message: err.Error(),
 		}
 	}
@@ -958,7 +970,7 @@ var gqlStringEscaper = strings.NewReplacer(
 // quotes, and control characters properly escaped.
 func inlineValue(val any) string {
 	if val == nil {
-		return "NULL"
+		return string(GQLTypeNull)
 	}
 	switch v := val.(type) {
 	case string:

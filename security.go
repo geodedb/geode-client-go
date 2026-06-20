@@ -50,7 +50,7 @@ func NewTLSConfig(cfg *Config) (*tls.Config, error) {
 		systemPool, err := x509.SystemCertPool()
 		if err != nil {
 			return nil, &SecurityError{
-				Type:    "tls",
+				Type:    paramTLS,
 				Message: "no CA certificates available and system pool unavailable",
 				cause:   err,
 			}
@@ -104,7 +104,7 @@ func loadCACertificates(cfg *Config) (*x509.CertPool, error) {
 
 		if !pool.AppendCertsFromPEM(data) {
 			return nil, &SecurityError{
-				Type:    "tls",
+				Type:    paramTLS,
 				Message: fmt.Sprintf("failed to parse CA certificate: %s", path),
 			}
 		}
@@ -114,7 +114,7 @@ func loadCACertificates(cfg *Config) (*x509.CertPool, error) {
 	if !loaded {
 		if explicit {
 			return nil, &SecurityError{
-				Type:    "tls",
+				Type:    paramTLS,
 				Message: "no valid CA certificates found in configured path",
 			}
 		}
@@ -140,7 +140,7 @@ func loadClientCertificate(certPath, keyPath string) (tls.Certificate, error) {
 	cert, err := tls.X509KeyPair(certData, keyData)
 	if err != nil {
 		return tls.Certificate{}, &SecurityError{
-			Type:    "tls",
+			Type:    paramTLS,
 			Message: "failed to load client certificate",
 			cause:   err,
 		}
@@ -153,20 +153,20 @@ func readLimitedFile(path, label string) ([]byte, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, &SecurityError{
-			Type:    "tls",
+			Type:    paramTLS,
 			Message: fmt.Sprintf("failed to stat %s: %s", label, path),
 			cause:   err,
 		}
 	}
 	if !info.Mode().IsRegular() {
 		return nil, &SecurityError{
-			Type:    "tls",
+			Type:    paramTLS,
 			Message: fmt.Sprintf("%s must be a regular file: %s", label, path),
 		}
 	}
 	if info.Size() > maxCertFileSize {
 		return nil, &SecurityError{
-			Type:    "tls",
+			Type:    paramTLS,
 			Message: fmt.Sprintf("%s file too large: %s (%d bytes, max %d)", label, path, info.Size(), maxCertFileSize),
 		}
 	}
@@ -174,7 +174,7 @@ func readLimitedFile(path, label string) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, &SecurityError{
-			Type:    "tls",
+			Type:    paramTLS,
 			Message: fmt.Sprintf("failed to read %s: %s", label, path),
 			cause:   err,
 		}
@@ -184,14 +184,14 @@ func readLimitedFile(path, label string) ([]byte, error) {
 	data, err := io.ReadAll(io.LimitReader(f, maxCertFileSize+1))
 	if err != nil {
 		return nil, &SecurityError{
-			Type:    "tls",
+			Type:    paramTLS,
 			Message: fmt.Sprintf("failed to read %s: %s", label, path),
 			cause:   err,
 		}
 	}
 	if int64(len(data)) > maxCertFileSize {
 		return nil, &SecurityError{
-			Type:    "tls",
+			Type:    paramTLS,
 			Message: fmt.Sprintf("%s file too large: %s (max %d)", label, path, maxCertFileSize),
 		}
 	}
@@ -204,7 +204,7 @@ func loadCACertPool(path string) (*x509.CertPool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, &SecurityError{
-			Type:    "tls",
+			Type:    paramTLS,
 			Message: fmt.Sprintf("failed to read CA certificate: %s", path),
 			cause:   err,
 		}
@@ -213,7 +213,7 @@ func loadCACertPool(path string) (*x509.CertPool, error) {
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(data) {
 		return nil, &SecurityError{
-			Type:    "tls",
+			Type:    paramTLS,
 			Message: fmt.Sprintf("failed to parse CA certificate: %s", path),
 		}
 	}

@@ -16,13 +16,20 @@ const MaxParamNameLength = 128
 // MaxHostnameLength is the maximum allowed hostname length per RFC 1035.
 const MaxHostnameLength = 253
 
+// ValidationError field name constants.
+const (
+	constFieldQuery     = "query"
+	constFieldParamName = "param_name"
+	constFieldHost      = "host"
+)
+
 // Query validates and sanitizes a GQL query string.
 // It returns an error if the query contains invalid characters or exceeds size limits.
 func Query(query string) error {
 	// Check for null bytes
 	if strings.ContainsRune(query, 0) {
 		return &ValidationError{
-			Field:   "query",
+			Field:   constFieldQuery,
 			Message: "null bytes not allowed",
 		}
 	}
@@ -31,7 +38,7 @@ func Query(query string) error {
 	for i, r := range query {
 		if r < 32 && r != '\n' && r != '\t' && r != '\r' {
 			return &ValidationError{
-				Field:   "query",
+				Field:   constFieldQuery,
 				Message: fmt.Sprintf("control character at position %d", i),
 			}
 		}
@@ -40,7 +47,7 @@ func Query(query string) error {
 	// Enforce maximum query length
 	if len(query) > MaxQueryLength {
 		return &ValidationError{
-			Field:   "query",
+			Field:   constFieldQuery,
 			Message: fmt.Sprintf("query exceeds maximum length (%d bytes)", MaxQueryLength),
 		}
 	}
@@ -58,7 +65,7 @@ func ParamName(name string) error {
 
 	if len(name) > MaxParamNameLength {
 		return &ValidationError{
-			Field:   "param_name",
+			Field:   constFieldParamName,
 			Value:   name,
 			Message: fmt.Sprintf("parameter name too long (max %d characters)", MaxParamNameLength),
 		}
@@ -68,7 +75,7 @@ func ParamName(name string) error {
 		if i == 0 {
 			if !unicode.IsLetter(r) && r != '_' {
 				return &ValidationError{
-					Field:   "param_name",
+					Field:   constFieldParamName,
 					Value:   name,
 					Message: "parameter name must start with a letter or underscore",
 				}
@@ -76,7 +83,7 @@ func ParamName(name string) error {
 		} else {
 			if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' {
 				return &ValidationError{
-					Field:   "param_name",
+					Field:   constFieldParamName,
 					Value:   name,
 					Message: "parameter name contains invalid character",
 				}
@@ -91,7 +98,7 @@ func ParamName(name string) error {
 func Hostname(host string) error {
 	if host == "" {
 		return &ValidationError{
-			Field:   "host",
+			Field:   constFieldHost,
 			Message: "hostname is required",
 		}
 	}
@@ -99,7 +106,7 @@ func Hostname(host string) error {
 	// Check for null bytes
 	if strings.ContainsRune(host, 0) {
 		return &ValidationError{
-			Field:   "host",
+			Field:   constFieldHost,
 			Value:   host,
 			Message: "null bytes not allowed in hostname",
 		}
@@ -108,7 +115,7 @@ func Hostname(host string) error {
 	// Basic validation - more specific validation happens at connection time
 	if len(host) > MaxHostnameLength {
 		return &ValidationError{
-			Field:   "host",
+			Field:   constFieldHost,
 			Value:   host,
 			Message: "hostname too long",
 		}

@@ -24,6 +24,12 @@ const (
 	lengthPrefixSize                   = 4                // 4-byte big-endian length prefix
 )
 
+// Transport operation name constants used in TransportError.Op fields.
+const (
+	constOpDial = "dial"
+	constOpRead = "read"
+)
+
 // Transport defines the interface for communication with a Geode server.
 type Transport interface {
 	// SendProto writes a protobuf message to the server.
@@ -108,7 +114,7 @@ func NewQUICTransport(ctx context.Context, cfg *Config) (*QUICTransport, error) 
 	})
 	if err != nil {
 		return nil, &TransportError{
-			Op:    "dial",
+			Op:    constOpDial,
 			Addr:  addr,
 			cause: err,
 		}
@@ -272,7 +278,7 @@ func (t *QUICTransport) ReceiveProto(ctx context.Context) (*proto.QuicServerMess
 	// Sanity check length (16MB max)
 	if msgLen > 16*1024*1024 {
 		return nil, &TransportError{
-			Op:    "read",
+			Op:    constOpRead,
 			Addr:  t.addr,
 			cause: proto.ErrInvalidMessage,
 		}
@@ -285,7 +291,7 @@ func (t *QUICTransport) ReceiveProto(ctx context.Context) (*proto.QuicServerMess
 			return nil, ctx.Err()
 		}
 		return nil, &TransportError{
-			Op:    "read",
+			Op:    constOpRead,
 			Addr:  t.addr,
 			cause: err,
 		}

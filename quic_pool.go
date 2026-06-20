@@ -303,7 +303,7 @@ func (p *QUICPool) dialLocked(ctx context.Context) (*pooledConn, error) {
 	})
 	if err != nil {
 		return nil, &TransportError{
-			Op:    "dial",
+			Op:    constOpDial,
 			Addr:  addr,
 			cause: err,
 		}

@@ -60,7 +60,7 @@ func NewGRPCTransport(_ context.Context, cfg *Config) (*GRPCTransport, error) {
 	conn, err := grpc.NewClient(addr, opts...)
 	if err != nil {
 		return nil, &TransportError{
-			Op:    "dial",
+			Op:    constOpDial,
 			Addr:  addr,
 			cause: err,
 		}
@@ -95,7 +95,7 @@ func buildGRPCTLSConfig(cfg *Config) (*tls.Config, error) {
 		cert, err := tls.LoadX509KeyPair(cfg.TLSCert, cfg.TLSKey)
 		if err != nil {
 			return nil, &SecurityError{
-				Type:    "tls",
+				Type:    paramTLS,
 				Message: "failed to load client certificate",
 				cause:   err,
 			}
@@ -140,7 +140,7 @@ func (t *GRPCTransport) SendProto(ctx context.Context, msg *proto.QuicClientMess
 		resp, err := t.client.Ping(ctx, m.Ping)
 		if err != nil {
 			return &TransportError{
-				Op:    "ping",
+				Op:    constOpPing,
 				Addr:  t.addr,
 				cause: err,
 			}
@@ -160,7 +160,7 @@ func (t *GRPCTransport) SendProto(ctx context.Context, msg *proto.QuicClientMess
 		stream, err := t.client.Execute(ctx, req)
 		if err != nil {
 			return &TransportError{
-				Op:    "execute",
+				Op:    constOpExecute,
 				Addr:  t.addr,
 				cause: err,
 			}
@@ -178,7 +178,7 @@ func (t *GRPCTransport) SendProto(ctx context.Context, msg *proto.QuicClientMess
 		resp, err := t.client.Begin(ctx, req)
 		if err != nil {
 			return &TransportError{
-				Op:    "begin",
+				Op:    constOpBegin,
 				Addr:  t.addr,
 				cause: err,
 			}
@@ -197,7 +197,7 @@ func (t *GRPCTransport) SendProto(ctx context.Context, msg *proto.QuicClientMess
 		resp, err := t.client.Commit(ctx, req)
 		if err != nil {
 			return &TransportError{
-				Op:    "commit",
+				Op:    constOpCommit,
 				Addr:  t.addr,
 				cause: err,
 			}
@@ -216,7 +216,7 @@ func (t *GRPCTransport) SendProto(ctx context.Context, msg *proto.QuicClientMess
 		resp, err := t.client.Rollback(ctx, req)
 		if err != nil {
 			return &TransportError{
-				Op:    "rollback",
+				Op:    constOpRollback,
 				Addr:  t.addr,
 				cause: err,
 			}

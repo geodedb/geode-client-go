@@ -23,12 +23,12 @@ var _ driver.Tx = (*Tx)(nil)
 
 // Commit commits the transaction.
 func (t *Tx) Commit() error {
-	return t.finish(proto.NewCommitMessage(&proto.CommitRequest{}), "commit")
+	return t.finish(proto.NewCommitMessage(&proto.CommitRequest{}), constOpCommit)
 }
 
 // Rollback rolls back the transaction.
 func (t *Tx) Rollback() error {
-	return t.finish(proto.NewRollbackMessage(&proto.RollbackRequest{}), "rollback")
+	return t.finish(proto.NewRollbackMessage(&proto.RollbackRequest{}), constOpRollback)
 }
 
 // finish executes either COMMIT or ROLLBACK and cleans up the transaction state.
@@ -71,13 +71,13 @@ func (t *Tx) finish(msg *proto.QuicClientMessage, opName string) error {
 
 	// Check for expected response
 	switch opName {
-	case "commit":
+	case constOpCommit:
 		if resp.GetCommit() == nil {
 			t.done = true
 			t.conn.markConnFailed()
 			return fmt.Errorf("expected COMMIT response")
 		}
-	case "rollback":
+	case constOpRollback:
 		if resp.GetRollback() == nil {
 			t.done = true
 			t.conn.markConnFailed()

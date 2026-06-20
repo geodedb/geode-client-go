@@ -41,14 +41,22 @@ func nodeMergeBatchable(stmts []Statement) bool {
 	return true
 }
 
+// avgStmtBytes is the average byte size estimate per MERGE statement used to
+// pre-size the string builder in execConcurrentBatch.
+const avgStmtBytes = 96
+
+// avgArgsPerStmt is the average number of bound arguments per MERGE statement
+// used to pre-size the args slice in execConcurrentBatch.
+const avgArgsPerStmt = 8
+
 // execConcurrentBatch sends all statements as a single `/*+BATCH*/` request.
 // The driver inlines each statement's `?` args positionally, so concatenating
 // queries (joined by `;`) and args yields one literal multi-statement program.
 func (c *Conn) execConcurrentBatch(ctx context.Context, stmts []Statement) error {
 	var b strings.Builder
-	b.Grow(len(stmts) * 96)
+	b.Grow(len(stmts) * avgStmtBytes)
 	b.WriteString("/*+BATCH*/ ")
-	args := make([]any, 0, len(stmts)*8)
+	args := make([]any, 0, len(stmts)*avgArgsPerStmt)
 	for i := range stmts {
 		q := strings.TrimRight(strings.TrimSpace(stmts[i].Query), ";")
 		b.WriteString(q)

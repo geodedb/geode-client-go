@@ -47,27 +47,29 @@ func (t GQLType) GoType() reflect.Type {
 
 // ParseGQLType parses a GQL type string.
 func ParseGQLType(s string) GQLType {
-	switch s {
-	case "INT", "INTEGER", "BIGINT":
+	switch GQLType(s) {
+	case GQLTypeInt, "INTEGER", "BIGINT":
 		return GQLTypeInt
-	case "FLOAT", "DOUBLE", "REAL":
+	case GQLTypeFloat, "DOUBLE", "REAL":
 		return GQLTypeFloat
-	case "STRING", "VARCHAR", "TEXT":
+	case GQLTypeString, "VARCHAR", "TEXT":
 		return GQLTypeString
-	case "BOOL", "BOOLEAN":
+	case GQLTypeBool, "BOOLEAN":
 		return GQLTypeBool
-	case "NULL":
+	case GQLTypeNull:
 		return GQLTypeNull
-	case "LIST", "ARRAY":
+	case GQLTypeList, "ARRAY":
 		return GQLTypeList
-	case "MAP", "RECORD":
+	case GQLTypeMap, "RECORD":
 		return GQLTypeMap
-	case "NODE":
+	case GQLTypeNode:
 		return GQLTypeNode
-	case "EDGE", "RELATIONSHIP":
+	case GQLTypeEdge, "RELATIONSHIP":
 		return GQLTypeEdge
-	case "PATH":
+	case GQLTypePath:
 		return GQLTypePath
+	case GQLTypeUnknown:
+		return GQLTypeUnknown
 	default:
 		return GQLTypeUnknown
 	}

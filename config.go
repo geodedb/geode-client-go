@@ -29,7 +29,7 @@ func (t TransportType) String() string {
 	case TransportGRPC:
 		return "grpc"
 	default:
-		return "unknown"
+		return constUnknown
 	}
 }
 
@@ -61,6 +61,24 @@ const (
 
 	// DSN query parameter keys.
 	paramTLS = "tls"
+
+	// constLocalhost is the default loopback hostname used in default configs.
+	constLocalhost = "localhost"
+
+	// constFieldHost is the field name for host-related config errors.
+	constFieldHost = "host"
+
+	// constMsgHostRequired is the error message when the host is missing.
+	constMsgHostRequired = "host is required"
+
+	// constParamPageSize is the DSN/query-param key for the page size.
+	constParamPageSize = "page_size"
+
+	// constMsgMustBePositiveInteger is the error message for non-positive integer params.
+	constMsgMustBePositiveInteger = "must be a positive integer"
+
+	// constUnknown is the fallback string for unrecognised variants.
+	constUnknown = "unknown"
 )
 
 // Config holds the configuration for a Geode connection.
@@ -184,7 +202,7 @@ func (c *Config) FormatDSN() string {
 
 	q := url.Values{}
 	if c.PageSize != 0 && c.PageSize != DefaultPageSize {
-		q.Set("page_size", strconv.Itoa(c.PageSize))
+		q.Set(constParamPageSize, strconv.Itoa(c.PageSize))
 	}
 	if c.HelloName != "" && c.HelloName != DefaultHelloName {
 		q.Set("hello_name", c.HelloName)
@@ -282,7 +300,7 @@ func (c *Config) FormatDSN() string {
 func ParseDSN(dsn string) (*Config, error) {
 	cfg := &Config{
 		Transport:    TransportQUIC,
-		Host:         "localhost",
+		Host:         constLocalhost,
 		Port:         DefaultPort,
 		PageSize:     DefaultPageSize,
 		HelloName:    DefaultHelloName,
@@ -346,8 +364,8 @@ func parseURLDSN(dsn string, cfg *Config) (*Config, error) {
 
 	if u.Host == "" {
 		return nil, &ConfigError{
-			Field:   "host",
-			Message: "host is required",
+			Field:   constFieldHost,
+			Message: constMsgHostRequired,
 		}
 	}
 
@@ -362,15 +380,15 @@ func parseURLDSN(dsn string, cfg *Config) (*Config, error) {
 
 	if host == "" {
 		return nil, &ConfigError{
-			Field:   "host",
-			Message: "host is required",
+			Field:   constFieldHost,
+			Message: constMsgHostRequired,
 		}
 	}
 
 	// Validate hostname for security (null bytes, length limits)
 	if err := validate.Hostname(host); err != nil {
 		return nil, &ConfigError{
-			Field:   "host",
+			Field:   constFieldHost,
 			Value:   host,
 			Message: err.Error(),
 		}
@@ -423,15 +441,15 @@ func parseSimpleDSN(dsn string, cfg *Config) (*Config, error) {
 
 		if host == "" {
 			return nil, &ConfigError{
-				Field:   "host",
-				Message: "host is required",
+				Field:   constFieldHost,
+				Message: constMsgHostRequired,
 			}
 		}
 
 		// Validate hostname for security (null bytes, length limits)
 		if err := validate.Hostname(host); err != nil {
 			return nil, &ConfigError{
-				Field:   "host",
+				Field:   constFieldHost,
 				Value:   host,
 				Message: err.Error(),
 			}
@@ -469,18 +487,18 @@ func applyQueryParams(params url.Values, cfg *Config) error {
 		val := values[0]
 
 		switch key {
-		case "page_size":
+		case constParamPageSize:
 			n, err := strconv.Atoi(val)
 			if err != nil || n <= 0 {
 				return &ConfigError{
-					Field:   "page_size",
+					Field:   constParamPageSize,
 					Value:   val,
-					Message: "must be a positive integer",
+					Message: constMsgMustBePositiveInteger,
 				}
 			}
 			if n > MaxPageSize {
 				return &ConfigError{
-					Field:   "page_size",
+					Field:   constParamPageSize,
 					Value:   val,
 					Message: "exceeds maximum allowed value of " + strconv.Itoa(MaxPageSize),
 				}
@@ -493,7 +511,7 @@ func applyQueryParams(params url.Values, cfg *Config) error {
 				return &ConfigError{
 					Field:   "pool_size",
 					Value:   val,
-					Message: "must be a positive integer",
+					Message: constMsgMustBePositiveInteger,
 				}
 			}
 			cfg.PoolSize = n
@@ -504,7 +522,7 @@ func applyQueryParams(params url.Values, cfg *Config) error {
 				return &ConfigError{
 					Field:   "max_streams",
 					Value:   val,
-					Message: "must be a positive integer",
+					Message: constMsgMustBePositiveInteger,
 				}
 			}
 			cfg.MaxStreams = n
@@ -594,15 +612,15 @@ func applyQueryParams(params url.Values, cfg *Config) error {
 func (c *Config) Validate() error {
 	if c.Host == "" {
 		return &ConfigError{
-			Field:   "host",
-			Message: "host is required",
+			Field:   constFieldHost,
+			Message: constMsgHostRequired,
 		}
 	}
 
 	// Validate hostname for security (null bytes, length limits)
 	if err := validate.Hostname(c.Host); err != nil {
 		return &ConfigError{
-			Field:   "host",
+			Field:   constFieldHost,
 			Value:   c.Host,
 			Message: err.Error(),
 		}
@@ -626,7 +644,7 @@ func (c *Config) Validate() error {
 
 	if c.PageSize <= 0 {
 		return &ConfigError{
-			Field:   "page_size",
+			Field:   constParamPageSize,
 			Value:   strconv.Itoa(c.PageSize),
 			Message: "must be positive",
 		}
@@ -634,7 +652,7 @@ func (c *Config) Validate() error {
 
 	if c.PageSize > MaxPageSize {
 		return &ConfigError{
-			Field:   "page_size",
+			Field:   constParamPageSize,
 			Value:   strconv.Itoa(c.PageSize),
 			Message: "exceeds maximum allowed value of " + strconv.Itoa(MaxPageSize),
 		}
