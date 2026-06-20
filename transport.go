@@ -30,6 +30,15 @@ const (
 	constOpRead = "read"
 )
 
+// readDeadlineStream is the read side of a transport stream with deadline
+// control. *quic.Stream satisfies it in production; tests inject a fake to
+// exercise ReceiveProto's context-cancellation handling without a live QUIC
+// connection.
+type readDeadlineStream interface {
+	io.Reader
+	SetReadDeadline(t time.Time) error
+}
+
 // Transport defines the interface for communication with a Geode server.
 type Transport interface {
 	// SendProto writes a protobuf message to the server.
@@ -70,7 +79,11 @@ type QUICTransport struct {
 
 	// Shared fields
 	stream *quic.Stream
-	br     *bufio.Reader
+	// rdStream is the read side with deadline control. In production it is the
+	// same object as stream; it exists as an interface so ReceiveProto's
+	// cancellation handling can be unit-tested with a fake stream.
+	rdStream readDeadlineStream
+	br       *bufio.Reader
 
 	mu     sync.Mutex
 	closed bool
@@ -132,10 +145,11 @@ func NewQUICTransport(ctx context.Context, cfg *Config) (*QUICTransport, error) 
 	}
 
 	t := &QUICTransport{
-		conn:   qConn,
-		stream: stream,
-		br:     bufio.NewReaderSize(stream, quicReadBufferSize),
-		addr:   addr,
+		conn:     qConn,
+		stream:   stream,
+		rdStream: stream,
+		br:       bufio.NewReaderSize(stream, quicReadBufferSize),
+		addr:     addr,
 	}
 
 	return t, nil
@@ -157,11 +171,12 @@ func NewPooledQUICTransport(ctx context.Context, pool *QUICPool) (*QUICTransport
 	}
 
 	return &QUICTransport{
-		pool:   pool,
-		pc:     pc,
-		stream: stream,
-		br:     bufio.NewReaderSize(stream, quicReadBufferSize),
-		addr:   pc.addr,
+		pool:     pool,
+		pc:       pc,
+		stream:   stream,
+		rdStream: stream,
+		br:       bufio.NewReaderSize(stream, quicReadBufferSize),
+		addr:     pc.addr,
 	}, nil
 }
 
@@ -242,16 +257,36 @@ func (t *QUICTransport) ReceiveProto(ctx context.Context) (*proto.QuicServerMess
 	}
 	t.mu.Unlock()
 
-	// Set read deadline from context if available
-	if deadline, ok := ctx.Deadline(); ok {
-		if err := t.stream.SetReadDeadline(deadline); err != nil {
-			return nil, &TransportError{
-				Op:    "set_deadline",
-				Addr:  t.addr,
-				cause: err,
+	// Honor the caller's context for the duration of the otherwise-blocking
+	// read. A context can hit its deadline or be cancelled while io.ReadFull is
+	// parked, and QUIC keep-alives stop the connection from ever reaching its
+	// idle timeout — so without this watcher the read could block forever on a
+	// half-open stream the server has already reaped (active_streams=0).
+	//
+	// Both deadline expiry and cancellation surface through ctx.Done(); the
+	// watcher forces an immediate read deadline when ctx becomes Done, which
+	// unblocks the read. Because Go guarantees ctx.Err() is non-nil once Done
+	// is closed, the post-read checks below always surface the context error
+	// (DeadlineExceeded or Canceled) rather than a raw i/o timeout. Driving
+	// both cases through Done (instead of also setting the stream deadline from
+	// ctx.Deadline directly) avoids a race where the stream's timeout could
+	// fire a tick before ctx.Err() is observable.
+	//
+	// The deadline-reset defer is registered before the watcher's stop defer so
+	// that on return the watcher is stopped first (defers run LIFO) and cannot
+	// re-arm the deadline after we have cleared it — important for pooled
+	// streams that are reused by the next request.
+	if ctx.Done() != nil {
+		defer func() { _ = t.rdStream.SetReadDeadline(time.Time{}) }()
+		stop := make(chan struct{})
+		defer close(stop)
+		go func() {
+			select {
+			case <-ctx.Done():
+				_ = t.rdStream.SetReadDeadline(time.Now())
+			case <-stop:
 			}
-		}
-		defer func() { _ = t.stream.SetReadDeadline(time.Time{}) }()
+		}()
 	}
 
 	// Check context before read
