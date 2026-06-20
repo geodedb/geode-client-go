@@ -32,6 +32,13 @@ var (
 	ErrRowsClosed      = errors.New("geode: rows closed")
 	ErrBadConn         = errors.New("geode: bad connection")
 	ErrInvalidState    = errors.New("geode: invalid connection state")
+	// ErrPoolExhausted is returned when every QUIC connection in the pool is
+	// busy and the pool is already at its maximum size. The driver never
+	// multiplexes concurrent streams over one connection (that wedges against
+	// the server — BUG-0002), so it fails fast with this clear error instead of
+	// deadlocking. Raise the pool size via DSN ?pool_size=N to allow more
+	// concurrent connections.
+	ErrPoolExhausted = errors.New("geode: connection pool exhausted (all connections busy at pool_size)")
 )
 
 // Error is the interface for all Geode errors.

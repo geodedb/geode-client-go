@@ -99,15 +99,29 @@ func NewQUICPool(cfg *Config, maxSize int) *QUICPool {
 		maxStreams = cfg.MaxStreams
 	}
 
+	// Admission is bounded by the number of QUIC connections we will dedicate,
+	// not by maxStreams alone. The driver assigns at most ONE in-flight stream
+	// per QUIC connection — multiplexing concurrent streams over a single
+	// connection wedges all but one against the server (BUG-0002) — so the real
+	// concurrency ceiling is min(maxStreams, maxSize). Sizing the admission
+	// semaphore to that bound makes callers beyond the ceiling block (clean,
+	// context-aware backpressure) instead of being admitted and then multiplexed
+	// into a deadlock. maxStreams is retained as the configured upper bound and
+	// still caps admission when it is the smaller of the two.
+	admitBound := maxStreams
+	if maxSize < admitBound {
+		admitBound = maxSize
+	}
+
 	p := &QUICPool{
 		cfg:        cfg,
 		maxSize:    maxSize,
 		maxStreams: maxStreams,
-		slotsCh:    make(chan struct{}, maxStreams),
+		slotsCh:    make(chan struct{}, admitBound),
 		closedCh:   make(chan struct{}),
 	}
 	// Pre-populate the semaphore: every slot starts available.
-	for i := 0; i < maxStreams; i++ {
+	for i := 0; i < admitBound; i++ {
 		p.slotsCh <- struct{}{}
 	}
 	return p
@@ -184,37 +198,19 @@ func (p *QUICPool) acquire(ctx context.Context) (*pooledConn, error) {
 	// Remove dead connections
 	p.pruneDeadLocked()
 
-	// Find connection with lowest active stream count
-	var best *pooledConn
-	bestActive := int32(^uint32(0) >> 1) // max int32
-
-	for _, pc := range p.conns {
-		active := atomic.LoadInt32(&pc.active)
-		if active < bestActive {
-			best = pc
-			bestActive = active
-		}
-	}
-
-	// If we have capacity to create a new connection and either no connections
-	// exist or all are moderately loaded, create a new one
-	if len(p.conns) < p.maxSize && (best == nil || bestActive > 0) {
-		pc, err := p.dialLocked(ctx)
-		if err != nil {
-			// If we have an existing connection, use it despite load
-			if best != nil {
-				atomic.AddInt32(&best.active, 1)
-				return best, nil
-			}
-			p.releaseSlot()
-			return nil, err
-		}
+	// Reuse a connection only if it currently carries no in-flight stream. The
+	// driver never multiplexes concurrent streams over one QUIC connection:
+	// against the server that wedges all but one stream (BUG-0002), turning a
+	// burst into a 30s deadlock. Admission (sized to min(maxStreams, maxSize))
+	// guarantees an admitted caller can always reuse a free connection or dial a
+	// new one, so the exhaustion branch below is a defensive backstop.
+	if idx := selectFreeConnIndex(p.conns); idx >= 0 {
+		pc := p.conns[idx]
 		atomic.AddInt32(&pc.active, 1)
 		return pc, nil
 	}
 
-	if best == nil {
-		// All connections are dead and we failed to prune + redial
+	if len(p.conns) < p.maxSize {
 		pc, err := p.dialLocked(ctx)
 		if err != nil {
 			p.releaseSlot()
@@ -224,8 +220,25 @@ func (p *QUICPool) acquire(ctx context.Context) (*pooledConn, error) {
 		return pc, nil
 	}
 
-	atomic.AddInt32(&best.active, 1)
-	return best, nil
+	// Every connection is busy and the pool is at maxSize. Admission control
+	// should have blocked this caller; fail fast with a clear error rather than
+	// multiplexing into a wedge.
+	p.releaseSlot()
+	return nil, ErrPoolExhausted
+}
+
+// selectFreeConnIndex returns the index of the first pooled connection with no
+// in-flight stream (active == 0), or -1 if every connection is busy. Reusing
+// only a free connection is what keeps the driver from multiplexing concurrent
+// streams onto a single QUIC connection (BUG-0002). Pure function of the slice
+// so the no-multiplex selection policy is unit-testable without a live server.
+func selectFreeConnIndex(conns []*pooledConn) int {
+	for i, pc := range conns {
+		if atomic.LoadInt32(&pc.active) == 0 {
+			return i
+		}
+	}
+	return -1
 }
 
 // release decrements the active stream count for the pooled connection and

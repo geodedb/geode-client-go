@@ -26,6 +26,10 @@ import (
 // Helpers
 // ----------------------------------------------------------------------------
 
+// loadTestTimeout bounds individual load-test operations (bulk inserts, counts)
+// so a stuck server cannot hang the suite indefinitely.
+const loadTestTimeout = 30 * time.Second
+
 // openLoadDB opens a dedicated pool for load tests.
 func openLoadDB(t *testing.T, maxOpen, maxIdle int) *sql.DB {
 	t.Helper()
@@ -188,6 +192,76 @@ func TestLoad_HighParallelismReads(t *testing.T) {
 	t.Logf("completed %d/%d queries, errors=%d",
 		queryCt.Load(), workers*queriesPerWork, errCnt.Load())
 	assert.Zero(t, errCnt.Load(), "expected zero errors in high-parallelism read load")
+}
+
+// ----------------------------------------------------------------------------
+// TestLoad_BurstExceedsPoolSize_NoDeadlock
+//
+// Regression for BUG-0002 (the burst-deadlock half): a single *sql.DB whose
+// MaxOpenConns exceeds the QUIC pool_size must NOT deadlock under a concurrent
+// burst. Before the fix, acquire() multiplexed the (N - pool_size) excess
+// streams onto the bounded set of QUIC connections; the server wedges all but
+// one stream per connection, so those callers hung ~30s on open_stream
+// deadlines. After the fix the driver never multiplexes — admission is bounded
+// by pool_size, so excess callers backpressure cleanly (each runs on its own
+// dedicated connection as slots free) and the whole burst finishes quickly.
+//
+// MaxIdleConns=0 makes the backpressure deterministic: every query opens a
+// pooled connection (one admission slot), runs, and closes it (releasing the
+// slot), so the 64 queries cycle through the 16-slot admission window instead
+// of a handful of conns hoarding slots while idle.
+// ----------------------------------------------------------------------------
+
+func TestLoad_BurstExceedsPoolSize_NoDeadlock(t *testing.T) {
+	const burst = 64 // default pool_size is 16, so 48 callers exceed it
+
+	// MaxOpenConns far above the default pool_size (16); MaxIdleConns=0.
+	db := openLoadDB(t, burst, 0)
+	defer db.Close()
+
+	var (
+		wg     sync.WaitGroup
+		okCnt  atomic.Int64
+		errCnt atomic.Int64
+	)
+
+	start := time.Now()
+	for i := 0; i < burst; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			// Generous-but-bounded: a single wedged caller used to hang ~30s.
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+
+			var n int64
+			if err := db.QueryRowContext(ctx, "RETURN ? AS n", id).Scan(&n); err != nil {
+				errCnt.Add(1)
+				t.Logf("burst caller %d: %v", id, err)
+				return
+			}
+			okCnt.Add(1)
+		}(i)
+	}
+
+	// Hard ceiling well under the cumulative wedge: the whole burst must resolve
+	// (succeed or fast-fail), never hang.
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(25 * time.Second):
+		t.Fatal("burst did not complete within 25s — connection deadlock (BUG-0002 regression)")
+	}
+
+	t.Logf("burst of %d over pool_size=16 resolved in %v (ok=%d, err=%d)",
+		burst, time.Since(start), okCnt.Load(), errCnt.Load())
+
+	// Every caller must complete successfully: the no-multiplex pool cycles them
+	// through dedicated connections as admission slots free. Any error here is a
+	// real failure (a wedge would instead trip the 25s fatal above).
+	assert.Zero(t, errCnt.Load(), "burst over pool_size should backpressure cleanly, not error")
+	assert.Equal(t, int64(burst), okCnt.Load(), "all burst queries should succeed")
 }
 
 // ----------------------------------------------------------------------------
