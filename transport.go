@@ -279,20 +279,41 @@ func (t *QUICTransport) ReceiveProto(ctx context.Context) (*proto.QuicServerMess
 	// ctx.Deadline directly) avoids a race where the stream's timeout could
 	// fire a tick before ctx.Err() is observable.
 	//
-	// The deadline-reset defer is registered before the watcher's stop defer so
-	// that on return the watcher is stopped first (defers run LIFO) and cannot
-	// re-arm the deadline after we have cleared it — important for pooled
-	// streams that are reused by the next request.
+	// Lifecycle ordering is critical for pooled streams that are reused by the
+	// next request. The previous implementation only `close(stop)`d the watcher
+	// and reset the deadline in a separate defer — but close(stop) merely
+	// *signals* the goroutine; it does not wait for it. If ctx became Done at
+	// almost the same instant the read completed, the watcher could still take
+	// its ctx.Done() branch and call SetReadDeadline(time.Now()) *after* the
+	// reset defer had already cleared the deadline. That left a stale, in-the-
+	// past read deadline on the reused stream, so the NEXT ReceiveProto failed
+	// immediately with "deadline exceeded" even though its own context was not
+	// done — surfacing as a spurious read_length TransportError -> ErrBadConn,
+	// conn eviction, and (under sustained ingest) an eventual full wedge.
+	//
+	// The fix: the parent must JOIN the watcher (wait for it to exit) and only
+	// then clear the deadline. We register the join+reset as a single deferred
+	// step that runs after close(stop), guaranteeing no watcher write to the
+	// deadline can be observed by a subsequent read on this stream.
 	if ctx.Done() != nil {
-		defer func() { _ = t.rdStream.SetReadDeadline(time.Time{}) }()
 		stop := make(chan struct{})
-		defer close(stop)
+		watcherDone := make(chan struct{})
 		go func() {
+			defer close(watcherDone)
 			select {
 			case <-ctx.Done():
 				_ = t.rdStream.SetReadDeadline(time.Now())
 			case <-stop:
 			}
+		}()
+		defer func() {
+			// Signal the watcher to exit, wait until it has fully returned, then
+			// clear any deadline it may have set. Joining before the reset closes
+			// the race where a late watcher write would otherwise re-arm the
+			// deadline after we cleared it.
+			close(stop)
+			<-watcherDone
+			_ = t.rdStream.SetReadDeadline(time.Time{})
 		}()
 	}
 
