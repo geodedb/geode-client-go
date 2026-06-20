@@ -209,7 +209,14 @@ func TestR4_ResetSession_RollbackSendFails_ReturnsBadConn(t *testing.T) {
 	c.state = StateInTransaction
 	c.mu.Unlock()
 
-	_ = tr.Close()
+	// Simulate the implicit ROLLBACK's SendProto failing on a still-live
+	// connection (write error / stream reset) — NOT a server-closed conn, so
+	// the RemoteClosed eviction path does not pre-empt the rollback path this
+	// test covers. Server-closed eviction during reset is covered separately by
+	// TestConn_ResetSession_EvictsServerClosedConn.
+	tr.mu.Lock()
+	tr.sendErr = errMockSendFail
+	tr.mu.Unlock()
 
 	err := c.ResetSession(context.Background())
 	if !errors.Is(err, driver.ErrBadConn) {

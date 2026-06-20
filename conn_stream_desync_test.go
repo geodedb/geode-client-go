@@ -15,6 +15,7 @@ package geode
 import (
 	"context"
 	"database/sql/driver"
+	"errors"
 	"io"
 	"sync"
 	"testing"
@@ -22,6 +23,10 @@ import (
 
 	"geodedb.com/geode/proto"
 )
+
+// errMockSendFail is injected via mockTransport.sendErr to make SendProto fail
+// on a still-live (not closed, not remote-closed) connection.
+var errMockSendFail = errors.New("mock: simulated send failure")
 
 // ─────────────────────────────────────────────────────────────────────────────
 // mockTransport
@@ -39,6 +44,17 @@ type mockTransport struct {
 	mu     sync.Mutex
 	closed bool
 	addr   string
+
+	// remoteClosed simulates the underlying connection being closed by the
+	// server (or otherwise lost) without this transport's own Close() running.
+	// Drives RemoteClosed() so tests can exercise the stale-connection-eviction
+	// path in Conn.IsValid.
+	remoteClosed bool
+
+	// sendErr, when non-nil, makes SendProto fail without the transport being
+	// closed or remote-closed — used to exercise mid-operation write-failure
+	// paths (e.g. a rollback whose SendProto fails on a still-live conn).
+	sendErr error
 
 	// recv feeds ReceiveProto. Push here to simulate arriving frames that are
 	// NOT yet in the bufio.Reader (i.e., still in the QUIC socket).
@@ -71,6 +87,9 @@ func (m *mockTransport) SendProto(_ context.Context, msg *proto.QuicClientMessag
 	defer m.mu.Unlock()
 	if m.closed {
 		return ErrClosed
+	}
+	if m.sendErr != nil {
+		return m.sendErr
 	}
 	m.sent = append(m.sent, msg)
 	return nil
@@ -142,6 +161,12 @@ func (m *mockTransport) IsClosed() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.closed
+}
+
+func (m *mockTransport) RemoteClosed() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.closed || m.remoteClosed
 }
 
 func (m *mockTransport) Addr() string { return m.addr }

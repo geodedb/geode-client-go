@@ -8,6 +8,7 @@ import (
 
 	"geodedb.com/geode/proto"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -347,6 +348,20 @@ func (t *GRPCTransport) IsClosed() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.closed
+}
+
+// RemoteClosed reports whether the underlying gRPC connection is terminally
+// gone. gRPC transparently reconnects on transient failures, so only the
+// Shutdown state (or a local Close) is non-recoverable; treating a merely
+// transient failure as dead would needlessly evict connections gRPC would have
+// healed. A Shutdown ClientConn must not be reused.
+func (t *GRPCTransport) RemoteClosed() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed {
+		return true
+	}
+	return t.conn != nil && t.conn.GetState() == connectivity.Shutdown
 }
 
 // Addr returns the remote address.

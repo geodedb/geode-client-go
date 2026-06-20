@@ -57,6 +57,13 @@ type Transport interface {
 	// IsClosed returns true if the transport is closed.
 	IsClosed() bool
 
+	// RemoteClosed returns true if the underlying connection has been closed
+	// or lost — by the server, an idle timeout, or a transport error —
+	// independent of whether this transport's own Close() has run. It lets the
+	// driver evict a pooled connection whose server side has gone away instead
+	// of reusing it for a query that would fail or hang.
+	RemoteClosed() bool
+
 	// Addr returns the remote address.
 	Addr() string
 }
@@ -450,6 +457,32 @@ func (t *QUICTransport) IsClosed() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.closed
+}
+
+// RemoteClosed reports whether the underlying QUIC connection can no longer
+// carry streams. quic-go cancels the connection's context when the connection
+// goes away for any reason — server-initiated close, idle timeout, or a
+// transport error — so a cancelled context means a server-side teardown this
+// transport's own closed flag does not capture. The pool's acquire path already
+// prunes such connections (isQUICConnAlive); this surfaces the same liveness to
+// IsValid so a driver.Conn still holding a stream on a dead pooled connection
+// is evicted by database/sql instead of being reused.
+func (t *QUICTransport) RemoteClosed() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed {
+		return true
+	}
+	// Pooled mode borrows pc.qConn; standalone mode owns conn. pc.qConn is set
+	// once at dial and never mutated, so reading it under t.mu is safe.
+	qc := t.conn
+	if t.pc != nil {
+		qc = t.pc.qConn
+	}
+	if qc == nil {
+		return false
+	}
+	return !isQUICConnAlive(qc)
 }
 
 // Addr returns the remote address.

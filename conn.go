@@ -844,6 +844,16 @@ func (c *Conn) ResetSession(ctx context.Context) error {
 		return driver.ErrBadConn
 	}
 
+	// Underlying connection was closed server-side (or lost) while this conn sat
+	// idle in the pool. A rollback or any subsequent query would fail or hang on
+	// the dead connection, so mark it failed and evict it now instead of reusing
+	// it. markConnFailed also clears any lingering inTx bit so the conn cannot
+	// come back with a phantom transaction.
+	if c.transport.RemoteClosed() {
+		c.markConnFailed()
+		return driver.ErrBadConn
+	}
+
 	// Prior operation left the conn in an irrecoverable state
 	// (transport failure, stream desync, aborted tx). Don't try to
 	// reconcile; return ErrBadConn so database/sql discards.
@@ -894,7 +904,7 @@ func (c *Conn) IsValid() bool {
 	defer c.mu.Unlock()
 
 	return c.state != StateClosed && c.state != StateInError && c.state != StateFetching &&
-		c.activeRows == nil && !c.transport.IsClosed()
+		c.activeRows == nil && !c.transport.IsClosed() && !c.transport.RemoteClosed()
 }
 
 // CheckNamedValue validates a named value before use.
