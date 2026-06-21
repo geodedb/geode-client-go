@@ -229,13 +229,15 @@ func (p *QUICPool) acquire(ctx context.Context) (*pooledConn, error) {
 	// Remove dead connections
 	p.pruneDeadLocked()
 
-	// Reuse a connection only if it currently carries no in-flight stream. The
-	// driver never multiplexes concurrent streams over one QUIC connection:
-	// against the server that wedges all but one stream (BUG-0002), turning a
-	// burst into a 30s deadlock. Admission (sized to min(maxStreams, maxSize))
-	// guarantees an admitted caller can always reuse a free connection or dial a
-	// new one, so the exhaustion branch below is a defensive backstop.
-	if idx := selectFreeConnIndex(p.conns); idx >= 0 {
+	// Multiplex policy (supersedes the BUG-0002 no-multiplex workaround): each
+	// request opens its OWN independent QUIC stream, and the server services up
+	// to N concurrent streams per connection correctly when started with
+	// GEODE_QUIC_ENABLE_STREAM_MULTIPLEXING=1 (the de-risk gate proved this).
+	// So reuse the LEAST-loaded connection that is still under the per-conn cap
+	// (active < maxStreamsPerConn), spreading load evenly. maxStreamsPerConn=1
+	// reduces this to the legacy one-stream-per-conn behaviour. Only when every
+	// connection is at capacity do we fall through to dial a new one.
+	if idx := selectConnWithCapacity(p.conns, p.maxStreamsPerConn); idx >= 0 {
 		pc := p.conns[idx]
 		atomic.AddInt32(&pc.active, 1)
 		return pc, nil
@@ -258,11 +260,36 @@ func (p *QUICPool) acquire(ctx context.Context) (*pooledConn, error) {
 	return nil, ErrPoolExhausted
 }
 
+// selectConnWithCapacity returns the index of the LEAST-loaded pooled connection
+// whose in-flight stream count is below max (active < max), or -1 if every
+// connection is at capacity. Preferring the least-loaded connection spreads
+// concurrent streams evenly across the pool rather than piling them onto the
+// first available one. With maxPerConn == 1 it is equivalent to
+// selectFreeConnIndex (the legacy no-multiplex policy: only an idle connection
+// qualifies; active < 1 ⇔ active == 0). Pure
+// function of the slice so the multiplex selection policy is unit-testable
+// without a live server.
+func selectConnWithCapacity(conns []*pooledConn, maxPerConn int) int {
+	best := -1
+	var bestActive int32
+	for i, pc := range conns {
+		active := atomic.LoadInt32(&pc.active)
+		if int(active) >= maxPerConn {
+			continue
+		}
+		if best == -1 || active < bestActive {
+			best = i
+			bestActive = active
+		}
+	}
+	return best
+}
+
 // selectFreeConnIndex returns the index of the first pooled connection with no
-// in-flight stream (active == 0), or -1 if every connection is busy. Reusing
-// only a free connection is what keeps the driver from multiplexing concurrent
-// streams onto a single QUIC connection (BUG-0002). Pure function of the slice
-// so the no-multiplex selection policy is unit-testable without a live server.
+// in-flight stream (active == 0), or -1 if every connection is busy. Retained as
+// the reference for the legacy no-multiplex policy (max_streams_per_conn=1);
+// selectConnWithCapacity(conns, 1) is equivalent. Pure function of the slice so
+// the selection policy is unit-testable without a live server.
 func selectFreeConnIndex(conns []*pooledConn) int {
 	for i, pc := range conns {
 		if atomic.LoadInt32(&pc.active) == 0 {

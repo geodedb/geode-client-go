@@ -46,6 +46,85 @@ func TestSelectFreeConnIndex(t *testing.T) {
 	}
 }
 
+// TestSelectConnWithCapacity pins the multiplex selection policy: acquire reuses
+// the LEAST-loaded connection whose in-flight stream count is below the per-conn
+// cap (active < max), spreading load evenly; it returns -1 when every connection
+// is at capacity (so the caller dials a new conn or, at maxSize, backs off). With
+// max=1 it must reduce to the legacy no-multiplex behaviour (only active==0).
+func TestSelectConnWithCapacity(t *testing.T) {
+	t.Parallel()
+
+	mk := func(active ...int32) []*pooledConn {
+		conns := make([]*pooledConn, len(active))
+		for i, a := range active {
+			pc := &pooledConn{}
+			atomic.StoreInt32(&pc.active, a)
+			conns[i] = pc
+		}
+		return conns
+	}
+
+	tests := []struct {
+		name  string
+		conns []*pooledConn
+		max   int
+		want  int
+	}{
+		{"empty", nil, 4, -1},
+		{"least loaded under cap", mk(4, 2, 0, 4), 4, 2},
+		{"all at cap", mk(4, 4, 4), 4, -1},
+		{"prefers strictly least loaded", mk(3, 1, 2), 4, 1},
+		{"first of equal load wins", mk(2, 2, 2), 4, 0},
+		// max=1 ≡ legacy selectFreeConnIndex (only active==0).
+		{"max1 single free", mk(0), 1, 0},
+		{"max1 single busy", mk(1), 1, -1},
+		{"max1 all busy", mk(1, 2, 1), 1, -1},
+		{"max1 free after busy", mk(3, 1, 0), 1, 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := selectConnWithCapacity(tt.conns, tt.max); got != tt.want {
+				t.Errorf("selectConnWithCapacity(max=%d) = %d, want %d", tt.max, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSelectConnWithCapacity_MatchesLegacyAtMax1 cross-checks that, with max=1,
+// the capacity selector agrees with the legacy selectFreeConnIndex on every
+// input — guaranteeing back-compat for the no-multiplex (max_streams_per_conn=1)
+// configuration.
+func TestSelectConnWithCapacity_MatchesLegacyAtMax1(t *testing.T) {
+	t.Parallel()
+
+	mk := func(active ...int32) []*pooledConn {
+		conns := make([]*pooledConn, len(active))
+		for i, a := range active {
+			pc := &pooledConn{}
+			atomic.StoreInt32(&pc.active, a)
+			conns[i] = pc
+		}
+		return conns
+	}
+
+	cases := [][]int32{
+		nil,
+		{0},
+		{1},
+		{1, 2, 1},
+		{0, 0},
+		{3, 1, 0},
+		{2, 0, 0, 5},
+	}
+	for _, c := range cases {
+		conns := mk(c...)
+		if got, want := selectConnWithCapacity(conns, 1), selectFreeConnIndex(conns); got != want {
+			t.Errorf("selectConnWithCapacity(%v, 1) = %d, selectFreeConnIndex = %d", c, got, want)
+		}
+	}
+}
+
 // TestNewQUICPool_AdmissionBoundedByPoolSize is the admission-layer regression
 // for the burst deadlock (BUG-0002). Because the driver dedicates one QUIC
 // connection per in-flight stream, the real concurrency ceiling is
