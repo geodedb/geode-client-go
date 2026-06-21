@@ -74,6 +74,13 @@ func startProbeServer(t *testing.T, port, metricsPort int, tmpDir string) {
 		"GEODE_ADMIN_PASSWORD=seed",
 		"GEODE_WAL_SYNC=deferred",
 		"GEODE_INDEX_MERGE_KEYS_ONLY=1",
+		// REQ-QUIC-HC-030 / server_init.zig: stream multiplexing is DISABLED by
+		// default (quic_stream_multiplexing_enabled=false). The server only spawns
+		// the streamAcceptorLoop — which services additional streams per QUIC
+		// connection — when this is set. Without it, secondary streams are never
+		// handled and their queries hang. The client multiplex driver therefore
+		// REQUIRES the server to run with this flag.
+		"GEODE_QUIC_ENABLE_STREAM_MULTIPLEXING=1",
 		fmt.Sprintf("GEODE_METRICS_PORT=%d", metricsPort),
 	)
 
@@ -354,8 +361,13 @@ func TestMultiplexServerProbe(t *testing.T) {
 	if _, err := helloSess.hello(helloCtx, cfg); err != nil {
 		t.Fatalf("HELLO handshake: %v", err)
 	}
-	_ = helloRawStream.Close()
 	helloCancel()
+	// Keep the HELLO stream OPEN for the lifetime of the test. This mirrors the
+	// real driver: each pooled transport holds one long-lived stream, and the
+	// stream that performed HELLO stays open for the connection's lifetime.
+	// Closing it sends a FIN that the server treats as session teardown, which
+	// tears down the connection-level auth and closes all sibling streams.
+	t.Cleanup(func() { _ = helloRawStream.Close() })
 
 	t.Logf("HELLO done; connection authenticated — spawning %d concurrent stream goroutines", probeGoroutines)
 
@@ -377,10 +389,13 @@ func TestMultiplexServerProbe(t *testing.T) {
 		go func(gid int) {
 			defer wg.Done()
 
-			// Each goroutine opens its own stream on the SHARED qConn and performs
-			// its own HELLO handshake. The server requires HELLO per stream/session
-			// (not just per connection), so each goroutine must authenticate its stream
-			// before sending queries.
+			// Each goroutine opens its own stream on the SHARED qConn and runs
+			// queries DIRECTLY — no per-stream HELLO. This mirrors the real driver
+			// (conn.go connectPooled / pooledHello): authentication is bound to the
+			// QUIC *connection*, performed exactly once on the first stream; every
+			// subsequent stream on that connection skips HELLO and sends queries.
+			// (Sending a second HELLO on an already-authed conn is rejected by the
+			// server with a clean stream close, which is correct behavior.)
 			rawStream, err := qConn.OpenStreamSync(runCtx)
 			if err != nil {
 				errsCh <- fmt.Errorf("goroutine %d: OpenStreamSync: %v", gid, err)
@@ -388,14 +403,6 @@ func TestMultiplexServerProbe(t *testing.T) {
 			}
 			sess := newProbeSession(rawStream)
 			defer rawStream.Close() //nolint:errcheck
-
-			hCtx, hCancel := context.WithTimeout(runCtx, 10*time.Second)
-			if _, err := sess.hello(hCtx, cfg); err != nil {
-				hCancel()
-				errsCh <- fmt.Errorf("goroutine %d: stream HELLO: %v", gid, err)
-				return
-			}
-			hCancel()
 
 			opTimeout := 15 * time.Second
 			var localOps int64
