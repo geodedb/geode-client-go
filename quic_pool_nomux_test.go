@@ -125,33 +125,33 @@ func TestSelectConnWithCapacity_MatchesLegacyAtMax1(t *testing.T) {
 	}
 }
 
-// TestNewQUICPool_AdmissionBoundedByPoolSize is the admission-layer regression
-// for the burst deadlock (BUG-0002). Because the driver dedicates one QUIC
-// connection per in-flight stream, the real concurrency ceiling is
-// min(maxStreams, maxSize). Admission must therefore be capped at maxSize even
-// when maxStreams is much larger — otherwise excess callers are admitted and
-// then multiplexed onto the bounded set of connections, which wedges.
+// TestNewQUICPool_AdmissionMultiplex is the admission-layer regression for the
+// multiplex policy. The total in-flight ceiling is min(maxStreams, maxSize *
+// maxStreamsPerConn): each of maxSize connections can carry up to
+// maxStreamsPerConn concurrent streams, capped by the configured maxStreams.
 //
-// Before the fix the semaphore held maxStreams (64) slots, so a third acquire
-// against a 2-connection pool would succeed and go on to wedge. After the fix
-// admission is min(64, 2) = 2 and the third caller blocks (clean backpressure)
-// until a slot frees or its context expires.
-func TestNewQUICPool_AdmissionBoundedByPoolSize(t *testing.T) {
+// This replaces the old TestNewQUICPool_AdmissionBoundedByPoolSize, whose
+// premise (admission == maxSize because the driver ran one stream per conn) no
+// longer holds once concurrent streams multiplex onto each connection.
+//
+// With maxSize=2, maxStreamsPerConn=8, maxStreams=64 the ceiling is 2*8 = 16
+// (not 2, not 64): 16 acquires succeed without blocking, the 17th blocks until a
+// slot is released or its context expires.
+func TestNewQUICPool_AdmissionMultiplex(t *testing.T) {
 	t.Parallel()
 
-	cfg := &Config{Host: "localhost", Port: "3141", MaxStreams: 64}
-	pool := NewQUICPool(cfg, 2) // maxSize = 2, far below maxStreams
+	cfg := &Config{Host: "localhost", Port: "3141", MaxStreams: 64, MaxStreamsPerConn: 8}
+	pool := NewQUICPool(cfg, 2) // maxSize = 2 → ceiling = 2*8 = 16
 	defer pool.Close()
 
 	ctx := context.Background()
-	if err := pool.acquireSlot(ctx); err != nil {
-		t.Fatalf("first acquireSlot failed: %v", err)
-	}
-	if err := pool.acquireSlot(ctx); err != nil {
-		t.Fatalf("second acquireSlot failed: %v", err)
+	for i := 0; i < 16; i++ {
+		if err := pool.acquireSlot(ctx); err != nil {
+			t.Fatalf("acquireSlot %d/16 failed: %v (ceiling should be 16)", i+1, err)
+		}
 	}
 
-	// Third acquire must block (admission capped at maxSize=2), not be admitted.
+	// The 17th acquire must block: ceiling is maxSize*maxStreamsPerConn = 16.
 	deadlineCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
 	defer cancel()
 	start := time.Now()
@@ -159,10 +159,34 @@ func TestNewQUICPool_AdmissionBoundedByPoolSize(t *testing.T) {
 	elapsed := time.Since(start)
 
 	if err == nil {
-		t.Fatal("third acquireSlot was admitted; admission not bounded by pool_size " +
-			"(burst would multiplex into a wedge)")
+		t.Fatal("17th acquireSlot was admitted; admission ceiling not " +
+			"min(maxStreams, maxSize*maxStreamsPerConn)")
 	}
 	if elapsed < 40*time.Millisecond {
-		t.Fatalf("third acquireSlot returned too quickly (%v); expected to block ~50ms", elapsed)
+		t.Fatalf("17th acquireSlot returned too quickly (%v); expected to block ~50ms", elapsed)
+	}
+}
+
+// TestNewQUICPool_AdmissionCappedByMaxStreams verifies maxStreams still caps the
+// ceiling when it is the smaller of the two bounds: with maxSize=8,
+// maxStreamsPerConn=8 (product 64) but maxStreams=10, the ceiling is 10.
+func TestNewQUICPool_AdmissionCappedByMaxStreams(t *testing.T) {
+	t.Parallel()
+
+	cfg := &Config{Host: "localhost", Port: "3141", MaxStreams: 10, MaxStreamsPerConn: 8}
+	pool := NewQUICPool(cfg, 8) // product 64, but maxStreams=10 dominates
+	defer pool.Close()
+
+	ctx := context.Background()
+	for i := 0; i < 10; i++ {
+		if err := pool.acquireSlot(ctx); err != nil {
+			t.Fatalf("acquireSlot %d/10 failed: %v (ceiling should be 10)", i+1, err)
+		}
+	}
+
+	deadlineCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	if err := pool.acquireSlot(deadlineCtx); err == nil {
+		t.Fatal("11th acquireSlot admitted; maxStreams should cap the ceiling at 10")
 	}
 }

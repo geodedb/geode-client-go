@@ -129,18 +129,17 @@ func NewQUICPool(cfg *Config, maxSize int) *QUICPool {
 		maxStreamsPerConn = 1
 	}
 
-	// Admission is bounded by the number of QUIC connections we will dedicate,
-	// not by maxStreams alone. The driver assigns at most ONE in-flight stream
-	// per QUIC connection — multiplexing concurrent streams over a single
-	// connection wedges all but one against the server (BUG-0002) — so the real
-	// concurrency ceiling is min(maxStreams, maxSize). Sizing the admission
-	// semaphore to that bound makes callers beyond the ceiling block (clean,
-	// context-aware backpressure) instead of being admitted and then multiplexed
-	// into a deadlock. maxStreams is retained as the configured upper bound and
-	// still caps admission when it is the smaller of the two.
+	// Admission ceiling for total in-flight streams across the whole pool. With
+	// multiplexing, each of maxSize connections carries up to maxStreamsPerConn
+	// concurrent streams, so the structural ceiling is maxSize*maxStreamsPerConn;
+	// the configured maxStreams caps it when smaller. Sizing the admission
+	// semaphore to min(maxStreams, maxSize*maxStreamsPerConn) makes callers
+	// beyond the ceiling block (clean, context-aware backpressure) instead of
+	// being admitted with nowhere to run. (With maxStreamsPerConn=1 this reduces
+	// to the legacy min(maxStreams, maxSize) one-stream-per-conn ceiling.)
 	admitBound := maxStreams
-	if maxSize < admitBound {
-		admitBound = maxSize
+	if streamCap := maxSize * maxStreamsPerConn; streamCap < admitBound {
+		admitBound = streamCap
 	}
 
 	p := &QUICPool{
@@ -253,9 +252,10 @@ func (p *QUICPool) acquire(ctx context.Context) (*pooledConn, error) {
 		return pc, nil
 	}
 
-	// Every connection is busy and the pool is at maxSize. Admission control
-	// should have blocked this caller; fail fast with a clear error rather than
-	// multiplexing into a wedge.
+	// Every connection is at its per-conn stream cap and the pool is at maxSize,
+	// i.e. all maxSize*maxStreamsPerConn stream slots are in use. The admission
+	// semaphore (sized to that ceiling) should have blocked this caller, so this
+	// is a defensive backstop; fail fast rather than overloading a connection.
 	p.releaseSlot()
 	return nil, ErrPoolExhausted
 }
