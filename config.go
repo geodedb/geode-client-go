@@ -173,6 +173,20 @@ type Config struct {
 	//
 	// Tune via DSN: `?max_streams=64`.
 	MaxStreams int
+
+	// MaxStreamsPerConn bounds the number of concurrent in-flight QUIC streams
+	// the driver multiplexes over a single QUIC connection.  Each request opens
+	// its own independent stream; up to this many run concurrently on one
+	// connection before the pool dials another.  Defaults to
+	// DefaultMaxStreamsPerConn (8) when absent; non-positive values clamp to the
+	// minimum of 1 (there must always be at least one stream per connection).
+	//
+	// A value of 1 reduces the pool to the legacy no-multiplex policy (one
+	// in-flight stream per connection).  Requires the server to be started with
+	// GEODE_QUIC_ENABLE_STREAM_MULTIPLEXING=1 for values > 1 to be honoured.
+	//
+	// Tune via DSN: `?max_streams_per_conn=8`.
+	MaxStreamsPerConn int
 }
 
 // Addr returns the server address in host:port format.
@@ -246,6 +260,9 @@ func (c *Config) FormatDSN() string {
 	if c.MaxStreams > 0 && c.MaxStreams != DefaultMaxStreams {
 		q.Set("max_streams", strconv.Itoa(c.MaxStreams))
 	}
+	if c.MaxStreamsPerConn > 0 && c.MaxStreamsPerConn != DefaultMaxStreamsPerConn {
+		q.Set("max_streams_per_conn", strconv.Itoa(c.MaxStreamsPerConn))
+	}
 
 	var userinfo string
 	switch {
@@ -306,6 +323,8 @@ func ParseDSN(dsn string) (*Config, error) {
 		HelloName:    DefaultHelloName,
 		HelloVersion: DefaultHelloVersion,
 		Conformance:  DefaultConformance,
+
+		MaxStreamsPerConn: DefaultMaxStreamsPerConn,
 	}
 
 	// Apply environment variable defaults
@@ -526,6 +545,23 @@ func applyQueryParams(params url.Values, cfg *Config) error {
 				}
 			}
 			cfg.MaxStreams = n
+
+		case "max_streams_per_conn":
+			// Unlike max_streams, non-positive values are not an error: they
+			// clamp up to the minimum of 1. There must always be at least one
+			// stream per connection or the pool cannot make progress.
+			n, err := strconv.Atoi(val)
+			if err != nil {
+				return &ConfigError{
+					Field:   "max_streams_per_conn",
+					Value:   val,
+					Message: "must be an integer",
+				}
+			}
+			if n < 1 {
+				n = 1
+			}
+			cfg.MaxStreamsPerConn = n
 
 		case "hello_name":
 			if val == "" {

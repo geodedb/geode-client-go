@@ -43,6 +43,23 @@ const (
 	//
 	// Override via DSN `?max_streams=N`.
 	DefaultMaxStreams = 64
+
+	// DefaultMaxStreamsPerConn is the maximum number of concurrent in-flight
+	// QUIC streams the driver multiplexes over a SINGLE QUIC connection.  Each
+	// request opens its own independent bidirectional stream (own request/
+	// response pair, own bufio.Reader, own per-stream read deadline), so up to
+	// this many requests can run concurrently on one connection before the pool
+	// dials another.  The server multiplexes concurrent streams correctly when
+	// started with GEODE_QUIC_ENABLE_STREAM_MULTIPLEXING=1 (it services only the
+	// first stream per connection otherwise — a deployment requirement).
+	//
+	// 8 balances throughput (multiplexing avoids the connection-count ceiling
+	// of the old one-stream-per-conn workaround, BUG-0002) against per-stream
+	// receive-window memory.  A value of 1 reduces the pool to the old
+	// no-multiplex behaviour (one in-flight stream per connection).
+	//
+	// Override via DSN `?max_streams_per_conn=N` (minimum 1).
+	DefaultMaxStreamsPerConn = 8
 )
 
 // QUICPool manages a small pool of persistent QUIC connections.
@@ -56,12 +73,13 @@ const (
 //     limit, providing driver-side backpressure.  See DefaultMaxStreams
 //     for the rationale.
 type QUICPool struct {
-	mu         sync.Mutex
-	conns      []*pooledConn
-	cfg        *Config
-	maxSize    int
-	maxStreams int
-	closed     bool
+	mu                sync.Mutex
+	conns             []*pooledConn
+	cfg               *Config
+	maxSize           int
+	maxStreams        int
+	maxStreamsPerConn int
+	closed            bool
 
 	// slotsCh is a counting semaphore bounding in-flight streams.  Capacity
 	// equals maxStreams; tokens are consumed by acquireSlot and returned
@@ -99,6 +117,18 @@ func NewQUICPool(cfg *Config, maxSize int) *QUICPool {
 		maxStreams = cfg.MaxStreams
 	}
 
+	// maxStreamsPerConn caps concurrent multiplexed streams per QUIC connection.
+	// Default to 8 when unset; clamp to a minimum of 1 (a conn must always carry
+	// at least one stream). cfg may be constructed directly (not via ParseDSN),
+	// so the clamp lives here too, not only in the DSN parser.
+	maxStreamsPerConn := DefaultMaxStreamsPerConn
+	if cfg != nil && cfg.MaxStreamsPerConn != 0 {
+		maxStreamsPerConn = cfg.MaxStreamsPerConn
+	}
+	if maxStreamsPerConn < 1 {
+		maxStreamsPerConn = 1
+	}
+
 	// Admission is bounded by the number of QUIC connections we will dedicate,
 	// not by maxStreams alone. The driver assigns at most ONE in-flight stream
 	// per QUIC connection — multiplexing concurrent streams over a single
@@ -114,11 +144,12 @@ func NewQUICPool(cfg *Config, maxSize int) *QUICPool {
 	}
 
 	p := &QUICPool{
-		cfg:        cfg,
-		maxSize:    maxSize,
-		maxStreams: maxStreams,
-		slotsCh:    make(chan struct{}, admitBound),
-		closedCh:   make(chan struct{}),
+		cfg:               cfg,
+		maxSize:           maxSize,
+		maxStreams:        maxStreams,
+		maxStreamsPerConn: maxStreamsPerConn,
+		slotsCh:           make(chan struct{}, admitBound),
+		closedCh:          make(chan struct{}),
 	}
 	// Pre-populate the semaphore: every slot starts available.
 	for i := 0; i < admitBound; i++ {

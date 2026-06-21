@@ -5,6 +5,35 @@ import (
 	"testing"
 )
 
+// TestConfig_MaxStreamsPerConn pins the max_streams_per_conn DSN option used to
+// cap concurrent multiplexed streams per QUIC connection. Unlike max_streams
+// (which errors on non-positive values), this option defaults to 8 when absent
+// and clamps non-positive values up to the minimum of 1 — there must always be
+// at least one stream per connection or the pool cannot make progress.
+func TestConfig_MaxStreamsPerConn(t *testing.T) {
+	tests := []struct {
+		name string
+		dsn  string
+		want int
+	}{
+		{"explicit value", "quic://localhost:3141?max_streams_per_conn=4", 4},
+		{"absent uses default", "quic://localhost:3141", DefaultMaxStreamsPerConn},
+		{"zero clamps to one", "quic://localhost:3141?max_streams_per_conn=0", 1},
+		{"negative clamps to one", "quic://localhost:3141?max_streams_per_conn=-5", 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := ParseDSN(tt.dsn)
+			if err != nil {
+				t.Fatalf("ParseDSN(%q) failed: %v", tt.dsn, err)
+			}
+			if cfg.MaxStreamsPerConn != tt.want {
+				t.Errorf("MaxStreamsPerConn = %d, want %d", cfg.MaxStreamsPerConn, tt.want)
+			}
+		})
+	}
+}
+
 func TestParseDSN_Empty(t *testing.T) {
 	cfg, err := ParseDSN("")
 	if err != nil {
