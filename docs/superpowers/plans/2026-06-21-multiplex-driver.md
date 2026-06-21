@@ -16,7 +16,8 @@
 - PRESERVE per-operation stream draining: `drainExecStream`, `releaseRows` double-drain, `BeginTx` `HasBufferedData()` check (conn.go) — per-stream desync guards.
 - PRESERVE: HELLO + graph-init run exactly ONCE per QUIC connection (double-checked lock on `pc.authed` / `pc.graphBound`, conn.go ~205-250) — must hold when multiple streams open on the same conn.
 - Test server binary: `/home/benji/src/devnw/codepros/geode/geode/zig-out/bin/geode`. Use FRESH temp data-dirs + free ports **≥3590**. NEVER touch system geodes (PID 1783, 529355) or ports 3141 / 3200 / 3580 (a validated edgefix run is on 3580).
-- Server launch for tests: `GEODE_ADMIN_PASSWORD=seed GEODE_WAL_SYNC=deferred GEODE_INDEX_MERGE_KEYS_ONLY=1 GEODE_METRICS_PORT=<m> <binary> serve --listen 127.0.0.1:<p> --data-dir <tmp>`. DSN: `localhost:<p>?insecure=true&user=geode&pass=seed`. Reuse the existing integration harness (`GEODE_TEST_DSN` env override, integration_main_test.go) where possible.
+- Server launch for tests: `GEODE_ADMIN_PASSWORD=seed GEODE_WAL_SYNC=deferred GEODE_INDEX_MERGE_KEYS_ONLY=1 GEODE_QUIC_ENABLE_STREAM_MULTIPLEXING=1 GEODE_METRICS_PORT=<m> <binary> serve --listen 127.0.0.1:<p> --data-dir <tmp>`. DSN: `localhost:<p>?insecure=true&user=geode&pass=seed`. Reuse the existing integration harness (`GEODE_TEST_DSN` env override, integration_main_test.go) where possible.
+- **CRITICAL SERVER FLAG (Task 0 finding):** The server gates stream multiplexing behind `GEODE_QUIC_ENABLE_STREAM_MULTIPLEXING=1` (`quic_stream_multiplexing_enabled`, default **FALSE** — server_init.zig:54). Without it the server only services the FIRST stream per QUIC connection; additional streams are accepted at the QUIC layer but the `streamAcceptorLoop` never runs, so their queries HANG (read deadline-exceeded, not a clean close). The client multiplex driver is therefore INOPERABLE against a server started without this flag. EVERY test harness in Tasks 1-6 MUST set it, and it is a **deployment requirement** that must be surfaced in the final report (and ideally the driver should fail-fast or warn if multiplexing is configured but the server doesn't honor it). The server side is correct and tested (REQ-QUIC-HC-030, `test-quic-high-concurrency-e2e`); no server change is needed — only the flag.
 - Branch off current `main` (which has 7cb9f83 + b5e9d17 + d9fc4e3). Work on branch `multiplex-driver`. Frequent commits. Do NOT push (report for review).
 
 ---
@@ -34,10 +35,10 @@
 - Consumes: existing test harness `dsnForTest(t)` / `GEODE_TEST_DSN`; `NewQUICTransport(ctx, addr, tlsCfg)` (transport.go), `Transport.SendProto`/`ReceiveProto`, the HELLO + a simple `MATCH (n) RETURN count(n)` exec.
 - Produces: confidence (a passing test) that ≥8 concurrent streams on ONE `*quic.Conn` complete find+create + reads without wedging.
 
-- [ ] **Step 1: Write the probe test** — open ONE `*quic.Conn` (dial directly via the transport internals or a minimal `quic.DialAddr` mirror of transport.go:126-144), then spawn 8 goroutines that each `OpenStreamSync` on that SAME conn and run a sustained loop of `MERGE (t:Probe {id:$i})` then `MATCH (p:Probe {id:$a}),(c:Probe {id:$b}) MERGE (p)-[:R]->(c)` (find+create). Assert all 8 goroutines make progress (an atomic op counter advances for each) within a watchdog (no 15s stall), and a final count matches expected. Seed a fresh server in the test.
-- [ ] **Step 2: Run it** — `cd <repo> && go test -tags integration -run TestMultiplexServerProbe -v -timeout 300s`. Expected: PASS (all 8 streams progress; no wedge).
-- [ ] **Step 3: Decision gate** — If PASS: the server multiplexes safely; proceed to Task 1. If it WEDGES (watchdog fires): STOP, capture goroutine + server stacks, and report that the server side must be fixed before client multiplexing — do not proceed.
-- [ ] **Step 4: Commit** — `git add multiplex_server_probe_test.go && git commit -m "test(multiplex): probe N concurrent streams on one QUIC conn (de-risk)"`
+- [x] **Step 1: Write the probe test** — done (`multiplex_server_probe_test.go`).
+- [x] **Step 2: Run it** — done.
+- [x] **Step 3: Decision gate** — **PASSED** (commit `1348f03`). 8 concurrent streams on ONE conn ran find+create to 23696 op pairs, final count exact (23696==23696), no wedge. The initial false WEDGE was a probe bug (per-stream HELLO + closed HELLO stream) compounded by the server's `GEODE_QUIC_ENABLE_STREAM_MULTIPLEXING` flag being off. Server multiplex is correct + tested; proceeding to Task 1. **All downstream task harnesses must set `GEODE_QUIC_ENABLE_STREAM_MULTIPLEXING=1`** (see Global Constraints).
+- [x] **Step 4: Commit** — done (`1348f03`).
 
 ---
 
