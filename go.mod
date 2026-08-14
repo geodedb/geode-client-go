@@ -2,7 +2,7 @@ module geodedb.com/geode
 
 go 1.25.0
 
-toolchain go1.26.5
+toolchain go1.26.6
 
 require (
 	github.com/docker/docker v28.5.2+incompatible
