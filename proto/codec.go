@@ -13,6 +13,8 @@ package proto
 import (
 	"errors"
 	"fmt"
+	"reflect"
+	"sort"
 
 	gpb "google.golang.org/protobuf/proto"
 )
@@ -208,94 +210,180 @@ func (x *QuicServerMessage) GetRollbackResp() *RollbackResponse {
 	return x.GetRollback()
 }
 
+// maxParamDepth bounds container nesting when encoding parameters. It matches
+// the server limit (protoValueToValue in proto_util.zig) and the Python
+// client's PARAM_MAX_DEPTH. MakeParam cannot report an error, so values nested
+// deeper are encoded as null instead of being recursed into; that also keeps
+// cyclic structures from exhausting the stack.
+const maxParamDepth = 64
+
+// stringValue builds a string_val Value.
+func stringValue(val string) *Value {
+	return &Value{Kind: &Value_StringVal{StringVal: &StringValue{Value: val}}}
+}
+
+// intValue builds an int_val Value.
+func intValue(val int64) *Value {
+	return &Value{Kind: &Value_IntVal{IntVal: &IntValue{Value: val, Kind: IntKind_INT}}}
+}
+
+// floatValue builds a double_val Value.
+func floatValue(val float64) *Value {
+	return &Value{Kind: &Value_DoubleVal{DoubleVal: &DoubleValue{Value: val, Kind: FloatKind_DOUBLE}}}
+}
+
+// boolValue builds a bool_val Value.
+func boolValue(val bool) *Value {
+	return &Value{Kind: &Value_BoolVal{BoolVal: val}}
+}
+
+// bytesValue builds a bytes_val Value.
+func bytesValue(val []byte) *Value {
+	return &Value{Kind: &Value_BytesVal{BytesVal: &BytesValue{Value: val, Kind: BytesKind_BYTEA}}}
+}
+
+// nullValue builds a null_val Value.
+func nullValue() *Value {
+	return &Value{Kind: &Value_NullVal{NullVal: &NullValue{}}}
+}
+
 // StringParam creates a Param with a string value.
 func StringParam(name, val string) *Param {
-	return &Param{
-		Name: name,
-		Value: &Value{
-			Kind: &Value_StringVal{StringVal: &StringValue{Value: val}},
-		},
-	}
+	return &Param{Name: name, Value: stringValue(val)}
 }
 
 // IntParam creates a Param with an integer value.
 func IntParam(name string, val int64) *Param {
-	return &Param{
-		Name: name,
-		Value: &Value{
-			Kind: &Value_IntVal{IntVal: &IntValue{Value: val, Kind: IntKind_INT}},
-		},
-	}
+	return &Param{Name: name, Value: intValue(val)}
 }
 
 // FloatParam creates a Param with a float value.
 func FloatParam(name string, val float64) *Param {
-	return &Param{
-		Name: name,
-		Value: &Value{
-			Kind: &Value_DoubleVal{DoubleVal: &DoubleValue{Value: val, Kind: FloatKind_DOUBLE}},
-		},
-	}
+	return &Param{Name: name, Value: floatValue(val)}
 }
 
 // BoolParam creates a Param with a bool value.
 func BoolParam(name string, val bool) *Param {
-	return &Param{
-		Name: name,
-		Value: &Value{
-			Kind: &Value_BoolVal{BoolVal: val},
-		},
-	}
+	return &Param{Name: name, Value: boolValue(val)}
+}
+
+// BytesParam creates a Param with a bytes value.
+func BytesParam(name string, val []byte) *Param {
+	return &Param{Name: name, Value: bytesValue(val)}
 }
 
 // NullParam creates a Param with a null value.
 func NullParam(name string) *Param {
-	return &Param{
-		Name:  name,
-		Value: &Value{Kind: &Value_NullVal{NullVal: &NullValue{}}},
-	}
+	return &Param{Name: name, Value: nullValue()}
 }
 
 // MakeParam creates a Param with the appropriate protobuf type for the given Go value.
+//
+// Slices, arrays and maps are encoded structurally as list_val/map_val (see
+// makeValue); every other unsupported type keeps its fmt representation.
 func MakeParam(name string, val interface{}) *Param {
+	return &Param{Name: name, Value: makeValue(val, 0)}
+}
+
+// makeValue converts a Go value into the matching protobuf Value.
+//
+// Containers are encoded structurally (slice/array -> list_val, map ->
+// map_val) so the server receives a real collection instead of a Go fmt
+// representation, which made `x IN $list` match nothing and `NOT IN` fail
+// open (ENG-3910). Strings and []byte stay scalars. depth tracks container
+// nesting for maxParamDepth.
+func makeValue(val interface{}, depth int) *Value {
 	if val == nil {
-		return NullParam(name)
+		return nullValue()
 	}
 	switch v := val.(type) {
 	case int:
-		return IntParam(name, int64(v))
+		return intValue(int64(v))
 	case int8:
-		return IntParam(name, int64(v))
+		return intValue(int64(v))
 	case int16:
-		return IntParam(name, int64(v))
+		return intValue(int64(v))
 	case int32:
-		return IntParam(name, int64(v))
+		return intValue(int64(v))
 	case int64:
-		return IntParam(name, v)
+		return intValue(v)
 	case uint:
-		return IntParam(name, int64(v))
+		return intValue(int64(v))
 	case uint8:
-		return IntParam(name, int64(v))
+		return intValue(int64(v))
 	case uint16:
-		return IntParam(name, int64(v))
+		return intValue(int64(v))
 	case uint32:
-		return IntParam(name, int64(v))
+		return intValue(int64(v))
 	case uint64:
-		return IntParam(name, int64(v))
+		return intValue(int64(v))
 	case float32:
-		return FloatParam(name, float64(v))
+		return floatValue(float64(v))
 	case float64:
 		// If the float is a whole number, send as int (YAML parses 35 as int but
 		// some paths may produce float64).
 		if v == float64(int64(v)) {
-			return IntParam(name, int64(v))
+			return intValue(int64(v))
 		}
-		return FloatParam(name, v)
+		return floatValue(v)
 	case bool:
-		return BoolParam(name, v)
+		return boolValue(v)
 	case string:
-		return StringParam(name, v)
-	default:
-		return StringParam(name, fmt.Sprintf("%v", v))
+		return stringValue(v)
+	case []byte:
+		// Bytes are a scalar value, not a list of integers.
+		return bytesValue(v)
 	}
+	return containerValue(val, depth)
+}
+
+// containerValue encodes slices, arrays and maps structurally. Any other type
+// (time.Time, structs, ...) keeps the historical fmt representation, which the
+// server stores as a string; see ScanTime in the geode package.
+func containerValue(val interface{}, depth int) *Value {
+	rv := reflect.ValueOf(val)
+	//nolint:exhaustive // only container kinds are encoded structurally
+	switch rv.Kind() {
+	case reflect.Slice, reflect.Array:
+		if depth >= maxParamDepth {
+			return nullValue()
+		}
+		values := make([]*Value, 0, rv.Len())
+		for i := 0; i < rv.Len(); i++ {
+			values = append(values, makeValue(rv.Index(i).Interface(), depth+1))
+		}
+		return &Value{Kind: &Value_ListVal{ListVal: &ListValue{Values: values}}}
+	case reflect.Map:
+		if depth >= maxParamDepth {
+			return nullValue()
+		}
+		return mapValue(rv, depth)
+	default:
+		return stringValue(fmt.Sprintf("%v", val))
+	}
+}
+
+// mapValue encodes a reflect map as map_val with key-sorted entries so the
+// wire bytes are deterministic for a given parameter value.
+func mapValue(rv reflect.Value, depth int) *Value {
+	keys := rv.MapKeys()
+	entries := make([]*MapEntry, 0, len(keys))
+	for _, key := range keys {
+		entries = append(entries, &MapEntry{
+			Key:   mapKeyString(key),
+			Value: makeValue(rv.MapIndex(key).Interface(), depth+1),
+		})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].GetKey() < entries[j].GetKey()
+	})
+	return &Value{Kind: &Value_MapVal{MapVal: &MapValue{Entries: entries}}}
+}
+
+// mapKeyString renders a map key as the string required by MapEntry.
+func mapKeyString(key reflect.Value) string {
+	if key.Kind() == reflect.String {
+		return key.String()
+	}
+	return fmt.Sprintf("%v", key.Interface())
 }

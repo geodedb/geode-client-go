@@ -206,6 +206,39 @@ func TestMakeParam_EmptyListIsListValue(t *testing.T) {
 	}
 }
 
+// TestMakeParam_DepthLimit checks that over-nested containers terminate as
+// null instead of recursing without bound (matches the server's 64-level cap
+// and the Python client's PARAM_MAX_DEPTH).
+func TestMakeParam_DepthLimit(t *testing.T) {
+	const nesting = 70
+	var val any = "leaf"
+	for i := 0; i < nesting; i++ {
+		val = []any{val}
+	}
+
+	v := proto.MakeParam("deep", val).GetValue()
+	levels := 0
+	for {
+		lv, ok := v.GetKind().(*proto.Value_ListVal)
+		if !ok {
+			break
+		}
+		vals := lv.ListVal.GetValues()
+		if len(vals) != 1 {
+			t.Fatalf("expected 1 element at level %d, got %d", levels, len(vals))
+		}
+		levels++
+		v = vals[0]
+	}
+
+	if levels != 64 {
+		t.Errorf("expected encoding to stop after 64 list levels, got %d", levels)
+	}
+	if _, ok := v.GetKind().(*proto.Value_NullVal); !ok {
+		t.Errorf("expected null_val past the depth limit, got %T", v.GetKind())
+	}
+}
+
 // TestMakeParam_RoundTripsThroughDecode checks encode/decode symmetry with the
 // decode path used for result values (convertProtoValue in rows.go).
 func TestMakeParam_RoundTripsThroughDecode(t *testing.T) {
