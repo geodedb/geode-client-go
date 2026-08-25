@@ -12,18 +12,18 @@
 
 include:
   # Pinned to v1.11.0 for supply chain security
-  - component: gitlab.com/devnw/ci-catalog/go-lint@v1.43.0
+  - component: gitlab.com/devnw/ci-catalog/go-lint@v1.48.0
     inputs:
       stage: lint
       # Lint includes gosec security checks - must not allow failure
       allow_failure: false
 
-  - component: gitlab.com/devnw/ci-catalog/go-build@v1.43.0
+  - component: gitlab.com/devnw/ci-catalog/go-build@v1.48.0
     inputs:
       go_version: "1.25.8"
       stage: build
 
-  - component: gitlab.com/devnw/ci-catalog/go-test@v1.43.0
+  - component: gitlab.com/devnw/ci-catalog/go-test@v1.48.0
     inputs:
       go_version: "1.25.8"
       stage: test
@@ -32,35 +32,35 @@ include:
       allow_failure: false
 
   # Security scanning - pinned to v1.11.0
-  - component: gitlab.com/devnw/ci-catalog/security-sast@v1.43.0
+  - component: gitlab.com/devnw/ci-catalog/security-sast@v1.48.0
     inputs:
       stage: security
 
-  - component: gitlab.com/devnw/ci-catalog/security-dependency-scanning@v1.43.0
+  - component: gitlab.com/devnw/ci-catalog/security-dependency-scanning@v1.48.0
     inputs:
       stage: security
 
-  - component: gitlab.com/devnw/ci-catalog/security-secrets@v1.43.0
+  - component: gitlab.com/devnw/ci-catalog/security-secrets@v1.48.0
     inputs:
       stage: security
 
-  - component: gitlab.com/devnw/ci-catalog/security-gitleaks@v1.43.0
+  - component: gitlab.com/devnw/ci-catalog/security-gitleaks@v1.48.0
 
   # SBOM generation and scanning - pinned to v1.11.0
   # allow_failure: external syft download may fail due to DNS/network issues
-  - component: gitlab.com/devnw/ci-catalog/sbom-generate@v1.43.0
+  - component: gitlab.com/devnw/ci-catalog/sbom-generate@v1.48.0
 
-  - component: gitlab.com/devnw/ci-catalog/sbom-scan@v1.43.0
+  - component: gitlab.com/devnw/ci-catalog/sbom-scan@v1.48.0
 
   # Release creation - pinned to v1.11.0
-  - component: gitlab.com/devnw/ci-catalog/release-semantic@v1.43.0
+  - component: gitlab.com/devnw/ci-catalog/release-semantic@v1.48.0
     inputs:
       stage: release
 
 # SBOM jobs may fail due to DNS/network issues downloading syft
   # Security findings -> auto-triaged Jira SEC issues (.post; reads gl-*-report
   # artifacts). component_id 12496 = SEC > Vuln Mgmt.
-  - component: gitlab.com/devnw/ci-catalog/jira-event-intake@v1.43.0
+  - component: gitlab.com/devnw/ci-catalog/jira-event-intake@v1.48.0
     inputs:
       project_key: SEC
       component_id: "12496"
