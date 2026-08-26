@@ -17,6 +17,9 @@ include:
       stage: lint
       # Lint includes gosec security checks - must not allow failure
       allow_failure: false
+      # go.mod targets go 1.27; the component default (v2.11.3) is built
+      # with go 1.26 and refuses to load the config.
+      golangci_version: 'v2.13.1'
 
   - component: gitlab.com/devnw/ci-catalog/go-build@v1.48.0
     inputs:
