@@ -7,7 +7,7 @@ require (
 	github.com/quic-go/quic-go v0.61.0
 	github.com/stretchr/testify v1.12.1
 	github.com/testcontainers/testcontainers-go v0.44.0
-	golang.org/x/crypto v0.55.0
+	golang.org/x/crypto v0.56.0
 	google.golang.org/grpc v1.83.2
 	google.golang.org/protobuf v1.36.12
 )
