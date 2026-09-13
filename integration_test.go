@@ -125,7 +125,12 @@ func setupContainerAuth(ctx context.Context, container testcontainers.Container)
 
 	genPass := parseAdminPassword(logs)
 	if genPass == "" {
-		return fmt.Errorf("could not find generated admin password in container logs")
+		// No generated password in the log means the admin credential was
+		// seeded up front via GEODE_ADMIN_PASSWORD (see integration_main_test.go),
+		// so it already equals testAdminPassphrase and needs no reset. Engines
+		// from 0.8.15 on take this path: they never print the credential, and
+		// write a generated one to ./.geode_admin_password instead.
+		return nil
 	}
 
 	// Reset the admin password to a known, policy-compliant passphrase.

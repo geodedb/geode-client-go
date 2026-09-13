@@ -8,10 +8,15 @@ GOFLAGS ?=
 GOLANGCI_LINT ?= golangci-lint
 
 # Docker settings for integration tests
-# SECURITY: Pin to specific version to prevent supply chain attacks via mutable tags
-# Update this version when upgrading the Geode server dependency
 DOCKER ?= docker
-GEODE_IMAGE ?= geodedb/geode:latest
+# SECURITY: Pin to a specific version to prevent supply chain attacks via
+# mutable tags. The digest is the multi-arch index digest of
+# docker.io/geodedb/geode:0.8.15 and makes the pin immutable even if the tag
+# is republished. This MUST match `pinnedEngineVersion` in
+# integration_version_test.go, the integration:geode service in
+# .gitlab-ci.yml, and the .version field of ../geode/build.zig.zon.
+# Update all of them together.
+GEODE_IMAGE ?= geodedb/geode:0.8.15@sha256:96a194cfce01e59ee1dbe1504aa0ed79c0141f7e2e8b23389da18e73e6adc8ee
 GEODE_CONTAINER ?= geode-go-test
 GEODE_HOST ?= 127.0.0.1
 GEODE_PORT ?= 3141
@@ -21,6 +26,7 @@ GEODE_GRPC_PORT ?= 50051
 FUZZ_TIME ?= 30s
 
 .PHONY: all build clean test test-unit test-integration test-integration-docker test-integration-docker-manual test-all \
+        test-integration-race test-integration-docker-race \
         test-load test-load-docker \
         bench bench-integration lint fmt fmt-check vet doc coverage ci ci-quick ci-full \
         fuzz fuzz-dsn fuzz-frame fuzz-query fuzz-param fuzz-value fuzz-type \
@@ -64,6 +70,8 @@ help:
 	@echo "  make test-integration              - Run integration + load tests (requires manual Geode server)"
 	@echo "  make test-integration-docker       - Run integration + load tests with testcontainers (auto)"
 	@echo "  make test-integration-docker-manual - Run integration tests with manual Docker container"
+	@echo "  make test-integration-race         - Run integration tests under -race (requires manual server)"
+	@echo "  make test-integration-docker-race  - Run integration tests under -race with testcontainers"
 	@echo "  make test-integration-grpc         - Run gRPC integration tests (requires manual server)"
 	@echo "  make test-integration-docker-grpc  - Run gRPC integration tests with testcontainers"
 	@echo "  make test-load                     - Run load tests only (requires manual Geode server)"
@@ -115,7 +123,7 @@ help:
 	@echo "  GOFLAGS             - Additional flags for go commands"
 	@echo "  GEODE_HOST          - Geode server host (default: 127.0.0.1)"
 	@echo "  GEODE_PORT          - Geode server port (default: 3141)"
-	@echo "  GEODE_IMAGE         - Docker image (default: geodedb/geode:latest)"
+	@echo "  GEODE_IMAGE         - Docker image (default: pinned geodedb/geode:0.8.15 by digest)"
 	@echo "  GEODE_GRPC_PORT     - Geode gRPC port (default: 50051)"
 	@echo "  GEODE_TEST_DSN      - DSN for manual server tests"
 	@echo "  FUZZ_TIME           - Fuzz test duration (default: 30s)"
@@ -232,6 +240,17 @@ test-integration-docker:
 	GEODE_IMAGE=$(GEODE_IMAGE) $(GO) test -v -tags=integration -timeout=$(LOAD_TIMEOUT) $(GOFLAGS) ./...
 	@echo ""
 	@echo "✓ Docker integration + load tests complete"
+
+test-integration-race:
+	@echo "Running integration tests under -race (manual server)..."
+	GEODE_TEST_DSN="$(GEODE_HOST):$(GEODE_PORT)?insecure=true" $(GO) test -race -v -tags=integration -timeout=$(LOAD_TIMEOUT) $(GOFLAGS) ./...
+	@echo "✓ Race integration tests complete"
+
+test-integration-docker-race:
+	@echo "Running integration tests under -race with Docker (testcontainers)..."
+	@echo "Using Docker image: $(GEODE_IMAGE)"
+	GEODE_IMAGE=$(GEODE_IMAGE) $(GO) test -race -v -tags=integration -timeout=$(LOAD_TIMEOUT) $(GOFLAGS) ./...
+	@echo "✓ Docker race integration tests complete"
 
 # Manual Docker container management (like Zig client)
 test-integration-docker-manual: docker-start docker-wait

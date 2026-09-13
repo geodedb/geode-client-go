@@ -83,6 +83,45 @@ stages:
   - lint
   - build
   - test
+  - integration
   - security
   - sbom
   - release
+
+# =============================================================================
+# Integration lane — real pinned Geode engine, race detector on.
+# Mocks never satisfy a release gate (GEO-GO-UP-001).
+#
+# The service image is pinned by tag AND digest so a republished tag cannot
+# silently change what this gate runs against. It MUST match GEODE_IMAGE in
+# the Makefile and pinnedEngineVersion in integration_version_test.go;
+# TestIntegration_PinnedEngineVersion fails the lane if they drift apart.
+# =============================================================================
+integration:geode:
+  stage: integration
+  image: golang:1.27
+  services:
+    - name: geodedb/geode:0.8.15@sha256:96a194cfce01e59ee1dbe1504aa0ed79c0141f7e2e8b23389da18e73e6adc8ee
+      alias: geode
+      command:
+        - serve
+        - --listen
+        - 0.0.0.0:3141
+        - --listen-grpc
+        - 0.0.0.0:50051
+        - --log-level
+        - info
+  variables:
+    GEODE_AUTH_HMAC_KEY: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef" # gitleaks:allow
+    # Seed the admin credential so the engine does not generate a one-time
+    # password; matches testAdminPassphrase in integration_test.go.
+    GEODE_ADMIN_PASSWORD: "Correct horse battery staple" # gitleaks:allow
+    GEODE_STRICT_TENANCY: "1"
+    GEODE_QUIC_ENABLE_STREAM_MULTIPLEXING: "1"
+    GEODE_TEST_DSN: "geode:3141?insecure=true&user=geode&pass=Correct%20horse%20battery%20staple"
+  script:
+    - go test -race -v -tags=integration -timeout=20m ./...
+  allow_failure: false
+  tags:
+    - company
+    - linux

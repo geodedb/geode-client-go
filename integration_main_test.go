@@ -51,8 +51,15 @@ func runTestMain(m *testing.M) int {
 		ExposedPorts: []string{defaultGeodePort},
 		Env: map[string]string{
 			// Initialise the HMAC chain so the server auto-creates the admin
-			// user with a generated password printed to the log on first boot.
+			// user on first boot.
 			"GEODE_AUTH_HMAC_KEY": testHMACKey,
+			// Seed the admin credential directly. Without this the engine
+			// generates a one-time password and (as of 0.8.15) writes it to
+			// ./.geode_admin_password inside the container rather than to the
+			// log, which the log-scraping bootstrap in setupContainerAuth
+			// cannot read. Seeding it removes the scrape and the reset round
+			// trip entirely and gives every integration test a stable DSN.
+			"GEODE_ADMIN_PASSWORD": testAdminPassphrase,
 		},
 		WaitingFor: wait.ForLog(`"status":"listening"`).WithStartupTimeout(startupTimeout),
 		Cmd: []string{

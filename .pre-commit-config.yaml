@@ -92,7 +92,11 @@ repos:
   # Go linting and formatting
   # =============================================================================
 - repo: https://github.com/golangci/golangci-lint
-  rev: v2.11.4
+  # go.mod targets go 1.27. Releases before v2.13.x are built with an older Go
+  # and cannot read its export data ("export data version 4 is greater than
+  # maximum supported version 2"), so every hook run failed on typecheck.
+  # Matches the golangci_version pinned for go-lint in .gitlab-ci.yml.
+  rev: v2.13.1
   hooks:
   - id: golangci-lint
     args: [--fix]
