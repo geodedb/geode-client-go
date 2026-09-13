@@ -84,7 +84,54 @@ type Conn struct {
 	state      ConnState
 	inTx       bool
 	activeRows *Rows
+
+	// helloCaps, boundGraph and sessionID are what the server said in its
+	// HELLO response: the advertised capability strings, the graph it bound
+	// (empty when unbound) and the session identifier.
+	//
+	// All three are written once during connection setup — either by hello()
+	// on the connection that performed the handshake, or by adoptHelloState()
+	// on a later stream that inherited an already-authenticated pooled QUIC
+	// connection — before the Conn is published to database/sql, and are
+	// read-only thereafter. That is why they need no mutex.
+	//
+	// helloCaps is NOT the SHOW CAPABILITIES feature matrix. The two are
+	// different vocabularies and neither is derived from the other; see
+	// ServerInfo.HelloCapabilities.
+	helloCaps  []string
+	boundGraph string
+	sessionID  string
 }
+
+// adoptHelloState copies the HELLO response metadata recorded on an
+// already-authenticated pooled QUIC connection onto this Conn.
+//
+// Without it, every stream after the first on a pooled connection would report
+// no capabilities and no session: pooledHello short-circuits when the
+// underlying connection is already authenticated, so only the very first Conn
+// ever sees a HelloResponse. Callers must not have published the Conn yet.
+func (c *Conn) adoptHelloState(pc *pooledConn) {
+	c.boundGraph, c.sessionID, c.helloCaps = pc.helloState()
+}
+
+// HelloCapabilities returns the capability strings the server advertised in
+// its HELLO response, in order. The slice is a copy; callers may retain it.
+//
+// These are session/protocol capabilities negotiated at handshake time. They
+// are a DIFFERENT vocabulary from `SHOW CAPABILITIES` (see
+// Connector.ServerInfo) and neither list is derived from the other.
+func (c *Conn) HelloCapabilities() []string {
+	return append([]string(nil), c.helloCaps...)
+}
+
+// BoundGraph returns the graph the server bound during HELLO, or "" when the
+// session is unbound. When non-empty, `USE GRAPH` is rejected for the life of
+// the session.
+func (c *Conn) BoundGraph() string { return c.boundGraph }
+
+// SessionID returns the session identifier the server issued in its HELLO
+// response, or "" when the server issued none.
+func (c *Conn) SessionID() string { return c.sessionID }
 
 // drainExecStream reads all remaining ExecutionResponse frames from the stream
 // until the execution is complete (final data page + optional metrics/heartbeat).
@@ -204,6 +251,7 @@ func connectPooled(ctx context.Context, cfg *Config, pool *QUICPool) (*Conn, err
 // QUIC connection. Uses double-checked locking to ensure exactly one HELLO.
 func pooledHello(ctx context.Context, conn *Conn, transport *QUICTransport, pool *QUICPool) error {
 	if transport.pc.isAuthed() {
+		conn.adoptHelloState(transport.pc)
 		return nil
 	}
 
@@ -213,15 +261,18 @@ func pooledHello(ctx context.Context, conn *Conn, transport *QUICTransport, pool
 	transport.pc.mu.Unlock()
 
 	if alreadyAuthed {
+		conn.adoptHelloState(transport.pc)
 		return nil
 	}
 
-	serverGraph, err := conn.hello(ctx)
+	resp, err := conn.hello(ctx)
 	if err != nil {
 		pool.remove(transport.pc)
 		return err
 	}
-	transport.pc.markAuthed(serverGraph)
+	// Record the HELLO metadata on the pooled connection so every later
+	// stream that skips the handshake above can still report it.
+	transport.pc.markAuthedHello(resp.GetGraph(), resp.GetSessionId(), resp.GetCapabilities())
 	return nil
 }
 
@@ -301,11 +352,12 @@ func connect(ctx context.Context, cfg *Config) (*Conn, error) {
 	// Perform HELLO handshake. If the server binds the graph during HELLO
 	// (server ≥ v0.2.x), serverGraph will be non-empty and we skip the
 	// explicit CREATE/USE GRAPH statements below.
-	serverGraph, err := conn.hello(ctx)
+	resp, err := conn.hello(ctx)
 	if err != nil {
 		_ = transport.Close()
 		return nil, err
 	}
+	serverGraph := resp.GetGraph()
 
 	// Auto-select graph if configured in DSN and not already bound by server.
 	if cfg.Graph != "" && serverGraph == "" {
@@ -385,10 +437,15 @@ func (c *Conn) execInit(ctx context.Context, query string) error {
 	return nil
 }
 
-// hello performs the HELLO handshake with the server.
-// It returns the graph name bound by the server (from HelloResponse.Graph),
-// or "" if the server did not bind a graph during the handshake.
-func (c *Conn) hello(ctx context.Context) (string, error) {
+// hello performs the HELLO handshake with the server and returns the full
+// HelloResponse.
+//
+// The whole response is returned, not just the bound graph, because the
+// server also advertises its session capabilities and a session id there and
+// both were previously decoded and discarded. On success the response fields
+// are recorded on the Conn (helloCaps, boundGraph, sessionID) before it
+// returns, so a Conn always carries the handshake it performed.
+func (c *Conn) hello(ctx context.Context) (*proto.HelloResponse, error) {
 	req := &proto.HelloRequest{
 		Username:          c.cfg.Username,
 		Password:          c.cfg.Password,
@@ -410,28 +467,34 @@ func (c *Conn) hello(ctx context.Context) (string, error) {
 	}
 	msg := proto.NewHelloMessage(req)
 	if err := c.transport.SendProto(ctx, msg); err != nil {
-		return "", fmt.Errorf("failed to send HELLO: %w", err)
+		return nil, fmt.Errorf("failed to send HELLO: %w", err)
 	}
 
 	// Read and validate HELLO response
 	resp, err := c.transport.ReceiveProto(ctx)
 	if err != nil {
-		return "", fmt.Errorf("failed to receive HELLO response: %w", err)
+		return nil, fmt.Errorf("failed to receive HELLO response: %w", err)
 	}
 
 	helloResp := resp.GetHello()
 	if helloResp == nil {
-		return "", fmt.Errorf("expected HELLO response")
+		return nil, fmt.Errorf("expected HELLO response")
 	}
 
 	if !helloResp.GetSuccess() {
-		return "", &DriverError{
+		return nil, &DriverError{
 			Code:    "AUTH",
 			Message: helloResp.GetErrorMessage(),
 		}
 	}
 
-	return helloResp.GetGraph(), nil
+	// Copy the capability slice: the response message is owned by the
+	// transport decode path and must not be aliased past this call.
+	c.helloCaps = append([]string(nil), helloResp.GetCapabilities()...)
+	c.boundGraph = helloResp.GetGraph()
+	c.sessionID = helloResp.GetSessionId()
+
+	return helloResp, nil
 }
 
 // Prepare returns a prepared statement.

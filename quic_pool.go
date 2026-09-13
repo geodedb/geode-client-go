@@ -100,6 +100,13 @@ type pooledConn struct {
 	authed     bool   // HELLO handshake completed on this connection
 	graphBound bool   // server bound graph during HELLO (DSN path)
 	addr       string // remote address for diagnostics
+
+	// HELLO response metadata, recorded by the one stream that performed the
+	// handshake so later streams — which skip it — can still report what the
+	// server said. Guarded by mu.
+	graph     string
+	sessionID string
+	helloCaps []string
 }
 
 // NewQUICPool creates a new QUIC connection pool for the given config.
@@ -407,15 +414,38 @@ func isQUICConnAlive(qConn *quic.Conn) bool {
 	return qConn.Context().Err() == nil
 }
 
-// markAuthed marks a pooled connection as having completed the HELLO handshake.
+// markAuthed marks a pooled connection as having completed the HELLO handshake
+// without recording any further response metadata.
 // If serverGraph is non-empty the server bound the graph during HELLO (DSN
 // path) and subsequent USE GRAPH must be skipped.
 // Thread-safe.
 func (pc *pooledConn) markAuthed(serverGraph string) {
+	pc.markAuthedHello(serverGraph, "", nil)
+}
+
+// markAuthedHello marks the connection authenticated and records the HELLO
+// response metadata every later stream on it will inherit.
+//
+// The capability slice is copied: the caller's slice belongs to a decoded
+// protobuf message whose lifetime ends with the handshake.
+// Thread-safe.
+func (pc *pooledConn) markAuthedHello(serverGraph, sessionID string, caps []string) {
 	pc.mu.Lock()
 	pc.authed = true
 	pc.graphBound = serverGraph != ""
+	pc.graph = serverGraph
+	pc.sessionID = sessionID
+	pc.helloCaps = append([]string(nil), caps...)
 	pc.mu.Unlock()
+}
+
+// helloState returns the HELLO response metadata recorded for this connection.
+// The capability slice is a copy, so the caller may retain it.
+// Thread-safe.
+func (pc *pooledConn) helloState() (graph, sessionID string, caps []string) {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	return pc.graph, pc.sessionID, append([]string(nil), pc.helloCaps...)
 }
 
 // isGraphBound returns whether the server bound the graph during HELLO.

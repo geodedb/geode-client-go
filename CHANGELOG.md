@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Capability discovery: `Connector.ServerInfo(ctx)` reports the engine's
+  `SHOW VERSION` string verbatim, the raw ordered `SHOW CAPABILITIES` rows
+  (`ServerInfo.Rows`), the boolean feature matrix built only from rows whose
+  value is exactly `true`/`false` (`Capabilities`, with `Has`/`Names`; unknown
+  features are unsupported), the version-valued metadata rows kept out of that
+  map (`Metadata`, currently only `sonny_profile_version`), and the HELLO
+  response metadata. Values are never coerced or trimmed, duplicate and empty
+  feature names are rejected, and a non-boolean value from a feature that is
+  not known metadata is an error rather than a silent `false`
+  (`ErrMalformedCapabilityRows`). Feature-name constants (`CapVectorKNN`,
+  `CapReadOnlyExecute`, ...) cover all 59 rows geode 0.8.15 emits and are
+  pinned to `testdata/capabilities_0.8.15.golden` (SONNY-806).
+- The server's HELLO capabilities were previously decoded and discarded. They
+  are now captured per connection and exposed via `(*Conn).HelloCapabilities()`
+  and `ServerInfo.HelloCapabilities`, alongside `(*Conn).BoundGraph()` and
+  `(*Conn).SessionID()`. HELLO capabilities and `SHOW CAPABILITIES` are
+  different vocabularies; neither is derived from the other (SONNY-806).
+
 ### Security
 
 - Read-only connections: `?read_only=true` (aliases `readonly`, `read-only`)
