@@ -90,7 +90,7 @@ func TestIntegration_ReadOnlyRefusesBeforeWire(t *testing.T) {
 // gate is armed independently of the client classifier: an ExecuteRequest
 // carrying read_only=true and an unambiguously mutating program is refused by
 // the engine with GQLSTATE 42501, no matter what the driver thought of it
-// (geode 0.8.15, src/server/quic_connection_handler.zig:6490-6493).
+// (geode 0.8.15, src/server/quic_connection_handler.zig:6493-6496).
 //
 // The classifier is bypassed by driving the connection's transport directly
 // rather than by a test-only switch in production code — this is the same

@@ -26,7 +26,7 @@ var ErrReadOnly = errors.New("geode: connection is read-only")
 // ExecuteRequest.read_only = Config.ReadOnly, so a statement this classifier
 // lets through is still refused by the engine with GQLSTATE 42501, and that
 // refusal holds regardless of the principal's role
-// (geode 0.8.15, src/server/quic_connection_handler.zig:6490-6493).
+// (geode 0.8.15, src/server/quic_connection_handler.zig:6493-6496).
 //
 // The refusal emits nothing, so it is safe inside an open transaction: the
 // stream stays in sync, the server-side transaction is untouched, and the
@@ -218,7 +218,7 @@ var readOnlyProcedures = map[string]bool{
 // This is defence in depth in front of the server's own read-only refusal,
 // not a replacement for it. The wire flag (ExecuteRequest.read_only) is
 // always set too, so a classifier miss still fails at the engine with
-// GQLSTATE 42501 (src/server/quic_connection_handler.zig:6490-6493).
+// GQLSTATE 42501 (src/server/quic_connection_handler.zig:6493-6496).
 func IsMutatingStatement(query string) bool {
 	stripped, ok := stripGQLLiterals(query)
 	if !ok {
@@ -241,15 +241,19 @@ func IsMutatingStatement(query string) bool {
 // statementMutates classifies one already-stripped, already-uppercased
 // statement of a program.
 func statementMutates(stmt string) bool {
-	head, rest := leadingKeyword(stmt)
+	head, _ := leadingKeyword(stmt)
 	switch {
 	case head == "":
 		return true // no leading identifier: fail closed
 	case head == "CALL":
-		if !readOnlyProcedures[callTarget(rest)] {
-			return true
-		}
+		// Classified by procedure target in callsMutate below, together
+		// with every other CALL in the statement.
 	case !readOnlyLeadingKeywords[head]:
+		return true
+	}
+
+	// Every CALL is classified by its target, wherever it sits.
+	if callsMutate(stmt) {
 		return true
 	}
 
@@ -259,6 +263,41 @@ func statementMutates(stmt string) bool {
 		if containsWord(stmt, kw) {
 			return true
 		}
+	}
+	return false
+}
+
+// callsMutate reports whether any CALL in stmt targets a procedure that is not
+// on the closed read-only allow-list.
+//
+// Every whole-word CALL is classified, not only a leading one. GQL admits an
+// inline CALL clause (`MATCH (n) CALL geode.auth.user_create('bob') RETURN n`)
+// and a CALL subquery block (`... CALL { ... }`), and the mutating procedure
+// names the engine excludes — geode.auth.user_create, geode.rls.add_*,
+// geode.ts.insert_many, cdc.start — carry no whole-word mutating keyword
+// (`_` is an identifier byte, so USER_CREATE never matches CREATE). Without
+// this scan those shapes would classify read-only client-side and rely purely
+// on the wire flag, which contradicts the file's "unlisted means write"
+// contract.
+//
+// The engine classifies the same shapes through the same table
+// (geode 0.8.15, src/query/query_traits.zig:460-480 —
+// `q.call_clause` and `q.initial_call_subquery` both routed through
+// procedure_access.classifyCallProcedure, fail-closed on unlisted names).
+//
+// Fail-closed: an empty target (bare CALL, or the `CALL {` subquery form,
+// anywhere in the statement) is unknown and therefore mutating.
+func callsMutate(stmt string) bool {
+	for off := 0; off < len(stmt); {
+		i := indexWord(stmt[off:], "CALL")
+		if i < 0 {
+			return false
+		}
+		after := off + i + len("CALL")
+		if !readOnlyProcedures[callTarget(stmt[after:])] {
+			return true
+		}
+		off = after
 	}
 	return false
 }
@@ -319,6 +358,14 @@ func stripGQLLiterals(s string) (string, bool) {
 			}
 			b.WriteByte(' ')
 			i = end
+		// `--` is stripped for classification only. The engine refuses any
+		// program containing a `--` comment outright with GQLSTATE 42000
+		// (GB02CommentDisabled, geode 0.8.15
+		// src/server/quic_connection_handler.zig:6431-6433), so no `--`
+		// statement ever executes. Stripping it here just stops the text
+		// behind it from laundering a write past this classifier
+		// (`-- MATCH (n) RETURN n\nCREATE (n:X)`); the refusal a caller
+		// ultimately sees for such a program comes from the engine.
 		case s[i] == '/' && i+1 < len(s) && s[i+1] == '/',
 			s[i] == '-' && i+1 < len(s) && s[i+1] == '-':
 			b.WriteByte(' ')
@@ -368,19 +415,33 @@ func skipLiteral(s string, start int) (int, bool) {
 // containsWord reports whether word appears in s delimited by non-identifier
 // characters, so "CREATED_AT" does not match "CREATE".
 func containsWord(s, word string) bool {
-	for i := 0; i+len(word) <= len(s); i++ {
-		if s[i:i+len(word)] != word {
-			continue
+	return indexWord(s, word) >= 0
+}
+
+// indexWord returns the index of the first occurrence of word in s delimited
+// by non-identifier characters, or -1.
+//
+// The candidate search is delegated to strings.Index (SIMD-accelerated in the
+// runtime) rather than a byte-at-a-time scan: statementMutates probes the same
+// statement with 18 mutating keywords plus every CALL, so the naive scan cost
+// 18 passes of per-byte comparison over the whole statement. Only the
+// word-boundary check stays hand-written. s is already ASCII-uppercased by
+// stripGQLLiterals, so a byte-exact search is correct here and no case folding
+// (which could rewrite invalid UTF-8) is introduced.
+func indexWord(s, word string) int {
+	for off := 0; off+len(word) <= len(s); {
+		i := strings.Index(s[off:], word)
+		if i < 0 {
+			return -1
 		}
-		if i > 0 && isIdentByte(s[i-1]) {
-			continue
+		i += off
+		end := i + len(word)
+		if (i == 0 || !isIdentByte(s[i-1])) && (end == len(s) || !isIdentByte(s[end])) {
+			return i
 		}
-		if j := i + len(word); j < len(s) && isIdentByte(s[j]) {
-			continue
-		}
-		return true
+		off = i + 1
 	}
-	return false
+	return -1
 }
 
 func isIdentByte(c byte) bool {

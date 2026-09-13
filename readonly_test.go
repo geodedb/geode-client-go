@@ -140,6 +140,20 @@ func TestIsMutatingStatement_CallAllowList(t *testing.T) {
 		if IsMutatingStatement(q) {
 			t.Errorf("IsMutatingStatement(%q) = true, want false (engine classifies it read_only)", q)
 		}
+		// The same name inline, which the engine parses as q.call_clause
+		// (geode 0.8.15 src/query/query_traits.zig:467-475), must classify
+		// the same way.
+		inline := "MATCH (n) CALL " + name + "() RETURN n"
+		if IsMutatingStatement(inline) {
+			t.Errorf("IsMutatingStatement(%q) = true, want false (engine classifies it read_only)", inline)
+		}
+	}
+
+	// An inline CALL to a listed read procedure is admitted, so the fix does
+	// not simply refuse every non-leading CALL.
+	readInline := "MATCH (n) CALL geode.fts.search('i','q') YIELD node RETURN node"
+	if IsMutatingStatement(readInline) {
+		t.Errorf("IsMutatingStatement(%q) = true, want false", readInline)
 	}
 
 	mutating := []string{
@@ -159,6 +173,21 @@ func TestIsMutatingStatement_CallAllowList(t *testing.T) {
 		"CALL { MATCH (n) RETURN n }",
 		// A bare CALL with no target is unclassifiable.
 		"CALL",
+
+		// Non-leading CALL. The engine classifies an inline call clause and a
+		// CALL subquery through the same procedure table
+		// (geode 0.8.15 src/query/query_traits.zig:460-480), and none of these
+		// procedure names carries a whole-word mutating keyword — `_` is an
+		// identifier byte, so USER_CREATE never matches CREATE — which is why
+		// only the per-CALL target scan catches them.
+		"MATCH (n) CALL geode.auth.user_create('bob') RETURN n",
+		"MATCH (n) CALL geode.rls.add_deny_policy('p') RETURN n",
+		"MATCH (n) CALL geode.ts.insert_many('m', []) RETURN n",
+		"MATCH (n) CALL cdc.start() RETURN n",
+		"CALL geode.fts.search('i','q') CALL geode.auth.user_create('bob')",
+		// A CALL subquery block anywhere in the statement is not
+		// name-classifiable either: fail closed.
+		"MATCH (n) CALL { MATCH (m) RETURN m } RETURN n",
 	}
 	for _, q := range mutating {
 		if !IsMutatingStatement(q) {
@@ -203,3 +232,41 @@ func TestFormatDSN_RoundTripsReadOnly(t *testing.T) {
 		t.Errorf("FormatDSN() = %q lost read_only", cfg.FormatDSN())
 	}
 }
+
+// BenchmarkIsMutatingStatement makes the per-statement classification cost
+// visible: guardReadOnly runs on every Exec/Query of a read-only connection,
+// so this sits directly in the hot path. The shapes cover a short read, a
+// realistic read with literals and comments, an inline CALL, and the
+// concatenated batch program graph/batch.go emits.
+func BenchmarkIsMutatingStatement(b *testing.B) {
+	cases := []struct {
+		name  string
+		query string
+	}{
+		{"short read", "MATCH (n:X) RETURN n"},
+		{
+			"read with literals and comment",
+			"/* audit */ MATCH (n:Person) WHERE n.name = 'alice' AND n.city = \"berlin\" " +
+				"RETURN n.name, n.created_at ORDER BY n.created_at DESC LIMIT 25",
+		},
+		{"inline call", "MATCH (n) CALL geode.fts.search('idx','term') YIELD node RETURN node"},
+		{
+			"batch program",
+			"/*+BATCH*/ MATCH (n:X) RETURN n;\nMATCH (m:Y) RETURN m;\nSHOW CAPABILITIES;\n",
+		},
+		{"trailing write", "MATCH (n:X) WHERE n.a = 'x' SET n.b = 1"},
+	}
+	for _, c := range cases {
+		b.Run(c.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(int64(len(c.query)))
+			for i := 0; i < b.N; i++ {
+				sinkIsMutating = IsMutatingStatement(c.query)
+			}
+		})
+	}
+}
+
+// sinkIsMutating keeps the benchmark's result live so the call is not
+// optimised away.
+var sinkIsMutating bool

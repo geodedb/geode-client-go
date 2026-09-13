@@ -239,9 +239,23 @@ func pooledGraphInit(ctx context.Context, conn *Conn, cfg *Config, transport *QU
 		return nil
 	}
 
-	// CREATE GRAPH is idempotent — safe even if server already created it.
-	if err := conn.execInit(ctx, "CREATE GRAPH IF NOT EXISTS "+cfg.Graph); err != nil {
-		return fmt.Errorf("create graph %s: %w", cfg.Graph, err)
+	// A read-only connection must not create the graph on the way in, exactly
+	// as on the standalone path in connect() below: "cannot even emit a write"
+	// includes connection setup, and since execInit carries
+	// ExecuteRequest.read_only the engine would refuse CREATE GRAPH with
+	// GQLSTATE 42501 (.CreateGraph => true, geode 0.8.15
+	// src/query/query_traits.zig:317) and connection setup would fail outright.
+	// USE GRAPH alone is not a graph-store mutation server-side, so it still
+	// succeeds under the flag — and fails honestly when the graph is absent,
+	// which is the correct answer for a reader.
+	//
+	// This is the DEFAULT path: Connector.Connect → connectPooled reaches it
+	// for every sql.Open("geode", …) whose HELLO did not bind the graph.
+	if !cfg.ReadOnly {
+		// CREATE GRAPH is idempotent — safe even if server already created it.
+		if err := conn.execInit(ctx, "CREATE GRAPH IF NOT EXISTS "+cfg.Graph); err != nil {
+			return fmt.Errorf("create graph %s: %w", cfg.Graph, err)
+		}
 	}
 	if err := conn.execInit(ctx, "USE GRAPH "+cfg.Graph); err != nil {
 		return fmt.Errorf("use graph %s: %w", cfg.Graph, err)
@@ -321,6 +335,20 @@ func connect(ctx context.Context, cfg *Config) (*Conn, error) {
 // the connection is handed to the pool). It does not acquire the mutex because
 // the connection is not yet shared. This is used for graph selection and other
 // post-HELLO setup queries.
+//
+// Setup statements are deliberately NOT routed through guardReadOnly. The only
+// statement a read-only connection sends here is USE GRAPH, and the client
+// classifier calls USE mutating by construction: USE is not on the closed
+// read-only leading allow-list and is in mutatingKeywords, because a driver
+// that let an unlisted keyword through would be failing open (readonly.go).
+// The engine disagrees in the safe direction — USE GRAPH selects a session
+// target and is not a graph-store mutation (`else => false`, geode 0.8.15
+// src/query/query_traits.zig:357-359) — so it is accepted under
+// ExecuteRequest.read_only. Guarding here would therefore break every
+// read-only DSN that names a graph, refusing connection setup over a statement
+// the server itself considers a read. The wire flag below still applies, so
+// the engine remains the authority: anything genuinely mutating sent from here
+// is refused with GQLSTATE 42501.
 func (c *Conn) execInit(ctx context.Context, query string) error {
 	msg := proto.NewExecuteMessage(&proto.ExecuteRequest{
 		Query:    query,
