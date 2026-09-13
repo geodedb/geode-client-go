@@ -592,13 +592,11 @@ func (c *Conn) ExecContext(ctx context.Context, query string, args []driver.Name
 		}
 	}
 
-	// Rewrite placeholders and build params
-	newQuery, params := rewritePlaceholders(query, args)
-
-	// Convert params to Param slice for protobuf
-	var protoParams []*proto.Param
-	for k, v := range params {
-		protoParams = append(protoParams, proto.MakeParam(k, v))
+	// Bind `?` placeholders to typed wire parameters. No argument value is
+	// ever written into the query text (SONNY-806).
+	newQuery, protoParams, err := bindParameters(query, args)
+	if err != nil {
+		return nil, err
 	}
 
 	// Send Execute
@@ -676,13 +674,12 @@ func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.Nam
 		}
 	}
 
-	// Rewrite placeholders and build params
-	newQuery, params := rewritePlaceholders(query, args)
-
-	// Convert params to Param slice for protobuf
-	var protoParams []*proto.Param
-	for k, v := range params {
-		protoParams = append(protoParams, proto.MakeParam(k, v))
+	// Bind `?` placeholders to typed wire parameters. No argument value is
+	// ever written into the query text (SONNY-806).
+	newQuery, protoParams, err := bindParameters(query, args)
+	if err != nil {
+		c.mu.Unlock()
+		return nil, err
 	}
 
 	// Send Execute
@@ -908,126 +905,34 @@ func (c *Conn) IsValid() bool {
 }
 
 // CheckNamedValue validates a named value before use.
+//
+// Values of the driver.Value scalar set (plus []byte) are passed through
+// untouched so bindParameters can encode them as typed wire parameters.
+// Anything else returns driver.ErrSkip, which hands the value to
+// database/sql's default converter: it either narrows the value into that
+// set (int -> int64, float32 -> float64, a driver.Valuer's Value()) or
+// rejects it loudly. Nothing is silently stringified.
 func (c *Conn) CheckNamedValue(nv *driver.NamedValue) error {
 	if nv.Name != "" {
 		if err := validate.ParamName(nv.Name); err != nil {
 			return err
 		}
-	}
-	return nil
-}
-
-// rewritePlaceholders replaces ? placeholders by inlining argument values
-// directly into the query string. Named $param references are also collected
-// into the params map for server-side resolution.
-//
-// Inlining is necessary because the Geode server does not resolve $param
-// references inside property maps (e.g. CREATE/MERGE {key: $p1}) — only in
-// expression contexts (RETURN, WHERE). By inlining, all positional args work
-// regardless of GQL clause.
-func rewritePlaceholders(query string, args []driver.NamedValue) (string, map[string]any) {
-	params := make(map[string]any)
-
-	var b strings.Builder
-	b.Grow(len(query) + 32*len(args))
-
-	argi := 0
-	for i := 0; i < len(query); i++ {
-		ch := query[i]
-		if ch == '?' {
-			argi++
-
-			// Find matching arg by ordinal and inline its value.
-			var val any
-			for _, nv := range args {
-				if nv.Ordinal == argi {
-					val = nv.Value
-					break
-				}
-			}
-			b.WriteString(inlineValue(val))
-		} else {
-			b.WriteByte(ch)
+		// Driver-generated placeholders own the "_gq" namespace; a caller
+		// name in that namespace could shadow a positional argument.
+		if strings.HasPrefix(nv.Name, generatedParamPrefix) {
+			return fmt.Errorf("%w: %q", ErrReservedParamName, nv.Name)
 		}
 	}
-
-	// Include explicitly named args for $name references in the query.
-	for _, nv := range args {
-		if nv.Name != "" {
-			params[nv.Name] = nv.Value
-		}
+	switch nv.Value.(type) {
+	case nil, string, []byte, bool, int64, float64:
+		return nil
 	}
-
-	return b.String(), params
-}
-
-// gqlStringEscaper escapes a Go string for safe embedding in a GQL
-// single-quoted string literal. Backslashes must be escaped first to
-// prevent sequences like \' from being misinterpreted as an escaped
-// quote by the GQL parser (which supports both ” and \' escaping).
-//
-//nolint:gochecknoglobals // package-level replacer avoids allocation per call
-var gqlStringEscaper = strings.NewReplacer(
-	`\`, `\\`,
-	"'", "''",
-	"\n", `\n`,
-	"\r", `\r`,
-	"\t", `\t`,
-)
-
-// inlineValue converts a Go value to a GQL literal string suitable for
-// embedding directly in a query. Strings are single-quoted with backslashes,
-// quotes, and control characters properly escaped.
-func inlineValue(val any) string {
-	if val == nil {
-		return string(GQLTypeNull)
+	// Slices, arrays and maps keep their structural list_val/map_val encoding
+	// (ENG-3910); the default converter would reject them outright.
+	if isContainerParamValue(nv.Value) {
+		return nil
 	}
-	switch v := val.(type) {
-	case string:
-		return "'" + gqlStringEscaper.Replace(v) + "'"
-	case int:
-		return fmt.Sprintf("%d", v)
-	case int8:
-		return fmt.Sprintf("%d", v)
-	case int16:
-		return fmt.Sprintf("%d", v)
-	case int32:
-		return fmt.Sprintf("%d", v)
-	case int64:
-		return fmt.Sprintf("%d", v)
-	case uint:
-		return fmt.Sprintf("%d", v)
-	case uint8:
-		return fmt.Sprintf("%d", v)
-	case uint16:
-		return fmt.Sprintf("%d", v)
-	case uint32:
-		return fmt.Sprintf("%d", v)
-	case uint64:
-		return fmt.Sprintf("%d", v)
-	case float32:
-		return fmt.Sprintf("%g", v)
-	case float64:
-		return fmt.Sprintf("%g", v)
-	case bool:
-		if v {
-			return "TRUE"
-		}
-		return "FALSE"
-	default:
-		return "'" + gqlStringEscaper.Replace(fmt.Sprintf("%v", v)) + "'"
-	}
-}
-
-// countPlaceholders counts the number of ? placeholders in a query.
-func countPlaceholders(query string) int {
-	count := 0
-	for _, ch := range query {
-		if ch == '?' {
-			count++
-		}
-	}
-	return count
+	return driver.ErrSkip
 }
 
 // trailingFrameDrainTimeout is the maximum time spent in the blocking drain

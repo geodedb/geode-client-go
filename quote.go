@@ -68,12 +68,15 @@ func QuoteIdent(name string) (string, error) {
 
 // QuoteString returns s wrapped in GQL single quotes, with backslashes and
 // single quotes properly escaped. ASCII control characters (< 0x20 or 0x7F)
-// are rejected with ErrInvalidString rather than escaped; this is intentional
-// because QuoteString is meant for user-supplied data where control characters
-// are almost always an error (injection risk), whereas the internal gqlStringEscaper
-// in conn.go handles trusted internal values and escapes them. Escape order:
-// backslash first (\ → \\), then single quotes (' becomes two single quotes),
-// matching the internal gqlStringEscaper in conn.go.
+// are rejected with ErrInvalidString rather than escaped, because a control
+// character in user-supplied data is almost always an error (injection risk).
+// Escape order: backslash first (\ → \\), then single quotes (' becomes two
+// single quotes).
+//
+// QuoteString is for the GQL statements that cannot take a parameter at all
+// (DDL identifiers and similar). Query VALUES must never be quoted into the
+// query text: pass them as `?` placeholders so bindParameters sends them as
+// typed wire parameters. The driver no longer inlines any argument value.
 func QuoteString(s string) (string, error) {
 	for _, r := range s {
 		if r < 0x20 || r == 0x7f {
