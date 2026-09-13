@@ -23,10 +23,11 @@ import (
 
 const (
 	// generatedAdminPasswordFile is where engines that no longer print the
-	// generated admin password write it instead. The path is relative to the
-	// image's workdir (/home/geode), which is what the startup line
+	// generated admin password write it instead. The engine writes it under
+	// --data-dir (see the SONNY-1218 workaround on this test's container
+	// below, which sets --data-dir /data), which is what the startup line
 	// "written to ./.geode_admin_password" refers to.
-	generatedAdminPasswordFile = "/home/geode/.geode_admin_password"
+	generatedAdminPasswordFile = "/data/.geode_admin_password"
 
 	// resetPassphrase is the credential the forced reset moves the admin
 	// account to. Deliberately distinct from testAdminPassphrase so a mix-up
@@ -101,6 +102,15 @@ func TestIntegration_AdminPasswordResetFlow(t *testing.T) {
 				"serve",
 				"--listen", "0.0.0.0:3141",
 				"--log-level", "info",
+				// SONNY-1218 workaround: the image's default CMD passes
+				// --data-dir /data, but this harness overrides Cmd and drops
+				// it. Without a storage adapter the engine's node_scan_stream
+				// fast path returns empty rows instead of declining, which
+				// silently corrupts results. Required until the engine
+				// declines the fast path when no adapter is configured.
+				// Container-local filesystem only; nothing is mounted from
+				// the host.
+				"--data-dir", "/data",
 			},
 		},
 		Started: true,

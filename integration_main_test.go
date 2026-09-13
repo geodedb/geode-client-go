@@ -64,6 +64,14 @@ func runTestMain(m *testing.M) int {
 			"serve",
 			"--listen", "0.0.0.0:3141",
 			"--log-level", "info",
+			// SONNY-1218 workaround: the image's default CMD passes --data-dir
+			// /data, but this harness overrides Cmd and drops it. Without a
+			// storage adapter the engine's node_scan_stream fast path returns
+			// empty rows instead of declining, which silently corrupts several
+			// integration tests' results. Required until the engine declines
+			// the fast path when no adapter is configured. Container-local
+			// filesystem only; nothing is mounted from the host.
+			"--data-dir", "/data",
 		},
 	}
 
