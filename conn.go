@@ -829,7 +829,11 @@ func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.Nam
 	if execResp == nil {
 		c.markConnFailed()
 		c.mu.Unlock()
-		return nil, fmt.Errorf("expected Execute response")
+		// Name the frame that arrived instead. A stream that answers EXECUTE
+		// with something else is desynchronised, and which frame it was is the
+		// whole diagnosis (a stale pull response means a previous result set
+		// was not drained; a hello means the session was re-handshaked).
+		return nil, fmt.Errorf("expected Execute response, got %s", describeServerMessage(resp))
 	}
 
 	if execResp.GetError() != nil {

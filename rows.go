@@ -19,7 +19,11 @@ type ColumnInfo struct {
 
 // Rows represents a result set from a query.
 type Rows struct {
-	conn      *Conn
+	conn *Conn
+	// ctx is the context of the query that produced these rows. Paging
+	// (fetchNextPage) reads more frames from the wire, so cancellation must
+	// be observed between pages and reported as ctx.Err() rather than as a
+	// transport error. See abortOnCancel.
 	ctx       context.Context
 	columns   []ColumnInfo
 	pageSize  int
@@ -52,6 +56,41 @@ func (r *Rows) Columns() []string {
 	return names
 }
 
+// abortOnCancel reports the query context's error — wrapped, so callers still
+// match it with errors.Is(err, context.Canceled) — once that context is done,
+// and retires the connection on the way out. It returns nil while the context
+// is live.
+//
+// Retiring matters because a cancelled stream is left desynchronised: a PULL
+// may be in flight and the server still owes pages nobody will read. Marking
+// the connection failed makes Conn.IsValid() false, so database/sql discards
+// the connection instead of handing the half-read stream to the next borrower.
+//
+// There is no client-side cancel message to send instead. The 0.8.15 wire
+// protocol's QuicClientMessage oneof carries only hello, execute, pull, ping,
+// cdc_diag, cdc_ctrl, begin, commit, rollback, savepoint, rollback_to, backup,
+// restore and upload_backup (geode src/proto/geode.proto:36-53) — no DISCARD,
+// no reset. Two engine-side mechanisms bound the abandoned work instead: the
+// protocol is pull-driven (the server produces a page only in answer to a
+// PULL, so no longer pulling already stops it), and closing the stream/
+// connection trips the per-stream cancel source the handler binds to running
+// scans (geode src/server/quic_connection_handler.zig:5730-5742), with the
+// wall-clock deadline as the backstop for a per-stream reset.
+//
+// Callers must hold the Conn mutex, which markConnFailed requires: QueryContext
+// transfers that lock to the Rows and releaseRows returns it.
+func (r *Rows) abortOnCancel() error {
+	if r.ctx == nil {
+		return nil
+	}
+	err := r.ctx.Err()
+	if err == nil {
+		return nil
+	}
+	r.conn.markConnFailed()
+	return fmt.Errorf("geode: rows aborted: %w", err)
+}
+
 // Close closes the rows iterator.
 func (r *Rows) Close() error {
 	r.mu.Lock()
@@ -61,6 +100,15 @@ func (r *Rows) Close() error {
 	}
 	r.closed = true
 	r.mu.Unlock()
+
+	// A Rows abandoned before its final page under a cancelled context leaves
+	// the stream mid-result; retire the connection rather than return a
+	// desynchronised stream to the pool. Rows that reached their final page
+	// are clean and stay poolable even if the context has since been
+	// cancelled.
+	if !r.final && r.ctx != nil && r.ctx.Err() != nil {
+		r.conn.markConnFailed()
+	}
 
 	// Release the connection lock
 	r.conn.releaseRows(r)
@@ -75,6 +123,13 @@ func (r *Rows) Next(dest []driver.Value) error {
 		return ErrRowsClosed
 	}
 	r.mu.Unlock()
+
+	// Checked before serving a buffered row, so a cancelled query stops
+	// immediately instead of draining the page it already holds, and before
+	// every PULL fetchNextPage would otherwise issue.
+	if err := r.abortOnCancel(); err != nil {
+		return err
+	}
 
 	for {
 		// Check if we have buffered protobuf rows
@@ -232,6 +287,11 @@ func convertProtoValue(v *proto.Value) driver.Value {
 
 // fetchNextPage fetches the next page of results from the server via PULL.
 func (r *Rows) fetchNextPage() error {
+	// Never put another PULL on the wire for a query the caller abandoned.
+	if err := r.abortOnCancel(); err != nil {
+		return err
+	}
+
 	// Send a PullRequest to get the next page
 	r.requestID++
 	pullMsg := proto.NewPullMessage(&proto.PullRequest{
@@ -239,11 +299,23 @@ func (r *Rows) fetchNextPage() error {
 		PageSize:  uint32(r.pageSize), //nolint:gosec // G115: page size fits uint32
 	})
 	if err := r.conn.transport.SendProto(r.ctx, pullMsg); err != nil {
+		// A cancellation racing the write surfaces here as whatever the
+		// transport noticed first; report it as the context error.
+		if cancelled := r.abortOnCancel(); cancelled != nil {
+			return cancelled
+		}
 		return err
 	}
 
+	// This read blocks until the page arrives. ReceiveProto watches r.ctx and
+	// forces a read deadline the instant it is done, so a cancellation while
+	// parked here unblocks promptly — and is reported as the context error,
+	// not as the transport read_length/read error it manifests as.
 	resp, err := r.conn.transport.ReceiveProto(r.ctx)
 	if err != nil {
+		if cancelled := r.abortOnCancel(); cancelled != nil {
+			return cancelled
+		}
 		return err
 	}
 
