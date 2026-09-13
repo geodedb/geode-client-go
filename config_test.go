@@ -1,6 +1,7 @@
 package geode
 
 import (
+	"errors"
 	"os"
 	"testing"
 )
@@ -807,5 +808,54 @@ func TestConfig_FormatDSN_PasswordOnly(t *testing.T) {
 	}
 	if cfg2.Password != "s3cr3t" {
 		t.Errorf("password round-trip failed: got %q, want %q", cfg2.Password, "s3cr3t")
+	}
+}
+
+// TestConfig_StrictTenancyRequiresTenant pins the strict-tenancy config gate.
+// The engine rejects tenant-scoped operations from a session whose tenant is
+// unset, empty, or the reserved "default" sentinel when strict tenancy is on
+// (geode docs/security/MULTI_TENANT_HARDENING.md, GAP-0840/GAP-0848). Failing
+// at Validate() time turns that into a startup error, not a runtime surprise.
+func TestConfig_StrictTenancyRequiresTenant(t *testing.T) {
+	cfg, err := ParseDSN("quic://h:3141?strict_tenancy=true")
+	if err != nil {
+		t.Fatalf("ParseDSN: %v", err)
+	}
+	if !cfg.StrictTenancy {
+		t.Fatal("StrictTenancy = false, want true")
+	}
+	if err := cfg.Validate(); !errors.Is(err, ErrTenantRequired) {
+		t.Fatalf("Validate() = %v, want ErrTenantRequired", err)
+	}
+
+	cfg.Tenant = "acme"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() with tenant = %v, want nil", err)
+	}
+
+	// "default" is the engine's reserved permissive tenant; under strict
+	// tenancy it is not a real tenant.
+	cfg.Tenant = "default"
+	if err := cfg.Validate(); !errors.Is(err, ErrTenantRequired) {
+		t.Fatalf(`Validate() with tenant "default" = %v, want ErrTenantRequired`, err)
+	}
+}
+
+// TestConfig_StrictTenancyRoundTripsThroughFormatDSN proves the flag survives
+// ParseDSN -> FormatDSN -> ParseDSN, so a re-parsed DSN keeps the gate armed.
+func TestConfig_StrictTenancyRoundTripsThroughFormatDSN(t *testing.T) {
+	cfg, err := ParseDSN("quic://h:3141?strict_tenancy=true&tenant=acme")
+	if err != nil {
+		t.Fatalf("ParseDSN: %v", err)
+	}
+	round, err := ParseDSN(cfg.FormatDSN())
+	if err != nil {
+		t.Fatalf("ParseDSN(FormatDSN()): %v", err)
+	}
+	if !round.StrictTenancy {
+		t.Fatalf("round-tripped StrictTenancy = false, want true (dsn=%q)", cfg.FormatDSN())
+	}
+	if round.Tenant != "acme" {
+		t.Fatalf("round-tripped Tenant = %q, want \"acme\"", round.Tenant)
 	}
 }

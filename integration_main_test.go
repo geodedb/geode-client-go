@@ -16,6 +16,7 @@ import (
 	"context"
 	"log"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -58,6 +59,13 @@ func runTestMain(m *testing.M) int {
 			// cannot read. Seeding it removes the scrape and the reset round
 			// trip entirely and gives every integration test a stable DSN.
 			"GEODE_ADMIN_PASSWORD": testAdminPassphrase,
+			// Match the CI integration service (.gitlab-ci.yml). Strict
+			// tenancy makes a tenant-scoped operation from a session with no
+			// concrete tenant scope a 42501 refusal instead of a silent
+			// all-tenants read, which is the only mode in which
+			// integration_tenancy_test.go proves anything.
+			"GEODE_STRICT_TENANCY":                  "1",
+			"GEODE_QUIC_ENABLE_STREAM_MULTIPLEXING": "1",
 		},
 		WaitingFor: wait.ForLog(`"status":"listening"`).WithStartupTimeout(startupTimeout),
 		Cmd: []string{
@@ -106,4 +114,23 @@ func runTestMain(m *testing.M) int {
 	}
 
 	return code
+}
+
+// hostPortFromDSN extracts "host:port" from the shared integration DSN so a
+// test can build a variant DSN with different credentials. It tolerates both
+// shapes the suite uses: the scheme-less "host:port?..." produced by
+// containerDSN and the "scheme://user:pass@host:port?..." form accepted by
+// ParseDSN.
+func hostPortFromDSN(dsn string) string {
+	s := dsn
+	if i := strings.Index(s, "://"); i >= 0 {
+		s = s[i+3:]
+	}
+	if i := strings.IndexByte(s, '?'); i >= 0 {
+		s = s[:i]
+	}
+	if i := strings.LastIndexByte(s, '@'); i >= 0 {
+		s = s[i+1:]
+	}
+	return s
 }

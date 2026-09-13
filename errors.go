@@ -3,6 +3,7 @@ package geode
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // ISO/IEC 39075 status class constants.
@@ -19,6 +20,10 @@ const (
 	StatusDuplicate        = "42P07" // Duplicate object
 	StatusInvalidParam     = "22023" // Invalid parameter value
 	StatusSystem           = "58000" // System error
+	// StatusPermissionDenied is the engine's permission-denied class. The
+	// engine maps error.Unauthorized, error.TenantScopeRequired and
+	// error.SearchNotPermitted onto it (geode src/server/proto_util.zig).
+	StatusPermissionDenied = "42501"
 )
 
 // Sentinel errors for common conditions.
@@ -39,6 +44,22 @@ var (
 	// deadlocking. Raise the pool size via DSN ?pool_size=N to allow more
 	// concurrent connections.
 	ErrPoolExhausted = errors.New("geode: connection pool exhausted (all connections busy at pool_size)")
+
+	// ErrTenantRequired reports a configuration that enables strict tenancy
+	// without naming a concrete tenant. The engine rejects tenant-scoped
+	// operations from a session whose tenant is unset, empty, or "default"
+	// (geode/docs/security/MULTI_TENANT_HARDENING.md); failing at config
+	// time turns that into a startup error instead of a runtime surprise.
+	ErrTenantRequired = errors.New("geode: tenant is required when strict tenancy is enabled")
+
+	// ErrTenantScopeRequired is the typed form of the engine's strict-tenancy
+	// refusal. A strict-tenancy engine answers a tenant-scoped operation from
+	// a session with no concrete tenant scope with GQLSTATE 42501 and the
+	// message "Tenant scope required: ..." (geode
+	// src/server/proto_util.zig, error.TenantScopeRequired). Callers gate
+	// startup on errors.Is(err, ErrTenantScopeRequired) rather than matching
+	// the engine's prose.
+	ErrTenantScopeRequired = errors.New("geode: strict tenancy requires a concrete tenant scope")
 )
 
 // Error is the interface for all Geode errors.
@@ -92,8 +113,35 @@ func (e *DriverError) IsRetryable() bool {
 	}
 }
 
+// tenantScopeRequiredPrefix is the stable leading text of the engine's
+// strict-tenancy refusal message. Pinned to
+// geode src/server/proto_util.zig:
+//
+//	error.TenantScopeRequired => .{ .code = "42501", .message =
+//	    "Tenant scope required: strict tenancy is enabled and this session
+//	     has no concrete tenant scope" },
+//
+// Only the prefix is matched: 42501 alone is the whole permission-denied
+// class (plain authorization denials and the FLE READ_PLAINTEXT refusal share
+// it), so the code by itself cannot distinguish a tenancy refusal.
+const tenantScopeRequiredPrefix = "Tenant scope required"
+
+// isTenantScopeRefusal reports whether this server error is the engine's
+// strict-tenancy refusal. Both Code and Class are consulted because the
+// GQLSTATE arrives in Code on the Execute error path (conn.go) while
+// hand-built errors may carry it in Class.
+func (e *DriverError) isTenantScopeRefusal() bool {
+	if e.Code != StatusPermissionDenied && e.Class != StatusPermissionDenied {
+		return false
+	}
+	return strings.HasPrefix(e.Message, tenantScopeRequiredPrefix)
+}
+
 // Is provides errors.Is support.
 func (e *DriverError) Is(target error) bool {
+	if target == ErrTenantScopeRequired {
+		return e.isTenantScopeRefusal()
+	}
 	if t, ok := target.(*DriverError); ok {
 		if t.Code != "" && e.Code == t.Code {
 			return true

@@ -316,3 +316,72 @@ func TestIsSyntaxError(t *testing.T) {
 		t.Error("IsSyntaxError(non-driver) = true, want false")
 	}
 }
+
+// TestDriverError_IsTenantScopeRequired pins the strict-tenancy refusal's
+// typed form. The engine answers a tenant-scoped operation from a session with
+// no concrete tenant scope with GQLSTATE 42501 and a "Tenant scope required:"
+// message (geode src/server/proto_util.zig, error.TenantScopeRequired), and
+// the Execute error path (conn.go) puts that GQLSTATE in DriverError.Code.
+// Sonny's strict-tenancy startup gate matches on the sentinel, never prose.
+func TestDriverError_IsTenantScopeRequired(t *testing.T) {
+	const engineMsg = "Tenant scope required: strict tenancy is enabled and this session has no concrete tenant scope"
+
+	tests := []struct {
+		name string
+		err  *DriverError
+		want bool
+	}{
+		{
+			name: "engine refusal on the Execute path (GQLSTATE in Code)",
+			err:  &DriverError{Code: StatusPermissionDenied, Message: engineMsg},
+			want: true,
+		},
+		{
+			name: "engine refusal with the GQLSTATE in Class",
+			err:  &DriverError{Class: StatusPermissionDenied, Message: engineMsg},
+			want: true,
+		},
+		{
+			name: "plain authorization denial shares 42501 but is not tenancy",
+			err:  &DriverError{Code: StatusPermissionDenied, Message: "Permission denied"},
+			want: false,
+		},
+		{
+			name: "FLE refusal shares 42501 but is not tenancy",
+			err: &DriverError{
+				Code:    StatusPermissionDenied,
+				Message: "Access denied: READ_PLAINTEXT privilege required for encrypted searchable field",
+			},
+			want: false,
+		},
+		{
+			name: "tenancy-looking message under a different GQLSTATE",
+			err:  &DriverError{Code: StatusSyntax, Message: engineMsg},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := errors.Is(tt.err, ErrTenantScopeRequired); got != tt.want {
+				t.Fatalf("errors.Is(%v, ErrTenantScopeRequired) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+
+	// The sentinel must survive wrapping, which is how the driver surfaces
+	// server errors through database/sql.
+	wrapped := fmt.Errorf("exec: %w", &DriverError{Code: StatusPermissionDenied, Message: engineMsg})
+	if !errors.Is(wrapped, ErrTenantScopeRequired) {
+		t.Fatalf("errors.Is(wrapped, ErrTenantScopeRequired) = false, want true")
+	}
+
+	// Matching by *DriverError must keep working alongside the new branch.
+	classMatch := &DriverError{Code: StatusPermissionDenied, Message: "Permission denied"}
+	if !errors.Is(classMatch, &DriverError{Code: StatusPermissionDenied}) {
+		t.Fatal("errors.Is by *DriverError code regressed")
+	}
+	if errors.Is(classMatch, ErrTenantRequired) {
+		t.Fatal("a server error must not satisfy the config-time ErrTenantRequired")
+	}
+}

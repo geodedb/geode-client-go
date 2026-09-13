@@ -1,18 +1,18 @@
 # GAP Analysis
 
-Last updated: 2026-06-17
-Reviewed by: Adversarial Security Review Agent (2026-03-21); divelife bulk-seed investigation (2026-06-17)
+Last updated: 2026-09-13
+Reviewed by: Adversarial Security Review Agent (2026-03-21); divelife bulk-seed investigation (2026-06-17); Lane D tenancy/role binding (SONNY-806 / GEO-GO-UP-001, 2026-09-13)
 Repository: devnw/codepros/geode/geode-client-go
-Commit: b27e102 → acf49a2 (see git log)
-Review type: Comprehensive adversarial security review (Round 6 - no new findings); BUG-0001 closed 2026-03-21; BUG-0002 filed 2026-06-17 (high-concurrency connection-establishment stall)
+Commit: b27e102 → acf49a2 → 5f9a4b0 (see git log)
+Review type: Comprehensive adversarial security review (Round 6 - no new findings); BUG-0001 closed 2026-03-21; BUG-0002 filed 2026-06-17 (high-concurrency connection-establishment stall); GAP-SONNY806-01 and GAP-SONNY806-02 filed 2026-09-13 against engine 0.8.15
 
 ## Summary
 
 Open findings by severity:
 
-- Critical: 0
+- Critical: 1 (GAP-SONNY806-02 — engine cross-tenant read leak, filed 2026-09-13)
 - High: 0
-- Medium: 0
+- Medium: 1 (GAP-SONNY806-01 — engine refuses `$param` in CALL arguments, filed 2026-09-13)
 - Low: 1 (BUG-0002 — downgraded 2026-06-17)
 - Info: 0
 
@@ -20,6 +20,13 @@ Closed findings: 28 (Issues #1-#23, #25-#28; BUG-0001)
 Won't Do findings: 1 (Issue #24)
 
 Top risks (remaining):
+
+- **GAP-SONNY806-02 (Critical)** — geode engine 0.8.15 does not apply the session
+  tenant filter on the `MATCH` read path. Two sessions that bind different
+  tenants at HELLO read each other's rows in the same graph, even with
+  `GEODE_STRICT_TENANCY=1`. This is an ENGINE defect, not a driver defect; the
+  driver cannot work around it. Reproducer:
+  `TestIntegration_CrossTenantReadIsDenied` (currently RED by design).
 
 - **BUG-0002 (Low, downgraded)** — when a single `*sql.DB` opens MORE concurrent
   connections than the QUIC `pool_size` (default 16), multiple streams multiplex
@@ -32,6 +39,106 @@ Top risks (remaining):
   connections ≤ `pool_size` (divelife `data-ingest` clamps to 16).
 
 ## Open Findings
+
+### GAP-SONNY806-02: engine does not enforce tenant isolation on the MATCH read path
+
+- **Severity:** Critical
+- **Component:** geode ENGINE 0.8.15 (read path) — not the Go driver
+- **Status:** **Open** (filed 2026-09-13, SONNY-806 / GEO-GO-UP-001)
+- **Reproducer:** `integration_tenancy_test.go` →
+  `TestIntegration_CrossTenantReadIsDenied` (RED; this is the P0 evidence and is
+  deliberately not skipped)
+
+**Observed.** With the engine started as `GEODE_STRICT_TENANCY=1` and two
+tenants registered via `CALL geode.tenant.create('tenant-a'/'tenant-b')`, a node
+written by a session bound to `tenant-a` is fully readable by a session bound to
+`tenant-b` in the same graph:
+
+```
+strict tenancy confirmed; unscoped read refused as:
+  geode: 42501: Tenant scope required: strict tenancy is enabled and this
+  session has no concrete tenant scope
+tenant-b saw 1 of tenant-a's nodes, want 0 — CROSS-TENANT LEAK
+```
+
+**Narrowed.** Three separate probes against engine 0.8.15:
+
+1. Strict tenancy IS active — an unscoped (`"default"`) session is correctly
+   refused with GQLSTATE 42501 (`src/server/proto_util.zig:240`), so both tenant
+   sessions resolved a concrete scope from HELLO. The driver therefore does
+   deliver `tenant` into `HelloRequest` (`conn.go`).
+2. The leak is symmetric AND unbounded: a session binding a tenant id that was
+   never registered (`tenant=t-never-registered`) also reads every row. That
+   excludes the GAP-0846 hierarchy grant — an unregistered tenant participates
+   in no hierarchy, so `passesTenantFilterSlice`
+   (`src/execution/match_operations.zig:222-228`) could not have admitted it.
+   The tenant filter is simply not consulted on this read path.
+3. Writes ARE tagged correctly: a cross-tenant `MATCH ... DELETE` from
+   `tenant-b` matched zero of `tenant-a`'s rows, because the CRUD path does
+   apply the filter (`src/execution/crud_operations.zig:212-213`). So the defect
+   is read-side only.
+
+**Likely locus.** `readServedEngineDirect`
+(`src/server/quic_connection_handler.zig:5858+`) lets a `.rows` read be served
+engine-direct by `node_scan_stream` / the storage-native planned-read path, and
+gates that ONLY on `rls_active` — never on tenant scope.
+`src/server/node_scan_stream.zig` contains no tenant logic at all (its four
+`tenant` mentions are comments about a `tenant = null` count precompute). The
+file's own SAFETY note anticipates exactly this class of bug for RLS
+("otherwise lifting the secondary gate while the path still lacks
+passesRLSFilter leaks policy-denied rows") but no equivalent gate exists for
+tenancy.
+
+**Consistent with the engine's own capability rows** at 0.8.15
+(`testdata/capabilities_0.8.15.golden`): `tenant_scope_fail_closed=false`,
+`tenant_binding_server_verified=false`, `graph_procedure_tenancy=false`.
+
+**Impact.** Any multi-tenant deployment on 0.8.15 leaks every tenant's data to
+every other authenticated session bound to the same graph. Graph-level isolation
+still holds (a session in a different graph sees zero rows).
+
+**Driver-side mitigation:** none possible — isolation is a server-side property.
+Until the engine fixes it, treat one graph per tenant as the only supported
+isolation boundary.
+
+### GAP-SONNY806-01: engine refuses `$param` in CALL geode.fts.*and algo.* arguments
+
+- **Severity:** Medium
+- **Component:** geode ENGINE 0.8.15 (`CALL` procedure argument binding) — not
+  the Go driver
+- **Status:** **Open** (filed 2026-09-13)
+- **Tracking:** SONNY-778 (GEO-UP-002, FTS argument binding), SONNY-635
+  (GEO-UP-005, bounded-traversal argument binding)
+
+**FTS.** `src/execution/fts_dispatch.zig:103-104` (`geode.fts.search`),
+`:191-192` (`geode.fts.phrase`), `:236-237` (`geode.fts.proximity`) and `:315`
+(`geode.fts.rebuild`) read their arguments through `literalString`
+(`fts_dispatch.zig:444-449`), which accepts only `ast.Expr.String`. A `$param`
+in any `geode.fts.*` argument raises `TypeMismatch`.
+
+**Traversal.** `src/execution/execution_helpers.zig:56-79` (`extractNodeId`)
+accepts only an `Int` literal or an `Ident` resolved from `context.bindings` —
+not `$param`. `extractU32FromMap` (`execution_helpers.zig:19-28`) reads config-map
+values only from `Int` literals; `algo_dispatch.zig:286` and `:304` read
+`maxDepth` through it. So `CALL algo.bfs.stream($nodeId, {maxDepth: $d})` is not
+expressible. The procedures themselves are registered at
+`algo_dispatch.zig:117` / `:119` / `:121` (`algo.bfs.stream`, `algo.dfs.stream`,
+`algo.dijkstra.stream`) and are otherwise undocumented.
+
+**Why it matters here.** SONNY-806 forbids interpolating source text into GQL,
+so a BM25 seed cannot pass a user query as a parameter today.
+
+**Workaround in this lane.** The driver never interpolates source text, paths,
+identifiers or vectors. Tenant ids passed to `CALL geode.tenant.create` in
+`integration_tenancy_test.go` are compile-time constants for exactly this
+reason. Callers that need traversal resolve the start node through a preceding
+parameterized `MATCH` binding in the same statement and render depth from an int
+clamped to `[1,8]` via `strconv.Itoa` (fuzz-tested to match `^[0-9]+$`).
+
+**Requested engine change.** Accept `ast.Expr.Param` in `geode.fts.*` arguments
+and in `algo.*` node-id arguments and config-map values, resolving from
+`ExecutionContext` query params — the same path `src/eval.zig:886` already uses
+for `.Param`. Plus documented `CALL` syntax for `algo.bfs`/`dfs`/`dijkstra`.
 
 ### BUG-0002: high-concurrency connection establishment stalls (MaxOpenConns > QUIC pool)
 

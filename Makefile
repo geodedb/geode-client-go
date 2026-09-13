@@ -18,6 +18,9 @@ DOCKER ?= docker
 # Update all of them together.
 GEODE_IMAGE ?= geodedb/geode:0.8.15@sha256:96a194cfce01e59ee1dbe1504aa0ed79c0141f7e2e8b23389da18e73e6adc8ee
 GEODE_CONTAINER ?= geode-go-test
+# Dev-only HMAC key for the local container. Never used outside `make
+# docker-start`; the CI job and the testcontainers harness set their own.
+GEODE_DEV_HMAC_KEY ?= deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef # gitleaks:allow
 GEODE_HOST ?= 127.0.0.1
 GEODE_PORT ?= 3141
 GEODE_GRPC_PORT ?= 50051
@@ -421,6 +424,9 @@ docker-start:
 	$(DOCKER) run -d --name $(GEODE_CONTAINER) \
 		-p $(GEODE_PORT):3141/udp \
 		-p $(GEODE_GRPC_PORT):50051/tcp \
+		-e GEODE_STRICT_TENANCY=1 \
+		-e GEODE_QUIC_ENABLE_STREAM_MULTIPLEXING=1 \
+		-e GEODE_AUTH_HMAC_KEY=$(GEODE_DEV_HMAC_KEY) \
 		$(GEODE_IMAGE) \
 		serve --listen 0.0.0.0:3141 --listen-grpc 0.0.0.0:50051 --log-level info
 	@echo "✓ Geode container started"

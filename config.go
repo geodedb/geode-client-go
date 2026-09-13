@@ -117,6 +117,13 @@ type Config struct {
 	// (GQLSTATE 42501). Set via DSN ?read_only=true.
 	ReadOnly bool
 
+	// StrictTenancy asserts the client intends to run against a
+	// strict-tenancy engine. It does not enable strict tenancy server-side
+	// (that is --strict-tenancy / GEODE_STRICT_TENANCY); it makes the
+	// client refuse to connect without a concrete tenant. Set via DSN
+	// ?strict_tenancy=true.
+	StrictTenancy bool
+
 	// PageSize is the number of rows to fetch per page.
 	PageSize int
 
@@ -215,6 +222,34 @@ func (c *Config) Clone() *Config {
 // Only non-default values are emitted as query parameters to keep the
 // DSN minimal. Credentials are embedded in the userinfo segment
 // (scheme://user:pass@host:port) which ParseDSN already handles.
+// dsnTruthy reports whether a DSN query value means "on". Shared by every
+// boolean DSN option so the accepted spellings cannot drift between them.
+func dsnTruthy(val string) bool {
+	switch val {
+	case supportedTrue, "1", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// setQueryFlag sets key to "true" only when flag is set. Factored out of
+// FormatDSN so each boolean DSN option costs no branch in that function — it
+// was at the cyclomatic-complexity limit when strict_tenancy was added.
+func setQueryFlag(q url.Values, key string, flag bool) {
+	if flag {
+		q.Set(key, supportedTrue)
+	}
+}
+
+// setQueryValue sets key to val only when val is non-empty. Same motivation as
+// setQueryFlag.
+func setQueryValue(q url.Values, key, val string) {
+	if val != "" {
+		q.Set(key, val)
+	}
+}
+
 func (c *Config) FormatDSN() string {
 	scheme := c.Transport.String()
 
@@ -233,33 +268,18 @@ func (c *Config) FormatDSN() string {
 	if c.Conformance != "" && c.Conformance != DefaultConformance {
 		q.Set("conformance", c.Conformance)
 	}
-	if c.TLSCA != "" {
-		q.Set("ca", c.TLSCA)
-	}
-	if c.TLSCert != "" {
-		q.Set("cert", c.TLSCert)
-	}
-	if c.TLSKey != "" {
-		q.Set("key", c.TLSKey)
-	}
-	if c.InsecureSkipVerify {
-		q.Set("insecure_tls_skip_verify", "true")
-	}
+	setQueryValue(q, "ca", c.TLSCA)
+	setQueryValue(q, "cert", c.TLSCert)
+	setQueryValue(q, "key", c.TLSKey)
+	setQueryFlag(q, "insecure_tls_skip_verify", c.InsecureSkipVerify)
 	if c.TLSDisabled {
 		q.Set("tls", "0")
 	}
-	if c.Graph != "" {
-		q.Set("graph", c.Graph)
-	}
-	if c.Tenant != "" {
-		q.Set("tenant", c.Tenant)
-	}
-	if c.Role != "" {
-		q.Set("role", c.Role)
-	}
-	if c.ReadOnly {
-		q.Set("read_only", "true")
-	}
+	setQueryValue(q, "graph", c.Graph)
+	setQueryValue(q, "tenant", c.Tenant)
+	setQueryValue(q, "role", c.Role)
+	setQueryFlag(q, "read_only", c.ReadOnly)
+	setQueryFlag(q, "strict_tenancy", c.StrictTenancy)
 	if c.ConnectTimeout != 0 {
 		q.Set("connect_timeout", strconv.Itoa(c.ConnectTimeout))
 	}
@@ -319,6 +339,7 @@ func (c *Config) FormatDSN() string {
 //   - tenant: Tenant identifier sent in HELLO (alias: tenant_id)
 //   - role: FLE role sent in HELLO for field-level access control
 //   - read_only: Refuse mutating statements (default: false, aliases: readonly, read-only)
+//   - strict_tenancy: Refuse to connect without a concrete tenant (default: false)
 //
 // Environment variables:
 //   - GEODE_HOST: Default host if DSN is empty
@@ -604,7 +625,7 @@ func applyQueryParams(params url.Values, cfg *Config) error {
 			cfg.TLSKey = val
 
 		case "insecure_tls_skip_verify", "insecure", "skip_verify":
-			cfg.InsecureSkipVerify = val == "true" || val == "1" || val == "yes" || val == "on"
+			cfg.InsecureSkipVerify = dsnTruthy(val)
 
 		case "connect_timeout":
 			n, err := strconv.Atoi(val)
@@ -639,7 +660,10 @@ func applyQueryParams(params url.Values, cfg *Config) error {
 			cfg.Role = val
 
 		case "read_only", "readonly", "read-only":
-			cfg.ReadOnly = val == "true" || val == "1" || val == "yes" || val == "on"
+			cfg.ReadOnly = dsnTruthy(val)
+
+		case "strict_tenancy":
+			cfg.StrictTenancy = dsnTruthy(val)
 
 		default:
 			// Ignore unknown parameters for forward compatibility
@@ -713,6 +737,15 @@ func (c *Config) Validate() error {
 			Field:   "transport",
 			Message: "unsupported transport type",
 		}
+	}
+
+	// A strict-tenancy engine rejects tenant-scoped operations from a session
+	// whose resolved tenant is unset, empty, or the reserved "default"
+	// sentinel (geode docs/security/MULTI_TENANT_HARDENING.md, GAP-0840).
+	// Refuse at config time so the failure is a startup error rather than a
+	// 42501 on the first tenant-scoped statement.
+	if c.StrictTenancy && (c.Tenant == "" || c.Tenant == "default") {
+		return ErrTenantRequired
 	}
 
 	return nil
