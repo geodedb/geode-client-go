@@ -65,8 +65,12 @@ tenant-b saw 1 of tenant-a's nodes, want 0 — CROSS-TENANT LEAK
 
 1. Strict tenancy IS active — an unscoped (`"default"`) session is correctly
    refused with GQLSTATE 42501 (`src/server/proto_util.zig:240`), so both tenant
-   sessions resolved a concrete scope from HELLO. The driver therefore does
-   deliver `tenant` into `HelloRequest` (`conn.go`).
+   sessions resolved some concrete, non-default scope from HELLO. That the
+   driver delivers the *correct* tenant identifier into `HelloRequest`
+   (`conn.go`) — not merely a non-default one — is shown below by probe 3: the
+   cross-tenant `MATCH ... DELETE` matches zero rows, which is only possible if
+   the CRUD path compared the exact tenant value `tenant-b`'s session sent
+   against each node's stored `tenant_id`.
 2. The leak is symmetric AND unbounded: a session binding a tenant id that was
    never registered (`tenant=t-never-registered`) also reads every row. That
    excludes the GAP-0846 hierarchy grant — an unregistered tenant participates
@@ -101,7 +105,7 @@ still holds (a session in a different graph sees zero rows).
 Until the engine fixes it, treat one graph per tenant as the only supported
 isolation boundary.
 
-### GAP-SONNY806-01: engine refuses `$param` in CALL geode.fts.*and algo.* arguments
+### GAP-SONNY806-01: engine refuses `$param` in CALL `geode.fts.*` and `algo.*` arguments
 
 - **Severity:** Medium
 - **Component:** geode ENGINE 0.8.15 (`CALL` procedure argument binding) — not

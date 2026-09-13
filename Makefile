@@ -21,6 +21,12 @@ GEODE_CONTAINER ?= geode-go-test
 # Dev-only HMAC key for the local container. Never used outside `make
 # docker-start`; the CI job and the testcontainers harness set their own.
 GEODE_DEV_HMAC_KEY ?= deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef # gitleaks:allow
+# Dev-only admin password for the local container, seeded via
+# GEODE_ADMIN_PASSWORD so the engine does not generate a one-time password
+# (see integration_main_test.go). Never used outside `make docker-start`; the
+# CI job and the testcontainers harness seed their own. Letters and numbers
+# only so it needs no URL-encoding in GEODE_TEST_DSN below.
+GEODE_DEV_ADMIN_PASSWORD ?= devgeode123 # gitleaks:allow
 GEODE_HOST ?= 127.0.0.1
 GEODE_PORT ?= 3141
 GEODE_GRPC_PORT ?= 50051
@@ -285,7 +291,7 @@ test-integration-docker-race:
 test-integration-docker-manual: docker-start docker-wait
 	@echo "Running integration tests against Docker container..."
 	@echo ""
-	GEODE_TEST_DSN="$(GEODE_HOST):$(GEODE_PORT)?insecure=true" $(GO) test -v -tags=integration $(GOFLAGS) ./... || ($(MAKE) docker-stop && exit 1)
+	GEODE_TEST_DSN="$(GEODE_HOST):$(GEODE_PORT)?insecure=true&user=geode&pass=$(strip $(GEODE_DEV_ADMIN_PASSWORD))" $(GO) test -v -tags=integration $(GOFLAGS) ./... || ($(MAKE) docker-stop && exit 1)
 	@echo ""
 	@echo "✓ Docker integration tests complete"
 	$(MAKE) docker-stop
@@ -426,9 +432,10 @@ docker-start:
 		-p $(GEODE_GRPC_PORT):50051/tcp \
 		-e GEODE_STRICT_TENANCY=1 \
 		-e GEODE_QUIC_ENABLE_STREAM_MULTIPLEXING=1 \
-		-e GEODE_AUTH_HMAC_KEY=$(GEODE_DEV_HMAC_KEY) \
+		-e GEODE_AUTH_HMAC_KEY=$(strip $(GEODE_DEV_HMAC_KEY)) \
+		-e GEODE_ADMIN_PASSWORD=$(strip $(GEODE_DEV_ADMIN_PASSWORD)) \
 		$(GEODE_IMAGE) \
-		serve --listen 0.0.0.0:3141 --listen-grpc 0.0.0.0:50051 --log-level info
+		serve --listen 0.0.0.0:3141 --listen-grpc 0.0.0.0:50051 --log-level info --data-dir /data
 	@echo "✓ Geode container started"
 	@echo "  Container: $(GEODE_CONTAINER)"
 	@echo "  QUIC Port: $(GEODE_PORT)/udp"
