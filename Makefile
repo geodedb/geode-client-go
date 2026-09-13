@@ -210,11 +210,12 @@ generate-proto: proto-tools
 
 # proto-check verifies the vendored proto/geode.proto has not drifted from the
 # canonical server proto (GAP-0841, SONNY-806). Runs the always-on reflection
-# drift guards for HelloRequest and ExecuteRequest plus, when the sibling geode
-# repo is on disk, the source-level HelloRequest field-set comparison.
+# drift guards for HelloRequest, ExecuteRequest, and the CDC/backup/restore/
+# upload request messages plus, when the sibling geode repo is on disk, the
+# source-level HelloRequest field-set comparison.
 proto-check:
 	@echo "Checking vendored proto against canonical server proto..."
-	GEODE_CANONICAL_PROTO=$(CANONICAL_PROTO) $(GO) test -run 'TestHelloRequest_HasTenantAndRole|TestHelloRequest_TenantAndRoleSettable|TestVendoredProtoMatchesCanonical|TestExecuteRequest_HasCanonicalFields|TestExecuteRequest_ReadOnlySettable' -v ./...
+	GEODE_CANONICAL_PROTO=$(CANONICAL_PROTO) $(GO) test -run 'TestHelloRequest_HasTenantAndRole|TestHelloRequest_TenantAndRoleSettable|TestVendoredProtoMatchesCanonical|TestExecuteRequest_HasCanonicalFields|TestExecuteRequest_ReadOnlySettable|TestCdcBackupRestoreUploadFields' -v ./...
 	@echo "✓ Proto drift check complete"
 
 # =============================================================================
