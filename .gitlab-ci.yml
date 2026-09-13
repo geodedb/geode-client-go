@@ -89,6 +89,27 @@ stages:
   - release
 
 # =============================================================================
+# Proto drift gate (SONNY-806 / GAP-0841).
+#
+# The vendored proto/geode.proto is a copy of the engine's canonical
+# src/proto/geode.proto (provenance recorded in proto/CANONICAL). This job runs
+# the always-on reflection guards for HelloRequest and ExecuteRequest, so a
+# regeneration that drops a canonical field fails the pipeline. The engine repo
+# is not on disk here, so the source-level comparison self-skips; regeneration
+# itself is reproducible via `make generate-proto`, whose plugin versions are
+# pinned in the Makefile (PROTOC_GEN_GO_VERSION / PROTOC_GEN_GO_GRPC_VERSION).
+# =============================================================================
+proto-check:
+  stage: lint
+  image: golang:1.27
+  script:
+    - make proto-check
+  allow_failure: false
+  tags:
+    - company
+    - linux
+
+# =============================================================================
 # Integration lane — real pinned Geode engine, race detector on.
 # Mocks never satisfy a release gate (GEO-GO-UP-001).
 #

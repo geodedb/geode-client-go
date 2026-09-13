@@ -32,7 +32,7 @@ FUZZ_TIME ?= 30s
         fuzz fuzz-dsn fuzz-frame fuzz-query fuzz-param fuzz-value fuzz-type \
         docker-start docker-stop docker-logs docker-status docker-pull docker-wait \
         pre-commit pre-commit-install pre-commit-run pre-commit-update \
-        generate-proto \
+        generate-proto proto-tools proto-check \
         help deps update tidy
 
 # Load test timeout — longer than the default 10 min to allow multi-page and
@@ -168,29 +168,53 @@ update:
 PROTOC ?= .tools/protoc/bin/protoc
 CANONICAL_PROTO ?= ../geode/src/proto/geode.proto
 
-generate-proto:
+# Generator plugin versions are pinned so any checkout regenerates byte-identical
+# code. protoc-gen-go MUST match the google.golang.org/protobuf version in
+# go.mod; protoc-gen-go-grpc MUST stay compatible with the pinned grpc version.
+PROTOC_GEN_GO_VERSION ?= v1.36.12
+PROTOC_GEN_GO_GRPC_VERSION ?= v1.6.1
+PROTO_TOOLS_BIN := $(CURDIR)/.tools/bin
+
+# proto-tools installs the pinned protoc plugins into .tools/bin (gitignored).
+proto-tools:
+	@echo "Installing pinned protoc plugins into $(PROTO_TOOLS_BIN)..."
+	GOBIN="$(PROTO_TOOLS_BIN)" $(GO) install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION)
+	GOBIN="$(PROTO_TOOLS_BIN)" $(GO) install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GO_GRPC_VERSION)
+	@echo "✓ Proto plugins installed"
+
+generate-proto: proto-tools
 	@echo "Generating Go protobuf code from canonical proto..."
 	@if [ -f "$(CANONICAL_PROTO)" ]; then \
 		echo "  Copying canonical proto from $(CANONICAL_PROTO)"; \
 		cp "$(CANONICAL_PROTO)" proto/geode.proto; \
+		printf '# Provenance of proto/geode.proto. Regenerate with `make generate-proto`.\nsource: %s\nengine_commit: %s\nsha256: %s\nprotoc_gen_go: %s\nprotoc_gen_go_grpc: %s\n' \
+			"$$(git -C "$$(dirname "$(CANONICAL_PROTO)")" ls-files --full-name "$(CANONICAL_PROTO)" 2>/dev/null || basename "$(CANONICAL_PROTO)")" \
+			"$$(git -C "$$(dirname "$(CANONICAL_PROTO)")" rev-parse HEAD 2>/dev/null || echo unknown)" \
+			"$$(sha256sum "$(CANONICAL_PROTO)" | cut -d' ' -f1)" \
+			"$(PROTOC_GEN_GO_VERSION)" \
+			"$(PROTOC_GEN_GO_GRPC_VERSION)" \
+			> proto/CANONICAL; \
 	fi
-	$(PROTOC) \
-		--proto_path=proto \
-		--go_out=proto \
+	@# --proto_path=. keeps the descriptor's registered filename at
+	@# "proto/geode.proto"; generating with --proto_path=proto would silently
+	@# rename it to "geode.proto" and risk a protobuf registry collision.
+	PATH="$(PROTO_TOOLS_BIN):$$PATH" $(PROTOC) \
+		--proto_path=. \
+		--go_out=. \
 		--go_opt=paths=source_relative \
-		--go-grpc_out=proto \
+		--go-grpc_out=. \
 		--go-grpc_opt=paths=source_relative \
 		proto/geode.proto
 	@echo "Generated files:"
 	@ls -la proto/geode.pb.go proto/geode_grpc.pb.go
 
 # proto-check verifies the vendored proto/geode.proto has not drifted from the
-# canonical server proto (GAP-0841). Runs the always-on reflection drift guard
-# plus, when the sibling geode repo is on disk, the source-level HelloRequest
-# field-set comparison.
+# canonical server proto (GAP-0841, SONNY-806). Runs the always-on reflection
+# drift guards for HelloRequest and ExecuteRequest plus, when the sibling geode
+# repo is on disk, the source-level HelloRequest field-set comparison.
 proto-check:
 	@echo "Checking vendored proto against canonical server proto..."
-	GEODE_CANONICAL_PROTO=$(CANONICAL_PROTO) $(GO) test -run 'TestHelloRequest_HasTenantAndRole|TestHelloRequest_TenantAndRoleSettable|TestVendoredProtoMatchesCanonical' -v ./...
+	GEODE_CANONICAL_PROTO=$(CANONICAL_PROTO) $(GO) test -run 'TestHelloRequest_HasTenantAndRole|TestHelloRequest_TenantAndRoleSettable|TestVendoredProtoMatchesCanonical|TestExecuteRequest_HasCanonicalFields|TestExecuteRequest_ReadOnlySettable' -v ./...
 	@echo "✓ Proto drift check complete"
 
 # =============================================================================
@@ -425,12 +449,13 @@ docker-pull:
 # CI Targets
 # =============================================================================
 
-ci: fmt-check vet lint test coverage bench-quick
+ci: fmt-check vet lint proto-check test coverage bench-quick
 	@echo ""
 	@echo "==== CI Pipeline Complete ===="
 	@echo "✓ Format check passed"
 	@echo "✓ Vet passed"
 	@echo "✓ Lint passed"
+	@echo "✓ Proto drift check passed"
 	@echo "✓ Unit tests passed"
 	@echo "✓ Coverage report generated"
 	@echo "✓ Benchmarks compiled"

@@ -101,6 +101,9 @@ message ExecuteRequest {
   string session_id = 1;
   string query = 2;
   repeated Param params = 3;
+  bytes principal_envelope_bytes = 4; // GPS wire principal (federation-trusted only)
+  string idempotency_key = 5;         // RC-3 write dedup
+  bool read_only = 6;                 // reject mutating statements when set
 }
 
 message Param {
@@ -483,7 +486,9 @@ message RollbackToResponse {
 // ============================================================================
 // CDC
 // ============================================================================
-message CdcDiagnosticsRequest {}
+message CdcDiagnosticsRequest {
+  string session_id = 1;
+}
 message CdcDiagnosticsConfig {
   bool enabled = 1;
   uint64 malformed_snapshot_interval = 2;
@@ -536,6 +541,7 @@ message CdcDiagnosticsResponse {
 }
 message CdcControlRequest {
   string action = 1;
+  string session_id = 2;
 }
 message CdcControlResponse {
   bool success = 1;
@@ -548,6 +554,7 @@ message CdcControlResponse {
 // ============================================================================
 message BackupRequest {
   string backup_type = 1; // "full"
+  string session_id = 2;
   bool compress = 3;
 }
 message BackupResponse {
@@ -562,6 +569,7 @@ message BackupResponse {
 message RestoreRequest {
   string target_time = 1;
   bool confirm = 2;
+  string session_id = 3;
 }
 message RestoreResponse {
   bool success = 1;
@@ -573,6 +581,10 @@ message RestoreResponse {
 message UploadBackupRequest {
   uint64 size_bytes = 1;
   string checksum = 2;
+  string session_id = 3;
+  // GAP-0880: full backup artifact bytes (GEOB header + payload). Required;
+  // metadata-only uploads are rejected by the server.
+  bytes payload = 4;
 }
 message UploadBackupResponse {
   bool success = 1;
