@@ -3,6 +3,7 @@ package geode
 import (
 	"database/sql/driver"
 	"errors"
+	"math"
 	"testing"
 )
 
@@ -50,6 +51,50 @@ func TestVector_RejectsNonFinite(t *testing.T) {
 	inf := Vector{1, float32(mustInf())}
 	if _, err := encodeParamValue(inf); err == nil {
 		t.Fatal("err = nil, want a non-finite-component error")
+	}
+}
+
+// TestVector_RejectsNaN pins the NaN case separately from Inf: NaN fails
+// both IsNaN comparisons that a naive `c != c` finite check could get
+// backwards, and it is a distinct bit pattern from Inf that a component-wise
+// IsInf-only check would miss. Requested by the Task 4 review
+// (task-4-report.md) and closed here in Task 5.
+func TestVector_RejectsNaN(t *testing.T) {
+	nan := Vector{1, float32(math.NaN())}
+	_, err := encodeParamValue(nan)
+	if !errors.Is(err, ErrVectorNotFinite) {
+		t.Fatalf("err = %v, want ErrVectorNotFinite", err)
+	}
+}
+
+// TestVector_AcceptsSubnormal pins that a subnormal float32 component (finite,
+// just below the normal range) is accepted and round-trips exactly through
+// the DoubleValue encoding rather than being flushed to zero or rejected as
+// non-finite. Requested by the Task 4 review (task-4-report.md) and closed
+// here in Task 5.
+func TestVector_AcceptsSubnormal(t *testing.T) {
+	sub := Vector{math.SmallestNonzeroFloat32, -math.SmallestNonzeroFloat32}
+	val, err := encodeParamValue(sub)
+	if err != nil {
+		t.Fatalf("encodeParamValue(subnormal): %v, want no error", err)
+	}
+	list := val.GetListVal()
+	if list == nil {
+		t.Fatalf("value kind = %T, want ListValue", val.GetKind())
+	}
+	got := list.GetValues()
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2", len(got))
+	}
+	want := []float32{math.SmallestNonzeroFloat32, -math.SmallestNonzeroFloat32}
+	for i, w := range want {
+		d := got[i].GetDoubleVal()
+		if d == nil {
+			t.Fatalf("element %d kind = %T, want DoubleValue", i, got[i].GetKind())
+		}
+		if float32(d.GetValue()) != w {
+			t.Errorf("element %d = %v, want %v", i, float32(d.GetValue()), w)
+		}
 	}
 }
 
