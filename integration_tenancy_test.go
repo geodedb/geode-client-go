@@ -39,7 +39,12 @@ func TestIntegration_CrossTenantReadIsDenied(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	admin, err := sql.Open("geode", sharedDSN+"&graph="+tenancyGraph)
+	// UNSCOPED on purpose. sharedDSN binds harnessTenant so the rest of the
+	// suite can run under strict tenancy; this session must strip it, because
+	// the mode probe below is the one place that has to observe what an
+	// unscoped session gets. Everything this session does besides the probe is
+	// tenant DDL, which is gated on admin_tenant rather than tenant scope.
+	admin, err := sql.Open("geode", dsnWithoutTenant(sharedDSN)+"&graph="+tenancyGraph)
 	if err != nil {
 		t.Fatalf("sql.Open admin: %v", err)
 	}
@@ -167,10 +172,16 @@ func TestIntegration_ReadOnlyRole(t *testing.T) {
 
 	// No read_only=true here on purpose: the client-side gate must be OFF so
 	// the refusal can only come from the engine.
+	// hostPortFromDSN drops the whole query string, so this DSN is rebuilt from
+	// scratch and has to re-bind a tenant itself: under strict tenancy an
+	// unscoped CREATE is refused with GQLSTATE 42501 "Tenant scope required",
+	// which is the SAME 42501 class as the role refusal this test is asserting.
+	// Without the tenant the assertion below would pass for the wrong reason.
 	roDSN := hostPortFromDSN(sharedDSN) +
 		"?insecure=true&user=" + url.QueryEscape(roUser) +
 		"&pass=" + url.QueryEscape(roPass) +
 		"&graph=" + roleGraph +
+		"&tenant=" + harnessTenant +
 		"&role=readonly"
 
 	ro, err := sql.Open("geode", roDSN)

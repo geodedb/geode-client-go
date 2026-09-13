@@ -337,6 +337,29 @@ func TestParseDSN_Options(t *testing.T) {
 	}
 }
 
+// TestParseDSN_RepeatedParamTakesLastOccurrence pins the override semantics the
+// integration suite depends on: a per-test DSN is built by APPENDING to a
+// shared base DSN ("base?...&tenant=it-harness" + "&tenant=tenant-a"), so the
+// right-most occurrence of a repeated key has to win. Taking the first would
+// silently discard every override and bind the wrong tenant, graph, or page
+// size while the DSN text read as if it had been overridden.
+func TestParseDSN_RepeatedParamTakesLastOccurrence(t *testing.T) {
+	cfg, err := ParseDSN("localhost:3141?tenant=base&graph=g1&page_size=100" +
+		"&tenant=override&graph=g2&page_size=250")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Tenant != "override" {
+		t.Errorf("tenant = %q, want %q (last occurrence must win)", cfg.Tenant, "override")
+	}
+	if cfg.Graph != "g2" {
+		t.Errorf("graph = %q, want %q (last occurrence must win)", cfg.Graph, "g2")
+	}
+	if cfg.PageSize != 250 {
+		t.Errorf("page_size = %d, want 250 (last occurrence must win)", cfg.PageSize)
+	}
+}
+
 // TestParseDSN_TenantAndRole verifies the tenant/role DSN params (GAP-0841)
 // parse into Config and survive a FormatDSN round-trip.
 func TestParseDSN_TenantAndRole(t *testing.T) {

@@ -148,7 +148,12 @@ integration:geode:
     GEODE_ADMIN_PASSWORD: "Correct horse battery staple" # gitleaks:allow
     GEODE_STRICT_TENANCY: "1"
     GEODE_QUIC_ENABLE_STREAM_MULTIPLEXING: "1"
-    GEODE_TEST_DSN: "geode:3141?insecure=true&user=geode&pass=Correct%20horse%20battery%20staple"
+    # The integration service above runs with GEODE_STRICT_TENANCY=1, so this
+    # manual-mode DSN must bind a concrete tenant: without it every data
+    # statement is refused with GQLSTATE 42501 "Tenant scope required".
+    # Keep the tenant id in sync with harnessTenant (integration_main_test.go)
+    # and GEODE_TEST_TENANT (Makefile).
+    GEODE_TEST_DSN: "geode:3141?insecure=true&user=geode&pass=Correct%20horse%20battery%20staple&tenant=it-harness"
   script:
     - go test -race -v -tags=integration -timeout=20m ./...
   allow_failure: false

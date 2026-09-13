@@ -30,6 +30,15 @@ GEODE_DEV_ADMIN_PASSWORD ?= devgeode123 # gitleaks:allow
 GEODE_HOST ?= 127.0.0.1
 GEODE_PORT ?= 3141
 GEODE_GRPC_PORT ?= 50051
+# Tenant bound by every manual-lane GEODE_TEST_DSN below. docker-start runs the
+# engine with GEODE_STRICT_TENANCY=1, under which a data statement from a
+# session with no concrete tenant scope is refused with GQLSTATE 42501
+# "Tenant scope required" — so the manual DSN must bind a tenant just as the
+# testcontainers harness does. Keep in sync with harnessTenant in
+# integration_main_test.go. Binding a tenant against a permissive server is
+# harmless (it is simply a concrete scope), so it is bound unconditionally
+# rather than per-target.
+GEODE_TEST_TENANT ?= it-harness
 
 # Fuzz duration (default 30 seconds)
 FUZZ_TIME ?= 30s
@@ -136,6 +145,7 @@ help:
 	@echo "  GEODE_IMAGE         - Docker image (default: pinned geodedb/geode:0.8.15 by digest)"
 	@echo "  GEODE_GRPC_PORT     - Geode gRPC port (default: 50051)"
 	@echo "  GEODE_TEST_DSN      - DSN for manual server tests"
+	@echo "  GEODE_TEST_TENANT   - Tenant bound by the manual-lane DSN (default: it-harness)"
 	@echo "  FUZZ_TIME           - Fuzz test duration (default: 30s)"
 
 # =============================================================================
@@ -247,7 +257,7 @@ test-integration:
 	@echo "Start server first: cd ../geode && ./zig-out/bin/geode serve"
 	@echo "Or use: make test-integration-docker"
 	@echo ""
-	GEODE_TEST_DSN="$(GEODE_HOST):$(GEODE_PORT)?insecure=true" $(GO) test -v -tags=integration -timeout=$(LOAD_TIMEOUT) $(GOFLAGS) ./...
+	GEODE_TEST_DSN="$(GEODE_HOST):$(GEODE_PORT)?insecure=true&tenant=$(GEODE_TEST_TENANT)" $(GO) test -v -tags=integration -timeout=$(LOAD_TIMEOUT) $(GOFLAGS) ./...
 	@echo ""
 	@echo "✓ Integration + load tests complete"
 
@@ -256,7 +266,7 @@ test-load:
 	@echo ""
 	@echo "Connecting to Geode server at $(GEODE_HOST):$(GEODE_PORT)"
 	@echo ""
-	GEODE_TEST_DSN="$(GEODE_HOST):$(GEODE_PORT)?insecure=true" $(GO) test -v -tags=integration -timeout=$(LOAD_TIMEOUT) -run='^TestLoad_' $(GOFLAGS) ./...
+	GEODE_TEST_DSN="$(GEODE_HOST):$(GEODE_PORT)?insecure=true&tenant=$(GEODE_TEST_TENANT)" $(GO) test -v -tags=integration -timeout=$(LOAD_TIMEOUT) -run='^TestLoad_' $(GOFLAGS) ./...
 	@echo ""
 	@echo "✓ Load tests complete"
 
@@ -278,7 +288,7 @@ test-integration-docker:
 
 test-integration-race:
 	@echo "Running integration tests under -race (manual server)..."
-	GEODE_TEST_DSN="$(GEODE_HOST):$(GEODE_PORT)?insecure=true" $(GO) test -race -v -tags=integration -timeout=$(LOAD_TIMEOUT) $(GOFLAGS) ./...
+	GEODE_TEST_DSN="$(GEODE_HOST):$(GEODE_PORT)?insecure=true&tenant=$(GEODE_TEST_TENANT)" $(GO) test -race -v -tags=integration -timeout=$(LOAD_TIMEOUT) $(GOFLAGS) ./...
 	@echo "✓ Race integration tests complete"
 
 test-integration-docker-race:
@@ -291,7 +301,7 @@ test-integration-docker-race:
 test-integration-docker-manual: docker-start docker-wait
 	@echo "Running integration tests against Docker container..."
 	@echo ""
-	GEODE_TEST_DSN="$(GEODE_HOST):$(GEODE_PORT)?insecure=true&user=geode&pass=$(strip $(GEODE_DEV_ADMIN_PASSWORD))" $(GO) test -v -tags=integration $(GOFLAGS) ./... || ($(MAKE) docker-stop && exit 1)
+	GEODE_TEST_DSN="$(GEODE_HOST):$(GEODE_PORT)?insecure=true&user=geode&pass=$(strip $(GEODE_DEV_ADMIN_PASSWORD))&tenant=$(GEODE_TEST_TENANT)" $(GO) test -v -tags=integration $(GOFLAGS) ./... || ($(MAKE) docker-stop && exit 1)
 	@echo ""
 	@echo "✓ Docker integration tests complete"
 	$(MAKE) docker-stop
@@ -303,7 +313,7 @@ test-integration-grpc:
 	@echo "Start server first: cd ../geode && ./zig-out/bin/geode serve --listen-grpc 0.0.0.0:50051"
 	@echo "Or use: make docker-start"
 	@echo ""
-	GEODE_TEST_DSN="grpc://$(GEODE_HOST):$(GEODE_GRPC_PORT)?tls=0" $(GO) test -v -tags=integration $(GOFLAGS) ./...
+	GEODE_TEST_DSN="grpc://$(GEODE_HOST):$(GEODE_GRPC_PORT)?tls=0&tenant=$(GEODE_TEST_TENANT)" $(GO) test -v -tags=integration $(GOFLAGS) ./...
 	@echo ""
 	@echo "✓ gRPC integration tests complete"
 

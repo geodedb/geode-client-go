@@ -241,6 +241,18 @@ for `.Param`. Plus documented `CALL` syntax for `algo.bfs`/`dfs`/`dijkstra`.
   - **Current safe mitigation in production:** divelife `data-ingest` clamps its
     pool + worker fan-out to 16 (commit `126bef7`), which is validated to keep
     bulk ingest stall-free.
+  - **2026-09-13 update — now intermittently visible in the integration lane.**
+    Task 8b unblocked the strict-tenancy lane (SONNY-806), so the concurrency
+    tests reach real load again instead of failing instantly on GQLSTATE 42501.
+    Two consecutive full `make test-integration-docker` runs each produced ONE
+    extra failure, a different test each time — `TestDocker_ConcurrentQueries`
+    (10 goroutines, one `context deadline exceeded`, 30.4 s) and
+    `TestLoad_MixedReadWrite` (`reader 8 iter 13: context deadline exceeded`,
+    `pool={15 7 0 7 577 2.22s 15 0 0}`, 33.2 s). Same signature as the
+    "~1 stream per connection makes progress" finding above, at the ~0.06 %
+    rate already recorded. Both pass in isolation (3/3 for
+    `TestDocker_ConcurrentQueries`). No new root cause — this is BUG-0002
+    surfacing, and it is why the lane is not yet reliably green at 0 failures.
 
 ## Closed Findings
 

@@ -534,7 +534,14 @@ func applyQueryParams(params url.Values, cfg *Config) error {
 		if len(values) == 0 {
 			continue
 		}
-		val := values[0]
+		// A repeated key takes its LAST occurrence, so a DSN composed by
+		// appending overrides ("base?...&tenant=a" + "&tenant=b" -> b) means
+		// what it reads like. url.Values keeps occurrences in source order, so
+		// the final element is the right-most one in the DSN text. Taking
+		// values[0] instead would silently ignore every override appended to a
+		// DSN that already carried the key — which is exactly how the
+		// integration suite builds per-test DSNs from the shared one.
+		val := values[len(values)-1]
 
 		switch key {
 		case constParamPageSize:

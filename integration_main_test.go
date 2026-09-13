@@ -10,10 +10,25 @@
 // Manual-server mode: set GEODE_TEST_DSN to skip Docker entirely.
 //
 //	GEODE_TEST_DSN="localhost:3141?insecure=true&user=geode&pass=..." go test -v -tags=integration ./...
+//
+// Manual-server mode and strict tenancy: the DSN is taken verbatim, so when the
+// server runs with --strict-tenancy / GEODE_STRICT_TENANCY=1 (which every
+// Makefile-managed container does — see the docker-start recipe) the caller
+// MUST bind a concrete tenant in that DSN:
+//
+//	GEODE_TEST_DSN="localhost:3141?insecure=true&user=geode&pass=...&tenant=it-harness"
+//
+// Without it every data statement in the suite is refused with GQLSTATE 42501
+// "Tenant scope required". The Makefile's manual lanes and the CI integration
+// job already append &tenant=$(GEODE_TEST_TENANT); a hand-written DSN has to do
+// the same. Binding a tenant against a permissive server is harmless — it is
+// just a concrete scope — so the tenant can be bound unconditionally.
 package geode
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
 	"log"
 	"os"
 	"strings"
@@ -24,8 +39,30 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
+// harnessTenant is the tenant the shared integration DSN binds.
+//
+// The harness runs the engine with GEODE_STRICT_TENANCY=1
+// (see the container Env below), under which a tenant-scoped statement from a
+// session whose resolved tenant is unset, empty, or the reserved "default"
+// sentinel is refused with GQLSTATE 42501 "Tenant scope required"
+// (geode src/execution/tenancy.zig:174-183 -> src/server/proto_util.zig:240).
+// Every data statement in this suite is tenant-scoped, so the shared DSN has to
+// carry a concrete scope or the whole lane is red.
+//
+// It is a compile-time constant, never interpolated from input:
+// CALL geode.tenant.create reads its arguments with literalString
+// (geode src/execution/tenant_dispatch.zig:191-196), so a $param raises
+// TypeMismatch and the id must be rendered into the statement text — keeping it
+// constant is what makes that safe. Same rule as tenantA/tenantB in
+// integration_tenancy_test.go and cancelTenant in integration_cancel_test.go.
+const harnessTenant = "it-harness"
+
 // sharedDSN is the connection string used by every integration test.
-// Populated by TestMain before any test runs.
+// Populated by TestMain before any test runs. In container mode it is bound to
+// harnessTenant; a test that needs a different scope appends its own
+// "&tenant=..." (the last occurrence of a repeated DSN key wins — see
+// applyQueryParams in config.go), and a test that needs NO scope strips it with
+// dsnWithoutTenant.
 var sharedDSN string
 
 // TestMain runs once for the entire integration test binary.
@@ -97,11 +134,31 @@ func runTestMain(m *testing.M) int {
 		log.Fatalf("integration: failed to set up container auth: %v", err)
 	}
 
-	sharedDSN, err = containerDSN(ctx, container, testAdminUser, testAdminPassphrase)
+	adminDSN, err := containerDSN(ctx, container, testAdminUser, testAdminPassphrase)
 	if err != nil {
 		container.Terminate(ctx) //nolint:errcheck
 		log.Fatalf("integration: failed to build container DSN: %v", err)
 	}
+
+	// Register the harness tenant, then bind it. Registration goes through the
+	// CALL-only tenant DDL surface (there is no CREATE TENANT statement; 0.8.15
+	// reports tenant_ddl=false in SHOW CAPABILITIES) and is gated on the
+	// admin_tenant GPS action, NOT on the session's tenant scope
+	// (geode docs/security/MULTI_TENANT_HARDENING.md, "Tenant lifecycle
+	// administration": "Every procedure in the family ... is gated on the
+	// admin_tenant GPS action via gps.decide()"). That is why this CALL runs
+	// fine from the still-unscoped adminDSN under strict tenancy — only
+	// tenant-scoped data statements go through resolveTenantFilter.
+	//
+	// Registering it also keeps the deployment honest: a registered non-default
+	// tenant is the GAP-0848 multi-tenant signal, so strict tenancy stays on
+	// even if the env flag were ever dropped.
+	if err := ensureHarnessTenant(ctx, adminDSN); err != nil {
+		container.Terminate(ctx) //nolint:errcheck
+		log.Fatalf("integration: failed to register harness tenant: %v", err)
+	}
+
+	sharedDSN = adminDSN + "&tenant=" + harnessTenant
 
 	// Run all tests.
 	code := m.Run()
@@ -133,4 +190,53 @@ func hostPortFromDSN(dsn string) string {
 		s = s[i+1:]
 	}
 	return s
+}
+
+// ensureHarnessTenant registers harnessTenant with the engine using an
+// admin session on the unscoped dsn. Re-registering an existing tenant is a
+// benign error (the suite may run against a reused server in manual mode), so
+// only a failure to connect is fatal.
+func ensureHarnessTenant(ctx context.Context, dsn string) error {
+	db, err := sql.Open("geode", dsn)
+	if err != nil {
+		return fmt.Errorf("sql.Open admin: %w", err)
+	}
+	defer db.Close()
+
+	if err := db.PingContext(ctx); err != nil {
+		return fmt.Errorf("ping admin: %w", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"CALL geode.tenant.create('"+harnessTenant+"')"); err != nil {
+		log.Printf("integration: CALL geode.tenant.create(%q): %v (may already exist)",
+			harnessTenant, err)
+	}
+	return nil
+}
+
+// dsnWithoutTenant returns dsn with every tenant/tenant_id parameter removed,
+// leaving the rest of the query string byte-for-byte intact (re-encoding it
+// through url.Values would re-escape the credential). A test that has to prove
+// something about an UNSCOPED session — the strict-tenancy mode probe in
+// integration_tenancy_test.go is the only one — must build its DSN through
+// here, because sharedDSN now binds harnessTenant.
+func dsnWithoutTenant(dsn string) string {
+	i := strings.IndexByte(dsn, '?')
+	if i < 0 {
+		return dsn
+	}
+	base, query := dsn[:i], dsn[i+1:]
+
+	kept := make([]string, 0, strings.Count(query, "&")+1)
+	for _, param := range strings.Split(query, "&") {
+		key, _, _ := strings.Cut(param, "=")
+		if key == "tenant" || key == "tenant_id" {
+			continue
+		}
+		kept = append(kept, param)
+	}
+	if len(kept) == 0 {
+		return base
+	}
+	return base + "?" + strings.Join(kept, "&")
 }
