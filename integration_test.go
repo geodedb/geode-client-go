@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -33,13 +34,12 @@ import (
 )
 
 const (
-	// defaultGeodeImage is pinned to a specific version to prevent supply chain attacks.
-	// Update this version when upgrading the Geode server dependency.
-	// Override with GEODE_IMAGE environment variable if needed.
-	defaultGeodeImage = "geodedb/geode:latest"
-	defaultGeodePort  = "3141/udp"
-	startupTimeout    = 60 * time.Second
-	queryTimeout      = 30 * time.Second
+	// defaultGeodeImage and pinnedEngineVersion live in engine_pin_test.go,
+	// which carries no build tag so the pin is guarded by the unit lane too.
+	// Override the image with the GEODE_IMAGE environment variable if needed.
+	defaultGeodePort = "3141/udp"
+	startupTimeout   = 60 * time.Second
+	queryTimeout     = 30 * time.Second
 
 	// testHMACKey is a fixed 64-hex-char key injected into test containers via
 	// GEODE_AUTH_HMAC_KEY.  The server uses it to initialise the HMAC chain and
@@ -127,9 +127,23 @@ func setupContainerAuth(ctx context.Context, container testcontainers.Container)
 	if genPass == "" {
 		// No generated password in the log means the admin credential was
 		// seeded up front via GEODE_ADMIN_PASSWORD (see integration_main_test.go),
-		// so it already equals testAdminPassphrase and needs no reset. Engines
-		// from 0.8.15 on take this path: they never print the credential, and
-		// write a generated one to ./.geode_admin_password instead.
+		// so it should already equal testAdminPassphrase and needs no reset.
+		// Engines that write the generated password to a file instead of the
+		// log take this path.
+		//
+		// Trusting the seed blindly would turn one auth failure into a wall of
+		// unrelated-looking per-test errors, so prove the credential actually
+		// works before handing it to the suite. The forced-reset path itself is
+		// covered by TestIntegration_AdminPasswordResetFlow.
+		dsn, dsnErr := containerDSN(ctx, container, testAdminUser, testAdminPassphrase)
+		if dsnErr != nil {
+			return dsnErr
+		}
+		if err := verifyCredential(ctx, dsn); err != nil {
+			return fmt.Errorf(
+				"no generated admin password in the container log and the seeded GEODE_ADMIN_PASSWORD credential for user %q does not authenticate: %w",
+				testAdminUser, err)
+		}
 		return nil
 	}
 
@@ -145,6 +159,55 @@ func setupContainerAuth(ctx context.Context, container testcontainers.Container)
 	})
 	if execErr != nil || exitCode != 0 {
 		return fmt.Errorf("failed to reset admin password (exit %d): %w", exitCode, execErr)
+	}
+
+	// The reset reported success; prove the new credential authenticates before
+	// the suite starts using it.
+	dsn, dsnErr := containerDSN(ctx, container, testAdminUser, testAdminPassphrase)
+	if dsnErr != nil {
+		return dsnErr
+	}
+	if err := verifyCredential(ctx, dsn); err != nil {
+		return fmt.Errorf("admin password reset reported success but the new credential for user %q does not authenticate: %w",
+			testAdminUser, err)
+	}
+	return nil
+}
+
+// containerDSN builds the driver DSN for a running test container using the
+// supplied credential.
+func containerDSN(ctx context.Context, container testcontainers.Container, user, pass string) (string, error) {
+	host, err := container.Host(ctx)
+	if err != nil {
+		return "", fmt.Errorf("container.Host: %w", err)
+	}
+	mappedPort, err := container.MappedPort(ctx, defaultGeodePort)
+	if err != nil {
+		return "", fmt.Errorf("container.MappedPort: %w", err)
+	}
+	return fmt.Sprintf("%s:%s?insecure=true&user=%s&pass=%s",
+		host, mappedPort.Port(),
+		url.QueryEscape(user),
+		url.QueryEscape(pass),
+	), nil
+}
+
+// verifyCredential opens the driver with dsn and runs a trivial query, proving
+// the credential authenticates and is not stuck in the engine's
+// "password reset required" state.
+func verifyCredential(ctx context.Context, dsn string) error {
+	db, err := sql.Open("geode", dsn)
+	if err != nil {
+		return fmt.Errorf("sql.Open: %w", err)
+	}
+	defer db.Close()
+
+	queryContext, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
+
+	var version string
+	if err := db.QueryRowContext(queryContext, "SHOW VERSION").Scan(&version); err != nil {
+		return fmt.Errorf("SHOW VERSION: %w", err)
 	}
 	return nil
 }

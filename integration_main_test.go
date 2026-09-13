@@ -14,9 +14,7 @@ package geode
 
 import (
 	"context"
-	"fmt"
 	"log"
-	"net/url"
 	"os"
 	"testing"
 	"time"
@@ -83,23 +81,11 @@ func runTestMain(m *testing.M) int {
 		log.Fatalf("integration: failed to set up container auth: %v", err)
 	}
 
-	host, err := container.Host(ctx)
+	sharedDSN, err = containerDSN(ctx, container, testAdminUser, testAdminPassphrase)
 	if err != nil {
 		container.Terminate(ctx) //nolint:errcheck
-		log.Fatalf("integration: failed to get container host: %v", err)
+		log.Fatalf("integration: failed to build container DSN: %v", err)
 	}
-
-	mappedPort, err := container.MappedPort(ctx, defaultGeodePort)
-	if err != nil {
-		container.Terminate(ctx) //nolint:errcheck
-		log.Fatalf("integration: failed to get container port: %v", err)
-	}
-
-	sharedDSN = fmt.Sprintf("%s:%s?insecure=true&user=%s&pass=%s",
-		host, mappedPort.Port(),
-		url.QueryEscape(testAdminUser),
-		url.QueryEscape(testAdminPassphrase),
-	)
 
 	// Run all tests.
 	code := m.Run()
