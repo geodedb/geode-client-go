@@ -111,6 +111,12 @@ type Config struct {
 	// Tune via DSN: `?role=analyst`.
 	Role string
 
+	// ReadOnly refuses mutating statements. The driver classifies and
+	// refuses them before the wire (ErrReadOnly) AND sets
+	// ExecuteRequest.read_only so the engine refuses them too
+	// (GQLSTATE 42501). Set via DSN ?read_only=true.
+	ReadOnly bool
+
 	// PageSize is the number of rows to fetch per page.
 	PageSize int
 
@@ -251,6 +257,9 @@ func (c *Config) FormatDSN() string {
 	if c.Role != "" {
 		q.Set("role", c.Role)
 	}
+	if c.ReadOnly {
+		q.Set("read_only", "true")
+	}
 	if c.ConnectTimeout != 0 {
 		q.Set("connect_timeout", strconv.Itoa(c.ConnectTimeout))
 	}
@@ -309,6 +318,7 @@ func (c *Config) FormatDSN() string {
 //   - tls: Enable/disable TLS ("0" or "false" to disable, gRPC only)
 //   - tenant: Tenant identifier sent in HELLO (alias: tenant_id)
 //   - role: FLE role sent in HELLO for field-level access control
+//   - read_only: Refuse mutating statements (default: false, aliases: readonly, read-only)
 //
 // Environment variables:
 //   - GEODE_HOST: Default host if DSN is empty
@@ -627,6 +637,9 @@ func applyQueryParams(params url.Values, cfg *Config) error {
 
 		case "role":
 			cfg.Role = val
+
+		case "read_only", "readonly", "read-only":
+			cfg.ReadOnly = val == "true" || val == "1" || val == "yes" || val == "on"
 
 		default:
 			// Ignore unknown parameters for forward compatibility

@@ -116,6 +116,56 @@ grpc://[2001:db8::1]:50051
 | `tls` | Enable/disable TLS (`0` or `false` to disable) | enabled |
 | `user`/`username` | Authentication username | |
 | `pass`/`password` | Authentication password | |
+| `read_only` | Refuse mutating statements (aliases: `readonly`, `read-only`) | false |
+
+### Read-only connections
+
+`?read_only=true` makes a connection a reader. Enforcement is two independent
+layers, and both are always on:
+
+1. **Client-side, before the wire.** Every statement is classified by
+   `IsMutatingStatement`; a mutating one is refused with `ErrReadOnly` and no
+   bytes leave the process.
+2. **Server-side, unconditionally.** Every `ExecuteRequest` carries
+   `read_only = true` (proto field 6). The engine refuses any mutating program
+   with GQLSTATE `42501` regardless of the connection's role, so a classifier
+   miss still fails at the database.
+
+```go
+db, err := sql.Open("geode", "quic://localhost:3141?graph=docs&read_only=true")
+
+_, err = db.ExecContext(ctx, "CREATE (n:Doc {id: ?})", 1)
+// errors.Is(err, geode.ErrReadOnly) == true — nothing was sent
+
+var n int64
+err = db.QueryRowContext(ctx, "MATCH (d:Doc) RETURN count(d)").Scan(&n) // fine
+```
+
+The classifier **fails closed**: a statement is read-only only when its leading
+keyword is on a closed allow-list (`MATCH`, `RETURN`, `SHOW`, `EXPLAIN`,
+`PROFILE`, `FOR`, `LET`, `FILTER`, `ORDER`, `SKIP`, `LIMIT`, `OPTIONAL`) and it
+contains no mutating keyword anywhere. Everything else — including empty,
+unparseable, and unrecognised statements — is treated as mutating. Comments and
+string literals are stripped first, so a write cannot hide behind
+`/* MATCH */ CREATE ...` and a keyword inside data stays data. A `;`-separated
+program (including a `graph.Batch` pipeline) is read-only only when *every*
+statement in it is.
+
+`CALL` is classified by target against a closed allow-list mirroring the
+engine's own read-only procedure table: `geode.fts.search` is a read but
+`geode.fts.rebuild` is not, `geode.ts.range` is a read but `geode.ts.insert` is
+not, and any unrecognised procedure is a write.
+
+Two behaviours worth knowing:
+
+- A read-only connection does **not** run `CREATE GRAPH IF NOT EXISTS` for
+  `?graph=`; it only runs `USE GRAPH`, which fails if the graph does not exist.
+  Create the graph from a writable connection first.
+- Transactions work normally: `BeginTx` succeeds (and pins
+  `BeginRequest.read_only`), reads inside the transaction work, and a mutation
+  inside it is refused with `ErrReadOnly`. Because that refusal emits nothing,
+  the transaction stays open and usable for further reads — the caller still
+  decides whether to `Commit` or `Rollback`.
 
 ### Environment Variables
 

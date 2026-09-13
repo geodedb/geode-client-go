@@ -295,9 +295,18 @@ func connect(ctx context.Context, cfg *Config) (*Conn, error) {
 
 	// Auto-select graph if configured in DSN and not already bound by server.
 	if cfg.Graph != "" && serverGraph == "" {
-		if err := conn.execInit(ctx, "CREATE GRAPH IF NOT EXISTS "+cfg.Graph); err != nil {
-			_ = transport.Close()
-			return nil, fmt.Errorf("create graph %s: %w", cfg.Graph, err)
+		// A read-only connection must not create the graph on the way in:
+		// "cannot even emit a write" includes connection setup. USE GRAPH on
+		// its own is not a graph-store mutation (the engine classifies it
+		// read-only, geode 0.8.15 src/query/query_traits.zig:311-360), so it
+		// still succeeds under ExecuteRequest.read_only — and fails honestly
+		// when the graph does not exist, which is the correct answer for a
+		// reader.
+		if !cfg.ReadOnly {
+			if err := conn.execInit(ctx, "CREATE GRAPH IF NOT EXISTS "+cfg.Graph); err != nil {
+				_ = transport.Close()
+				return nil, fmt.Errorf("create graph %s: %w", cfg.Graph, err)
+			}
 		}
 		if err := conn.execInit(ctx, "USE GRAPH "+cfg.Graph); err != nil {
 			_ = transport.Close()
@@ -314,7 +323,8 @@ func connect(ctx context.Context, cfg *Config) (*Conn, error) {
 // post-HELLO setup queries.
 func (c *Conn) execInit(ctx context.Context, query string) error {
 	msg := proto.NewExecuteMessage(&proto.ExecuteRequest{
-		Query: query,
+		Query:    query,
+		ReadOnly: c.cfg.ReadOnly,
 	})
 	if err := c.transport.SendProto(ctx, msg); err != nil {
 		return err
@@ -492,9 +502,18 @@ func (c *Conn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, e
 		return nil, transportErrBadConn(fmt.Errorf("stream desync: %d unconsumed bytes from prior request", t.BufferedLen()))
 	}
 
-	// Send BEGIN
+	// Send BEGIN.
+	//
+	// A read-only connection pins BeginRequest.read_only on regardless of
+	// what the caller asked for: opts.ReadOnly may only ever tighten the
+	// transaction, never loosen the connection. Read-only transactions are
+	// allowed on a read-only connection — only the mutating statements
+	// inside them are refused (guardReadOnly), and that refusal happens
+	// before any bytes reach the wire, so the transaction stays open and
+	// usable for reads and the caller still owns the Commit/Rollback
+	// decision.
 	msg := proto.NewBeginMessage(&proto.BeginRequest{
-		ReadOnly: opts.ReadOnly,
+		ReadOnly: opts.ReadOnly || c.cfg.ReadOnly,
 	})
 	if err := c.transport.SendProto(ctx, msg); err != nil {
 		c.markConnFailed()
@@ -599,10 +618,15 @@ func (c *Conn) ExecContext(ctx context.Context, query string, args []driver.Name
 		return nil, err
 	}
 
+	if err := c.guardReadOnly(query); err != nil {
+		return nil, err
+	}
+
 	// Send Execute
 	msg := proto.NewExecuteMessage(&proto.ExecuteRequest{
-		Query:  newQuery,
-		Params: protoParams,
+		Query:    newQuery,
+		Params:   protoParams,
+		ReadOnly: c.cfg.ReadOnly,
 	})
 	if err := c.transport.SendProto(ctx, msg); err != nil {
 		// Bytes went onto the wire but we couldn't confirm what (if
@@ -682,10 +706,16 @@ func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.Nam
 		return nil, err
 	}
 
+	if err := c.guardReadOnly(query); err != nil {
+		c.mu.Unlock()
+		return nil, err
+	}
+
 	// Send Execute
 	msg := proto.NewExecuteMessage(&proto.ExecuteRequest{
-		Query:  newQuery,
-		Params: protoParams,
+		Query:    newQuery,
+		Params:   protoParams,
+		ReadOnly: c.cfg.ReadOnly,
 	})
 	if err := c.transport.SendProto(ctx, msg); err != nil {
 		// See ExecContext: transport failure inside an active tx
