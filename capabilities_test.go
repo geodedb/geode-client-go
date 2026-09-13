@@ -1,7 +1,10 @@
 package geode
 
 import (
+	"database/sql/driver"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"reflect"
 	"sort"
@@ -299,5 +302,224 @@ func TestPooledHelloStatePropagates(t *testing.T) {
 	}
 	if _, _, caps := pc.helloState(); caps[0] != "tx" {
 		t.Errorf("pooledConn capabilities were aliased into a Conn: %v", caps)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// scanVersionRow / scanCapabilityRows
+//
+// These exercise the scan-and-validate loop that showVersion/showCapabilities
+// delegate to, via a fake driver.Rows. A compliant live engine never sends the
+// malformed shapes below, so this is the only way to cover the wrong column
+// count/order, non-string column value, maxCapabilityRows bound and bool
+// wire-value rejection without a live server.
+// ---------------------------------------------------------------------------
+
+// fakeCapabilityRows is a minimal driver.Rows for driving
+// scanVersionRow/scanCapabilityRows without a live engine or transport.
+type fakeCapabilityRows struct {
+	cols   []string
+	data   [][]driver.Value
+	idx    int
+	closed bool
+}
+
+func (r *fakeCapabilityRows) Columns() []string { return r.cols }
+
+func (r *fakeCapabilityRows) Close() error {
+	r.closed = true
+	return nil
+}
+
+func (r *fakeCapabilityRows) Next(dest []driver.Value) error {
+	if r.idx >= len(r.data) {
+		return io.EOF
+	}
+	copy(dest, r.data[r.idx])
+	r.idx++
+	return nil
+}
+
+// TestScanVersionRow_HappyPath proves the single-column, single-row SHOW
+// VERSION result is read verbatim, with no trimming or normalisation.
+func TestScanVersionRow_HappyPath(t *testing.T) {
+	rows := &fakeCapabilityRows{
+		cols: []string{"version"},
+		data: [][]driver.Value{{"v0.8.15"}},
+	}
+	got, err := scanVersionRow(rows)
+	if err != nil {
+		t.Fatalf("scanVersionRow: %v", err)
+	}
+	if got != "v0.8.15" {
+		t.Errorf("scanVersionRow = %q, want %q", got, "v0.8.15")
+	}
+}
+
+// TestScanVersionRow_Empty proves an empty SHOW VERSION result is a
+// dedicated error rather than a zero-value success.
+func TestScanVersionRow_Empty(t *testing.T) {
+	rows := &fakeCapabilityRows{cols: []string{"version"}}
+	_, err := scanVersionRow(rows)
+	if err == nil {
+		t.Fatal("scanVersionRow: got nil error, want an error for zero rows")
+	}
+	if !strings.Contains(err.Error(), "returned no rows") {
+		t.Errorf("scanVersionRow error = %q, want substring %q", err.Error(), "returned no rows")
+	}
+}
+
+// TestScanVersionRow_TwoRows characterizes existing behaviour: only the first
+// row is read and returned; scanVersionRow does not currently reject a server
+// that answers SHOW VERSION with more than one row.
+func TestScanVersionRow_TwoRows(t *testing.T) {
+	rows := &fakeCapabilityRows{
+		cols: []string{"version"},
+		data: [][]driver.Value{{"v0.8.15"}, {"v0.8.16"}},
+	}
+	got, err := scanVersionRow(rows)
+	if err != nil {
+		t.Fatalf("scanVersionRow: %v", err)
+	}
+	if got != "v0.8.15" {
+		t.Errorf("scanVersionRow = %q, want the first row's value %q", got, "v0.8.15")
+	}
+	if rows.idx != 1 {
+		t.Errorf("scanVersionRow consumed %d rows, want exactly 1", rows.idx)
+	}
+}
+
+// TestScanVersionRow_NonStringValue proves a non-string (e.g. bool) version
+// column is rejected rather than silently stringified.
+func TestScanVersionRow_NonStringValue(t *testing.T) {
+	rows := &fakeCapabilityRows{
+		cols: []string{"version"},
+		data: [][]driver.Value{{true}},
+	}
+	_, err := scanVersionRow(rows)
+	if err == nil {
+		t.Fatal("scanVersionRow: got nil error, want an error for a bool version column")
+	}
+	if !strings.Contains(err.Error(), "version column is bool, want a string") {
+		t.Errorf("scanVersionRow error = %q, want substring %q", err.Error(), "version column is bool, want a string")
+	}
+}
+
+// TestScanVersionRow_WrongColumns proves an unexpected column set is rejected.
+func TestScanVersionRow_WrongColumns(t *testing.T) {
+	rows := &fakeCapabilityRows{cols: []string{"ver"}}
+	_, err := scanVersionRow(rows)
+	if err == nil {
+		t.Fatal("scanVersionRow: got nil error, want an error for wrong columns")
+	}
+	if !strings.Contains(err.Error(), "unexpected columns") {
+		t.Errorf("scanVersionRow error = %q, want substring %q", err.Error(), "unexpected columns")
+	}
+}
+
+// TestScanCapabilityRows_HappyPath proves well-formed rows are read verbatim
+// and in order.
+func TestScanCapabilityRows_HappyPath(t *testing.T) {
+	rows := &fakeCapabilityRows{
+		cols: []string{"feature", "supported"},
+		data: [][]driver.Value{
+			{CapVectorKNN, "true"},
+			{CapTenantDDL, "false"},
+			{CapSonnyProfileVersion, "1"},
+		},
+	}
+	got, err := scanCapabilityRows(rows)
+	if err != nil {
+		t.Fatalf("scanCapabilityRows: %v", err)
+	}
+	want := []CapabilityRow{
+		{Feature: CapVectorKNN, Supported: "true"},
+		{Feature: CapTenantDDL, Supported: "false"},
+		{Feature: CapSonnyProfileVersion, Supported: "1"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("scanCapabilityRows = %+v, want %+v", got, want)
+	}
+}
+
+// TestScanCapabilityRows_WrongColumnCount proves a SHOW CAPABILITIES result
+// with an extra column is rejected rather than silently read positionally.
+func TestScanCapabilityRows_WrongColumnCount(t *testing.T) {
+	rows := &fakeCapabilityRows{cols: []string{"feature", "supported", "extra"}}
+	_, err := scanCapabilityRows(rows)
+	if !errors.Is(err, ErrMalformedCapabilityRows) {
+		t.Fatalf("scanCapabilityRows err = %v, want ErrMalformedCapabilityRows", err)
+	}
+	if !strings.Contains(err.Error(), "columns are") {
+		t.Errorf("scanCapabilityRows error = %q, want substring %q", err.Error(), "columns are")
+	}
+}
+
+// TestScanCapabilityRows_SwappedColumnOrder proves the columns must be named
+// feature, supported IN THAT ORDER, not merely contain those two names.
+func TestScanCapabilityRows_SwappedColumnOrder(t *testing.T) {
+	rows := &fakeCapabilityRows{cols: []string{"supported", "feature"}}
+	_, err := scanCapabilityRows(rows)
+	if !errors.Is(err, ErrMalformedCapabilityRows) {
+		t.Fatalf("scanCapabilityRows err = %v, want ErrMalformedCapabilityRows", err)
+	}
+	if !strings.Contains(err.Error(), "columns are") {
+		t.Errorf("scanCapabilityRows error = %q, want substring %q", err.Error(), "columns are")
+	}
+}
+
+// TestScanCapabilityRows_NonStringValue proves a non-string wire value (e.g. a
+// Go bool) is refused for either column rather than accepted "for forward
+// compatibility" — the contract fixes both columns as strings.
+func TestScanCapabilityRows_NonStringValue(t *testing.T) {
+	t.Run("supported column is bool", func(t *testing.T) {
+		rows := &fakeCapabilityRows{
+			cols: []string{"feature", "supported"},
+			data: [][]driver.Value{{CapVectorKNN, true}},
+		}
+		_, err := scanCapabilityRows(rows)
+		if !errors.Is(err, ErrMalformedCapabilityRows) {
+			t.Fatalf("scanCapabilityRows err = %v, want ErrMalformedCapabilityRows", err)
+		}
+		if !strings.Contains(err.Error(), "supported column of row") || !strings.Contains(err.Error(), "bool") {
+			t.Errorf("scanCapabilityRows error = %q, want substrings %q and %q",
+				err.Error(), "supported column of row", "bool")
+		}
+	})
+	t.Run("feature column is bool", func(t *testing.T) {
+		rows := &fakeCapabilityRows{
+			cols: []string{"feature", "supported"},
+			data: [][]driver.Value{{true, "true"}},
+		}
+		_, err := scanCapabilityRows(rows)
+		if !errors.Is(err, ErrMalformedCapabilityRows) {
+			t.Fatalf("scanCapabilityRows err = %v, want ErrMalformedCapabilityRows", err)
+		}
+		if !strings.Contains(err.Error(), "feature column of row") || !strings.Contains(err.Error(), "bool") {
+			t.Errorf("scanCapabilityRows error = %q, want substrings %q and %q",
+				err.Error(), "feature column of row", "bool")
+		}
+	})
+}
+
+// TestScanCapabilityRows_TooManyRows proves the maxCapabilityRows bound is
+// enforced against a hostile or broken server, independent of parseCapabilityRows'
+// row-level checks.
+func TestScanCapabilityRows_TooManyRows(t *testing.T) {
+	data := make([][]driver.Value, maxCapabilityRows+1)
+	for i := range data {
+		data[i] = []driver.Value{CapVectorKNN, "true"}
+	}
+	rows := &fakeCapabilityRows{
+		cols: []string{"feature", "supported"},
+		data: data,
+	}
+	_, err := scanCapabilityRows(rows)
+	if !errors.Is(err, ErrMalformedCapabilityRows) {
+		t.Fatalf("scanCapabilityRows err = %v, want ErrMalformedCapabilityRows", err)
+	}
+	wantSubstr := fmt.Sprintf("more than %d rows", maxCapabilityRows)
+	if !strings.Contains(err.Error(), wantSubstr) {
+		t.Errorf("scanCapabilityRows error = %q, want substring %q", err.Error(), wantSubstr)
 	}
 }

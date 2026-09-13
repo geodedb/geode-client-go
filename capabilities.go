@@ -330,6 +330,18 @@ func (c *Conn) showVersion(ctx context.Context) (string, error) {
 	}
 	defer func() { _ = rows.Close() }()
 
+	return scanVersionRow(rows)
+}
+
+// scanVersionRow validates and reads the single-column, single-row SHOW
+// VERSION result from an already-open driver.Rows. It is split out of
+// showVersion so the scan-and-validate logic can be driven by a fake row
+// source in unit tests, without a live engine or transport.
+//
+// Only the first row is read; a server that answers with more than one row is
+// not currently rejected here — that would be a distinct malformed-shape
+// check this function does not make.
+func scanVersionRow(rows driver.Rows) (string, error) {
 	cols := rows.Columns()
 	if len(cols) != 1 || cols[0] != "version" {
 		return "", fmt.Errorf("geode: %s: unexpected columns %v, want [version]", showVersionStatement, cols)
@@ -361,6 +373,15 @@ func (c *Conn) showCapabilities(ctx context.Context) ([]CapabilityRow, error) {
 	}
 	defer func() { _ = rows.Close() }()
 
+	return scanCapabilityRows(rows)
+}
+
+// scanCapabilityRows validates and reads every SHOW CAPABILITIES row from an
+// already-open driver.Rows, checking column count, column order/names, the
+// maxCapabilityRows bound and that both columns are string-typed. It is split
+// out of showCapabilities so the same fail-closed shape checks can be driven
+// by a fake row source in unit tests, without a live engine or transport.
+func scanCapabilityRows(rows driver.Rows) ([]CapabilityRow, error) {
 	cols := rows.Columns()
 	if len(cols) != capabilityColumns || cols[0] != "feature" || cols[1] != "supported" {
 		return nil, fmt.Errorf("%w: columns are %v, want [feature supported]", ErrMalformedCapabilityRows, cols)
