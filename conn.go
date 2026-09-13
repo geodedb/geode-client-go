@@ -929,6 +929,13 @@ func (c *Conn) CheckNamedValue(nv *driver.NamedValue) error {
 	switch nv.Value.(type) {
 	case nil, string, []byte, bool, int64, float64, time.Time:
 		return nil
+	case Vector:
+		// Listed ahead of the container check so the intent is explicit: a
+		// Vector must reach bindParameters as a Vector. Skipping it would
+		// hand it to the default converter, which calls its driver.Valuer
+		// Value() and then re-checks the result — losing the concrete type
+		// that selects the validated encodeVector path.
+		return nil
 	}
 	// Slices, arrays and maps keep their structural list_val/map_val encoding
 	// (ENG-3910); the default converter would reject them outright.

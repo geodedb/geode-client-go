@@ -201,6 +201,25 @@ func encodeParamValue(v any) (*proto.Value, error) {
 		// suffix fmt.Sprintf("%v", t) always appends); that gap is closed in
 		// the same change via goStringerLayout.
 		return proto.MakeParam("", x).GetValue(), nil
+	case Vector:
+		// Before the container fallback on purpose: Vector's underlying type
+		// is []float32, so the fallback would encode it as an unvalidated,
+		// unbounded list. The typed path is what enforces the engine's
+		// 65535-component ceiling, refuses an empty vector and refuses
+		// NaN/Inf components (vector.go).
+		return encodeVector(x)
+	// The widening cases below never fire for a database/sql argument —
+	// CheckNamedValue returns driver.ErrSkip for them and the default
+	// converter narrows int/int32 to int64 and float32 to float64 first —
+	// but encodeParamValue is also called directly (proto_params_test.go,
+	// Task 5's binder fuzzing), where falling through to the container
+	// fallback would reject a perfectly ordinary number.
+	case int:
+		return encodeParamValue(int64(x))
+	case int32:
+		return encodeParamValue(int64(x))
+	case float32:
+		return encodeParamValue(float64(x))
 	default:
 		return encodeContainerParamValue(v)
 	}
