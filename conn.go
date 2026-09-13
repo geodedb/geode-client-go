@@ -906,12 +906,15 @@ func (c *Conn) IsValid() bool {
 
 // CheckNamedValue validates a named value before use.
 //
-// Values of the driver.Value scalar set (plus []byte) are passed through
-// untouched so bindParameters can encode them as typed wire parameters.
-// Anything else returns driver.ErrSkip, which hands the value to
-// database/sql's default converter: it either narrows the value into that
-// set (int -> int64, float32 -> float64, a driver.Valuer's Value()) or
-// rejects it loudly. Nothing is silently stringified.
+// Values of the driver.Value scalar set (plus []byte and time.Time) are
+// passed through untouched so bindParameters can encode them as typed wire
+// parameters. time.Time is a valid driver.Value on its own — database/sql's
+// default converter passes it through unmodified — so it must be listed here
+// too, or it would fall to driver.ErrSkip and be rejected by that same
+// default converter. Anything else returns driver.ErrSkip, which hands the
+// value to database/sql's default converter: it either narrows the value
+// into that set (int -> int64, float32 -> float64, a driver.Valuer's
+// Value()) or rejects it loudly. Nothing is silently stringified.
 func (c *Conn) CheckNamedValue(nv *driver.NamedValue) error {
 	if nv.Name != "" {
 		if err := validate.ParamName(nv.Name); err != nil {
@@ -924,7 +927,7 @@ func (c *Conn) CheckNamedValue(nv *driver.NamedValue) error {
 		}
 	}
 	switch nv.Value.(type) {
-	case nil, string, []byte, bool, int64, float64:
+	case nil, string, []byte, bool, int64, float64, time.Time:
 		return nil
 	}
 	// Slices, arrays and maps keep their structural list_val/map_val encoding

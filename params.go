@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
 
 	"geodedb.com/geode/internal/validate"
 	"geodedb.com/geode/proto"
@@ -70,6 +71,11 @@ func bindParameters(query string, args []driver.NamedValue) (string, []*proto.Pa
 	}
 
 	params := make([]*proto.Param, 0, len(args))
+	// Numbered by slice position (idx+1), not nv.Ordinal: database/sql
+	// already supplies positional args in the caller's template order via
+	// the "positional" filter above, and Ordinal is 1-based over the
+	// original, unfiltered args slice (it would skip numbers here once named
+	// args are interleaved), so it is intentionally not consulted.
 	for idx, nv := range positional {
 		name := generatedParamPrefix + strconv.Itoa(idx+1)
 		val, err := encodeParamValue(nv.Value)
@@ -102,6 +108,11 @@ func bindParameters(query string, args []driver.NamedValue) (string, []*proto.Pa
 //
 // This is pure text-to-text rewriting of the caller's own template: no
 // argument value ever reaches it.
+//
+// Known blind spots, not fixed here (behaviour unchanged): double-quoted
+// strings, backslash-escaped characters, and `//`/`/* */` comments are not
+// recognized, so a '?' inside one of those is still treated as a
+// placeholder. Scoped as Task 5 fuzz-testing work.
 func rewritePlaceholderRefs(query string) (string, int) {
 	var b strings.Builder
 	b.Grow(len(query) + paramRefGrowth)
@@ -144,8 +155,9 @@ func countPlaceholders(query string) int {
 }
 
 // encodeParamValue converts a driver value into a typed protobuf Value:
-// database/sql's driver.Value scalar set directly, containers structurally
-// (see encodeContainerParamValue). Anything else is rejected rather than
+// database/sql's driver.Value scalar set directly, time.Time via the
+// historical string encoding, containers structurally (see
+// encodeContainerParamValue). Anything else is rejected rather than
 // stringified, so an unsupported type is a loud error instead of a silent
 // lossy conversion.
 func encodeParamValue(v any) (*proto.Value, error) {
@@ -175,6 +187,20 @@ func encodeParamValue(v any) (*proto.Value, error) {
 		return &proto.Value{Kind: &proto.Value_DoubleVal{
 			DoubleVal: &proto.DoubleValue{Value: x, Kind: proto.FloatKind_DOUBLE},
 		}}, nil
+	case time.Time:
+		// database/sql's default converter passes time.Time through
+		// untouched (it satisfies driver.Value), so it must be encoded here
+		// rather than rejected. Delegating to proto.MakeParam reuses
+		// containerValue's default case (proto/codec.go) — the same
+		// stringValue(fmt.Sprintf("%v", val)) historically produced for both
+		// the positional path (old conn.go inlineValue's default case,
+		// deleted in 153a81c) and the named path (proto.MakeParam), so the
+		// wire encoding stays byte-identical to that historical form.
+		// ScanTime (time.go) documented this format but could not actually
+		// parse it back (no layout in timeFormats matched the zone-name
+		// suffix fmt.Sprintf("%v", t) always appends); that gap is closed in
+		// the same change via goStringerLayout.
+		return proto.MakeParam("", x).GetValue(), nil
 	default:
 		return encodeContainerParamValue(v)
 	}

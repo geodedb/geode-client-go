@@ -6,10 +6,20 @@ import (
 	"time"
 )
 
+// goStringerLayout is the layout time.Time.String() uses internally (and
+// therefore what fmt.Sprintf("%v", t) produces): a zone offset AND a zone
+// abbreviation trail every value, e.g. "2024-03-15 10:30:45.123456789 +0000
+// UTC". This is what encodeParamValue (params.go) sends for a time.Time
+// argument — it must be tried, or a round-trip through ScanTime fails for
+// every non-UTC-abbreviation-free value (none of the other layouts below
+// include a zone name, so they never match a string containing one).
+const goStringerLayout = "2006-01-02 15:04:05.999999999 -0700 MST"
+
 // timeFormats lists the time layouts tried in order from most to least specific.
 //
 //nolint:gochecknoglobals // read-only slice of format strings; no mutation risk.
 var timeFormats = []string{
+	goStringerLayout,
 	time.RFC3339Nano,
 	time.RFC3339,
 	"2006-01-02 15:04:05.999999",

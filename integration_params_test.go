@@ -81,3 +81,59 @@ func TestIntegration_ParamsAreNotInQueryText(t *testing.T) {
 		t.Fatalf("count = %d, want 1 — payload was treated as query text, not data", n)
 	}
 }
+
+// TestIntegration_ParamsBindTimeValue is the round-trip proof for I1: a
+// time.Time argument must bind (not be rejected by CheckNamedValue), the
+// server must store it as the historical fmt.Sprintf("%v", t) string
+// (params.go's encodeParamValue), and ScanTime (time.go) must parse that
+// string back into an equal time.Time. Covers both the positional and named
+// paths, since each goes through bindParameters independently.
+func TestIntegration_ParamsBindTimeValue(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	db, err := sql.Open("geode", sharedDSN+"&graph=paramtest")
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer db.Close()
+
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatalf("LoadLocation: %v", err)
+	}
+	want := time.Date(2024, 3, 15, 10, 30, 45, 123456789, loc)
+
+	// Positional path.
+	if _, err := db.ExecContext(ctx,
+		"MERGE (n:ParamProbe {k: ?}) ON CREATE SET n.ts = ?", "time-probe-positional", want,
+	); err != nil {
+		t.Fatalf("MERGE with positional time.Time param: %v", err)
+	}
+	var gotPositional time.Time
+	if err := db.QueryRowContext(ctx,
+		"MATCH (n:ParamProbe {k: ?}) RETURN n.ts", "time-probe-positional",
+	).Scan(ScanTime(&gotPositional)); err != nil {
+		t.Fatalf("MATCH positional time.Time param: %v", err)
+	}
+	if !gotPositional.Equal(want) {
+		t.Errorf("positional round-trip = %v, want %v", gotPositional, want)
+	}
+
+	// Named path.
+	if _, err := db.ExecContext(ctx,
+		"MERGE (n:ParamProbe {k: $key}) ON CREATE SET n.ts = $ts",
+		sql.Named("key", "time-probe-named"), sql.Named("ts", want),
+	); err != nil {
+		t.Fatalf("MERGE with named time.Time param: %v", err)
+	}
+	var gotNamed time.Time
+	if err := db.QueryRowContext(ctx,
+		"MATCH (n:ParamProbe {k: $key}) RETURN n.ts", sql.Named("key", "time-probe-named"),
+	).Scan(ScanTime(&gotNamed)); err != nil {
+		t.Fatalf("MATCH named time.Time param: %v", err)
+	}
+	if !gotNamed.Equal(want) {
+		t.Errorf("named round-trip = %v, want %v", gotNamed, want)
+	}
+}

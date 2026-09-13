@@ -3,8 +3,10 @@ package geode
 import (
 	"database/sql/driver"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"geodedb.com/geode/proto"
 )
@@ -250,5 +252,79 @@ func TestBindParameters_IntKindIsEngineCompatible(t *testing.T) {
 	}
 	if got := params[0].GetValue().GetIntVal().GetKind(); got != proto.IntKind_INT {
 		t.Errorf("int kind = %v, want %v", got, proto.IntKind_INT)
+	}
+}
+
+// TestBindParameters_TimeValuePositional pins the wire encoding for a
+// positional time.Time argument (I1): it must be the historical
+// fmt.Sprintf("%v", t) string — the same bytes the old inliner's default
+// case and proto.MakeParam's containerValue fallback have always produced —
+// and it must round-trip through ScanTime (time.go), which previously had no
+// timeFormats layout that could parse the zone-name suffix fmt.Sprintf always
+// appends.
+func TestBindParameters_TimeValuePositional(t *testing.T) {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatalf("LoadLocation: %v", err)
+	}
+	arg := time.Date(2024, 3, 15, 10, 30, 45, 123456789, loc)
+	want := fmt.Sprintf("%v", arg)
+
+	_, params, err := bindParameters("CREATE (n:X {t: ?})",
+		[]driver.NamedValue{{Ordinal: 1, Value: arg}})
+	if err != nil {
+		t.Fatalf("bindParameters: %v", err)
+	}
+	if len(params) != 1 {
+		t.Fatalf("len(params) = %d, want 1", len(params))
+	}
+	wantStringValue(t, params[0].GetValue(), want)
+
+	var dest time.Time
+	if err := ScanTime(&dest).Scan(want); err != nil {
+		t.Fatalf("ScanTime.Scan(%q): %v", want, err)
+	}
+	if !dest.Equal(arg) {
+		t.Errorf("ScanTime round-trip = %v, want %v", dest, arg)
+	}
+}
+
+// TestBindParameters_TimeValueNamed is the named-argument counterpart of
+// TestBindParameters_TimeValuePositional: named args are encoded by the same
+// encodeParamValue case, but through a different call site in
+// bindParameters, so both paths are pinned independently.
+func TestBindParameters_TimeValueNamed(t *testing.T) {
+	arg := time.Date(2024, 3, 15, 10, 30, 45, 0, time.UTC)
+	want := fmt.Sprintf("%v", arg)
+
+	_, params, err := bindParameters("MATCH (n:X {t: $ts}) RETURN n",
+		[]driver.NamedValue{{Ordinal: 1, Name: "ts", Value: arg}})
+	if err != nil {
+		t.Fatalf("bindParameters: %v", err)
+	}
+	if len(params) != 1 || params[0].GetName() != "ts" {
+		t.Fatalf("params = %v, want one param named ts", params)
+	}
+	wantStringValue(t, params[0].GetValue(), want)
+
+	var dest time.Time
+	if err := ScanTime(&dest).Scan(want); err != nil {
+		t.Fatalf("ScanTime.Scan(%q): %v", want, err)
+	}
+	if !dest.Equal(arg) {
+		t.Errorf("ScanTime round-trip = %v, want %v", dest, arg)
+	}
+}
+
+// TestCheckNamedValue_AllowsTime pins CheckNamedValue's passthrough for
+// time.Time (I1): database/sql's default converter treats time.Time as
+// already a valid driver.Value and passes it through unmodified, so without
+// this case it would reach encodeParamValue at all — CheckNamedValue never
+// gets the chance to defer via driver.ErrSkip.
+func TestCheckNamedValue_AllowsTime(t *testing.T) {
+	c := &Conn{}
+	nv := driver.NamedValue{Ordinal: 1, Value: time.Now()}
+	if err := c.CheckNamedValue(&nv); err != nil {
+		t.Errorf("CheckNamedValue(time.Time) = %v, want nil", err)
 	}
 }

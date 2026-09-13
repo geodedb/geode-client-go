@@ -15,7 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Arguments outside `database/sql`'s `driver.Value` set (plus slices, arrays
-  and maps, which keep their structural `list_val`/`map_val` encoding) are now
-  rejected with an error instead of being silently formatted into a string.
+- Query arguments are now bound as: `database/sql`'s `driver.Value` scalar set
+  (`nil`, `string`, `[]byte`, `bool`, `int64`, `float64`); `time.Time`, encoded
+  as the historical `fmt.Sprintf("%v", t)` string (round-trippable via
+  `ScanTime`); other Go integer/float types and anything implementing
+  `driver.Valuer`, narrowed by `database/sql`'s default converter (`int` ->
+  `int64`, `float32` -> `float64`, etc.); and slices, arrays and maps, which
+  keep their structural `list_val`/`map_val` encoding. Any other struct or
+  type is rejected with an error instead of being silently formatted into a
+  string.
 - Parameter names beginning with `_gq` are reserved by the driver and rejected.

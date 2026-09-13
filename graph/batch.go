@@ -50,8 +50,13 @@ const avgStmtBytes = 96
 const avgArgsPerStmt = 8
 
 // execConcurrentBatch sends all statements as a single `/*+BATCH*/` request.
-// The driver inlines each statement's `?` args positionally, so concatenating
-// queries (joined by `;`) and args yields one literal multi-statement program.
+// Each statement's `?` args are bound (not inlined): db.ExecContext rewrites
+// them to `$_gqN` references and carries the values as typed proto.Param
+// entries (bindParameters, params.go), so concatenating queries (joined by
+// `;`) and args yields one multi-statement program where every value crosses
+// the wire as a typed param rather than query text. The engine's batch
+// executor admits `literal_or_param` in this position, so the `$_gqN`
+// references resolve the same way a literal would.
 func (c *Conn) execConcurrentBatch(ctx context.Context, stmts []Statement) error {
 	var b strings.Builder
 	b.Grow(len(stmts) * avgStmtBytes)
