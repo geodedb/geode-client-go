@@ -6,6 +6,11 @@ import (
 	"strings"
 )
 
+// nilReceiverErrorString is what Error() reports for a nil receiver of any
+// of this package's error types, matching the stdlib convention (fmt's own
+// %v of a nil error-shaped value) rather than panicking.
+const nilReceiverErrorString = "<nil>"
+
 // ISO/IEC 39075 status class constants.
 const (
 	StatusSuccess          = "00000" // Successful completion
@@ -94,7 +99,12 @@ type DriverError struct {
 }
 
 // Error implements the error interface.
+//
+// A nil receiver reports "<nil>" rather than panicking; see (*DriverError).Unwrap.
 func (e *DriverError) Error() string {
+	if e == nil {
+		return nilReceiverErrorString
+	}
 	if e.Message != "" {
 		return fmt.Sprintf("geode: %s: %s", e.Code, e.Message)
 	}
@@ -115,12 +125,22 @@ func (e *DriverError) Unwrap() error {
 }
 
 // StatusClass returns the ISO/IEC 39075 status class.
+//
+// A nil receiver reports "" rather than panicking; see (*DriverError).Unwrap.
 func (e *DriverError) StatusClass() string {
+	if e == nil {
+		return ""
+	}
 	return e.Class
 }
 
 // IsRetryable indicates if the operation can be retried.
+//
+// A nil receiver reports false rather than panicking; see (*DriverError).Unwrap.
 func (e *DriverError) IsRetryable() bool {
+	if e == nil {
+		return false
+	}
 	switch e.Class {
 	case StatusSerialization, StatusDeadlock:
 		return true
@@ -191,7 +211,12 @@ type TransportError struct {
 }
 
 // Error implements the error interface.
+//
+// A nil receiver reports "<nil>" rather than panicking; see (*DriverError).Unwrap.
 func (e *TransportError) Error() string {
+	if e == nil {
+		return nilReceiverErrorString
+	}
 	if e.Addr != "" {
 		return fmt.Sprintf("geode: transport %s to %s: %v", e.Op, e.Addr, e.cause)
 	}
@@ -255,7 +280,12 @@ type SecurityError struct {
 }
 
 // Error implements the error interface.
+//
+// A nil receiver reports "<nil>" rather than panicking; see (*DriverError).Unwrap.
 func (e *SecurityError) Error() string {
+	if e == nil {
+		return nilReceiverErrorString
+	}
 	if e.cause != nil {
 		return fmt.Sprintf("geode: security %s: %s: %v", e.Type, e.Message, e.cause)
 	}

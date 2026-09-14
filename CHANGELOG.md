@@ -190,3 +190,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its LAST occurrence for every option, not the first, so a DSN can be
   extended by appending overrides (e.g. a shared base DSN plus a per-call
   `&tenant=...&graph=...`) (SONNY-806).
+- `BatchExec` and the `graph` pipelines now retry pool exhaustion with backoff
+  (previously failed fast), a consequence of `ErrPoolExhausted` classifying
+  `RetryBackoff` under the new retry classes (SONNY-806).

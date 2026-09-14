@@ -205,6 +205,19 @@ func notRetried(c RetryClass, err error) error {
 // ErrPoolDraining while the pool is shutting down (RetryNever, returned at
 // once) and can report a pool-exhaustion failure (RetryBackoff, waited out and
 // retried).
+//
+// fn is NOT partially applied: on a RetryNewConn outcome the whole fn runs
+// again from its first line, on a fresh pinned connection, not from wherever
+// it failed. Any statement fn already issued against the discarded connection
+// happened for real as far as the engine is concerned — RetrySession has no
+// way to know which of fn's side effects landed before the failure — so fn
+// must itself be idempotent, or must detect and skip its own prior partial
+// effects before repeating them, whenever it does more than one statement per
+// attempt. This is precisely why 08006 (a generic engine timeout reachable
+// from any request path, whose outcome the caller who issued it cannot
+// confirm) classifies RetryNever rather than RetryNewConn: the driver cannot
+// tell whether fn's operation already applied, so it cannot decide
+// idempotency for the caller, and refuses to guess.
 func (p *Pool) RetrySession(
 	ctx context.Context,
 	policy RetryPolicy,

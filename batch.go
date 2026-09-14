@@ -23,14 +23,18 @@ const (
 	DefaultMaxWorkers = 8
 )
 
-// BatchExec executes stmts inside a single transaction with automatic retry on
-// retryable errors (transport failures, serialization conflicts). A transaction
-// pins the underlying QUIC connection for the entire batch, eliminating
-// per-statement pool churn that causes EOF errors under concurrent load.
+// BatchExec executes stmts inside a single transaction with automatic retry.
+// A transaction pins the underlying QUIC connection for the entire batch,
+// eliminating per-statement pool churn that causes EOF errors under
+// concurrent load.
 //
 // Retry behaviour is governed by [DefaultRetryPolicy] (3 attempts, exponential
-// backoff 1 s–30 s, multiplier 2×). Non-retryable errors are returned
-// immediately without further attempts.
+// backoff 1 s–30 s, multiplier 2×) and follows [Classify]: RetrySameConn
+// (e.g. a serialization conflict) and RetryNewConn (e.g. a transport failure)
+// retry on the policy's schedule, RetryBackoff waits out the delay before
+// retrying, and RetryNever returns immediately without further attempts.
+// ErrPoolExhausted classifies RetryBackoff, so a burst that exhausts the pool
+// is retried with backoff rather than failing fast.
 //
 // An empty stmts slice is a no-op.
 func (p *Pool) BatchExec(ctx context.Context, stmts []Statement) error {

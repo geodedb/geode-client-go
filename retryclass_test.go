@@ -396,8 +396,8 @@ func TestClassify_NeverPanics(t *testing.T) {
 		&DriverError{Code: "0"},   // a state too short to slice
 		&DriverError{Code: "4"},   // ditto, one byte
 		&TransportError{Op: "rx"}, // nil cause: Error() formats it as <nil>
-		(*DriverError)(nil),       // typed nil: Error() would panic if called
-		(*TransportError)(nil),
+		(*DriverError)(nil),       // typed nil: Error()/StatusClass()/IsRetryable() are nil-safe
+		(*TransportError)(nil),    // typed nil: Error() is nil-safe
 		&hostileError{},
 		fmt.Errorf("empty wrap: %w", errors.New("")),
 	}

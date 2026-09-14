@@ -63,14 +63,16 @@ func (c RetryClass) String() string {
 // StatusXxx constants in errors.go. Each is pinned to the engine source that
 // emits it at the pinned engine version (0.8.15).
 const (
-	// stateClusterWriteUnknown is the engine's clustered-write TIMEOUT: the
-	// entry MAY have committed but this node could not confirm its local apply
-	// within budget (geode src/server/proto_util.zig, error.Timeout =>
-	// "08006"). The outcome is UNKNOWN, which is why it is deliberately not in
-	// the 08 connection-exception family's RetryNewConn answer below: retrying
-	// a write whose outcome is unknown is what minted a duplicate row (the
-	// engine's own RC-2 note). It is retryable ONLY with an idempotency key,
-	// which is the caller's decision, not the driver's.
+	// stateClusterWriteUnknown is a TIMEOUT: the operation MAY have committed
+	// but this node could not confirm its local apply within budget (geode
+	// src/server/proto_util.zig, a generic `error.Timeout => .{ .code =
+	// "08006", ... }` arm that any request path can reach, not something
+	// specific to clustered writes). The outcome is UNKNOWN, which is why it
+	// is deliberately not in the 08 connection-exception family's
+	// RetryNewConn answer below: retrying an operation whose outcome is
+	// unknown is what minted a duplicate row (the engine's own RC-2 note). It
+	// is retryable ONLY with an idempotency key, which is the caller's
+	// decision, not the driver's.
 	stateClusterWriteUnknown = "08006"
 
 	// gqlStateClassLen is the length of a GQLSTATE's leading CLASS, the first

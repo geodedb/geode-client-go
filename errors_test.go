@@ -90,6 +90,63 @@ func TestDriverError_Unwrap(t *testing.T) {
 	}
 }
 
+// TestNilReceiver_ErrorMethods pins the nil-receiver guards on *DriverError,
+// *TransportError and *SecurityError: errors.Is, errors.As, fmt's %v/%w and a
+// caller's own IsRetryable/StatusClass check all may be handed a typed-nil
+// error, and none of these methods may panic when that happens. Each returns
+// a sensible zero value instead — "<nil>" for Error(), "" or false for the
+// status/retryability accessors — mirroring the nil-safety already pinned for
+// Unwrap and Is.
+func TestNilReceiver_ErrorMethods(t *testing.T) {
+	var de *DriverError
+	if got, want := de.Error(), "<nil>"; got != want {
+		t.Errorf("(*DriverError)(nil).Error() = %q, want %q", got, want)
+	}
+	if got, want := de.StatusClass(), ""; got != want {
+		t.Errorf("(*DriverError)(nil).StatusClass() = %q, want %q", got, want)
+	}
+	if got := de.IsRetryable(); got != false {
+		t.Errorf("(*DriverError)(nil).IsRetryable() = %v, want false", got)
+	}
+	if got := de.Unwrap(); got != nil {
+		t.Errorf("(*DriverError)(nil).Unwrap() = %v, want nil", got)
+	}
+	if de.Is(errors.New("anything")) {
+		t.Error("(*DriverError)(nil).Is(...) = true, want false")
+	}
+
+	var te *TransportError
+	if got, want := te.Error(), "<nil>"; got != want {
+		t.Errorf("(*TransportError)(nil).Error() = %q, want %q", got, want)
+	}
+	if got := te.Unwrap(); got != nil {
+		t.Errorf("(*TransportError)(nil).Unwrap() = %v, want nil", got)
+	}
+
+	var se *SecurityError
+	if got, want := se.Error(), "<nil>"; got != want {
+		t.Errorf("(*SecurityError)(nil).Error() = %q, want %q", got, want)
+	}
+	if got := se.Unwrap(); got != nil {
+		t.Errorf("(*SecurityError)(nil).Unwrap() = %v, want nil", got)
+	}
+
+	// A typed-nil error boxed into the error interface must not panic
+	// through fmt, errors.Is or errors.As either — this is the actual shape
+	// a caller mistake produces (e.g. `var p *DriverError; return p`).
+	var errIface error = de
+	if got, want := fmt.Sprintf("%v", errIface), "<nil>"; got != want {
+		t.Errorf("fmt.Sprintf(%%v, typed-nil *DriverError) = %q, want %q", got, want)
+	}
+	if errors.Is(errIface, ErrTenantScopeRequired) {
+		t.Error("errors.Is(typed-nil *DriverError, ErrTenantScopeRequired) = true, want false")
+	}
+	var asTarget *DriverError
+	if errors.As(errIface, &asTarget) && asTarget != nil {
+		t.Error("errors.As matched a typed-nil *DriverError to a non-nil target")
+	}
+}
+
 func TestTransportError_Error(t *testing.T) {
 	cause := errors.New("connection refused")
 
