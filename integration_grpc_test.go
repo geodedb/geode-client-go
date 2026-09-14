@@ -22,8 +22,6 @@
 // cannot rot silently, and each one is recorded in
 // .superpowers/sdd/task-14-report.md with engine/driver file:line evidence:
 //
-//   - no PULL, so no paging past the first gRPC page
-//     (TestIntegration_GRPCPagedResultRefusesRatherThanTruncates)
 //   - no QUIC pool, so no probe stream and no Drain of pooled connections
 //     (TestIntegration_GRPCHealthFallsBackToPing)
 //   - a different HELLO capability set
@@ -50,6 +48,8 @@ const (
 	grpcVecGraph    = "grpcvectest"
 	grpcROGraph     = "grpcrotest"
 	grpcCancelGraph = "grpccanceltest"
+	grpcPagedGraph  = "grpcpagedtest"
+	grpcBatchGraph  = "grpcbatchtest"
 	grpcPlanGraph   = "grpcplantest"
 	grpcPinGraph    = "grpcpintest"
 )
@@ -57,10 +57,18 @@ const (
 // grpcStreamPageSize is the engine's gRPC stream page size: geode 0.8.15
 // serves Execute over gRPC as a server-streaming RPC and pages it at
 // query_runner.default_page_size (src/transport/grpc_server.zig:915 ->
-// src/client/quic_query_runner.zig:5), i.e. 128 rows. A gRPC result of at most
-// this many rows arrives in the first page and needs no PULL; anything longer
-// does, and the gRPC transport has no PULL to send.
+// src/client/quic_query_runner.zig:5), i.e. 128 rows.
+//
+// Nothing here needs a PULL: the engine PUSHES every page until one is final
+// (grpc_server.zig:1009-1101 handleExecuteStreaming) and the driver reads them
+// (Transport.PagesArePushed, rows.go fetchNextPage). The constant matters
+// because a test that means to cross a page boundary has to seed past it —
+// seeding 128 rows or fewer would assert nothing about paging at all.
 const grpcStreamPageSize = 128
+
+// cancelSeedRows is the row count the cancellation tests seed: more than one
+// pushed page, so a cancel lands with pages still in flight.
+const cancelSeedRows = 2*grpcStreamPageSize + 5
 
 // requireGRPCDSN returns the gRPC DSN or fails the test.
 //
@@ -222,6 +230,15 @@ func TestIntegration_GRPCVectorParameterBinds(t *testing.T) {
 		t.Logf("CREATE INDEX (tolerated if already present): %v", err)
 	}
 
+	// The id of the node the query vector is nearest to. knn() returns node
+	// ids (engine 0.8.15 src/gql/language_metadata.zig:1086-1098, return_type
+	// LIST), so the assertion needs gv-a's id to compare against.
+	var wantID int64
+	if err := db.QueryRowContext(ctx,
+		"MATCH (n:GRPCVecProbe {vid: ?}) RETURN id(n)", "gv-a").Scan(&wantID); err != nil {
+		t.Fatalf("id(gv-a) over gRPC: %v", err)
+	}
+
 	var ids any
 	if err := db.QueryRowContext(ctx,
 		"RETURN knn('gembedding', ?, ?, 'cosine')", Vector{0.99, 0.01, 0}, 1,
@@ -231,7 +248,24 @@ func TestIntegration_GRPCVectorParameterBinds(t *testing.T) {
 	if ids == nil {
 		t.Fatal("knn returned NULL over gRPC — the vector parameter did not reach the function")
 	}
-	t.Logf("knn(bound vector) over gRPC = %v", ids)
+	t.Logf("knn(bound vector) over gRPC = %v (gv-a is id %d)", ids, wantID)
+
+	// Non-nil is not enough: a parameter that arrived as the WRONG vector, or
+	// as a zero vector, still returns a non-nil list of k ids. The nearest
+	// neighbour of {0.99, 0.01, 0} under cosine is gv-a {1, 0, 0} and nothing
+	// else, so only the right vector produces this answer.
+	nearest, isList := ids.([]any)
+	if !isList || len(nearest) != 1 {
+		t.Fatalf("knn(k=1) over gRPC = %#v, want a 1-element list of ids", ids)
+	}
+	gotID, isInt := nearest[0].(int64)
+	if !isInt {
+		t.Fatalf("knn id = %#v (%T), want int64", nearest[0], nearest[0])
+	}
+	if gotID != wantID {
+		t.Fatalf("knn nearest id = %d, want %d (gv-a): the bound query vector did not "+
+			"steer the search", gotID, wantID)
+	}
 }
 
 // -----------------------------------------------------------------------
@@ -342,12 +376,16 @@ func TestIntegration_GRPCReadOnlyWireFlagEnforced(t *testing.T) {
 		}
 		code = exec.GetError().GetCode()
 		msg = exec.GetError().GetMessage()
-		return nil
+		// Retire this connection. The exchange above ran one Execute outside
+		// the Conn's own bookkeeping and the stream carried a server error
+		// frame, so it must not be reused. sql.Conn.Close() RETURNS the
+		// connection to the pool; returning driver.ErrBadConn from the Raw
+		// callback is what discards it (database/sql sql.Conn.Raw closes the
+		// Conn when f returns exactly driver.ErrBadConn).
+		return driver.ErrBadConn
 	})
-	// The stream carried a server error frame; retire this connection rather
-	// than returning it to the pool.
 	_ = raw.Close()
-	if rawErr != nil {
+	if rawErr != nil && !errors.Is(rawErr, driver.ErrBadConn) {
 		t.Fatalf("raw gRPC transport exchange: %v", rawErr)
 	}
 
@@ -424,10 +462,9 @@ func TestIntegration_GRPCStrictTenancyRefusesUnscopedSession(t *testing.T) {
 
 // seedGRPCCancelRows brings the cancel graph up to n rows over gRPC.
 //
-// The seed deliberately does NOT use Pool.BatchExec: a batch returns a result
-// set, and a result set longer than one gRPC page cannot be paged on this
-// transport (see TestIntegration_GRPCPagedResultRefusesRatherThanTruncates).
-// Seeding statement by statement keeps every response a single page.
+// One MERGE per row rather than Pool.BatchExec: the cancellation tests must not
+// depend on the transaction/batch path to set up the row count they cancel in
+// the middle of.
 func seedGRPCCancelRows(ctx context.Context, t *testing.T, db *sql.DB, n int) {
 	t.Helper()
 	for i := range n {
@@ -448,7 +485,12 @@ func TestIntegration_GRPCCancelMidStream(t *testing.T) {
 
 	db := grpcDB(t, "&graph="+grpcCancelGraph)
 	db.SetMaxOpenConns(4)
-	seedGRPCCancelRows(base, t, db, grpcStreamPageSize)
+	// More than one pushed page, so "abort mid-stream" is literal: the reader
+	// is cancelled with pages still owed by the server-streaming RPC, not
+	// merely with buffered rows left over. Seeding exactly one page (as this
+	// test did while gRPC could not page at all) could only ever prove the
+	// weaker property.
+	seedGRPCCancelRows(base, t, db, cancelSeedRows)
 
 	ctx, cancel := context.WithCancel(base)
 	defer cancel()
@@ -475,12 +517,13 @@ func TestIntegration_GRPCCancelMidStream(t *testing.T) {
 	if abortLatency > 5*time.Second {
 		t.Fatalf("cancellation took %v to abort the gRPC stream, want prompt", abortLatency)
 	}
-	// The whole result is buffered in one gRPC page, so "aborted" can only
-	// mean "stopped handing out the buffered rows". Draining the page anyway
-	// is the regression this bound catches.
+	// Cancelling at row 5 must stop the reader inside the FIRST pushed page:
+	// it may not drain the rest of that page, and it certainly may not go on
+	// reading the pages the engine is still pushing.
 	if read >= grpcStreamPageSize {
-		t.Fatalf("read %d of %d buffered rows after cancelling at row 5: the cancel "+
-			"did not stop the reader", read, grpcStreamPageSize)
+		t.Fatalf("read %d of %d seeded rows after cancelling at row 5: the cancel did "+
+			"not stop the reader (it got past the first %d-row page)",
+			read, cancelSeedRows, grpcStreamPageSize)
 	}
 
 	var one int64
@@ -503,7 +546,7 @@ func TestIntegration_GRPCCancelRetiresConn(t *testing.T) {
 	defer cancelBase()
 
 	seed := grpcDB(t, "&graph="+grpcCancelGraph)
-	seedGRPCCancelRows(base, t, seed, grpcStreamPageSize)
+	seedGRPCCancelRows(base, t, seed, cancelSeedRows)
 
 	cfg, err := ParseDSN(requireGRPCDSN(t) + "&graph=" + grpcCancelGraph)
 	if err != nil {
@@ -776,12 +819,14 @@ func TestIntegration_GRPCPlanPayloadIsTypedAndKindChecked(t *testing.T) {
 			t.Errorf("absorbPlanFrame(explain payload, planProfile) = %v, want ErrPlanKindMismatch",
 				mismatch)
 		}
-		return nil
+		// Retire this connection: the exchange consumed one Execute stream
+		// outside the Conn's own bookkeeping. sql.Conn.Close() would hand it
+		// straight back to the pool; only driver.ErrBadConn from the Raw
+		// callback discards it.
+		return driver.ErrBadConn
 	})
-	// The raw exchange consumed one Execute stream outside the Conn's own
-	// bookkeeping; retire the connection rather than returning it.
 	_ = raw.Close()
-	if rawErr != nil {
+	if rawErr != nil && !errors.Is(rawErr, driver.ErrBadConn) {
 		t.Fatalf("raw gRPC plan exchange: %v", rawErr)
 	}
 }
@@ -899,78 +944,154 @@ func TestIntegration_GRPCSessionPinsOneConnection(t *testing.T) {
 // Documented gaps — asserted, never skipped
 // -----------------------------------------------------------------------
 
-// TestIntegration_GRPCPagedResultRefusesRatherThanTruncates pins the biggest
-// real gap between the two transports.
+// TestIntegration_GRPCPagedResultIsConsumedAcrossPushedPages is the
+// GAP-SONNY806-04 regression test (Task 14b).
 //
 // geode 0.8.15 serves Execute over gRPC as a SERVER-STREAMING RPC: the engine
-// pushes the schema and then every data page itself and ends the stream
-// (src/transport/grpc_server.zig:1008-1101 handleExecuteStreaming), so there is
-// no client-driven PULL — and GeodeService declares no method that could carry
-// one (proto/geode_grpc.pb.go, GeodeService_ServiceDesc). The driver's Rows
-// pages with PULL (rows.go fetchNextPage), so a result longer than the engine's
-// gRPC page (128 rows, grpc_server.zig:915 -> quic_query_runner.zig:5) ends at
-// the first page.
+// pushes the schema/first response and then loops buildStreamDataPageLocked ->
+// sendStreamResponse until the page it built is final, paging at
+// grpc_stream_page_size (src/transport/grpc_server.zig:1009-1101, :915 ->
+// src/client/quic_query_runner.zig:5 = 128 rows). Every page is on the wire
+// unasked, and GRPCTransport.ReceiveProto has always returned them.
 //
-// What this test refuses to allow is a SILENT short read. The reader must stop
-// with a typed ErrUnsupportedOnTransport that names the transport limit — a
-// caller must be able to tell "this wire cannot page" from "the query returned
-// that many rows" — and Classify must answer RetryNever, because no retry and
-// no other connection makes gRPC grow a PULL.
+// Until Task 14b the driver asked anyway: Rows.fetchNextPage sent a PullRequest
+// after every non-final page, GeodeService declares no Pull method, the WRITE
+// failed, and a gRPC result stopped dead at 128 rows with a typed refusal. That
+// refusal was a capitulation to a driver bug, not a property of the wire.
 //
-// Delete this test when the driver learns to consume the engine's pushed pages
-// (or gRPC gains a PULL); until then it is the contract.
-func TestIntegration_GRPCPagedResultRefusesRatherThanTruncates(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+// This seeds five full pages plus a short one — the remainder matters, because
+// an off-by-one page loop is invisible on an exact multiple — and demands ALL
+// of it, IN ORDER. A short read, a duplicated page, a dropped page or a
+// reordered one all fail here.
+func TestIntegration_GRPCPagedResultIsConsumedAcrossPushedPages(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 
-	const rows = grpcStreamPageSize + 40
+	const want = 5*grpcStreamPageSize + 7 // 647: five full pushed pages + 7
 
-	db := grpcDB(t, "&graph="+grpcCancelGraph)
-	seedGRPCCancelRows(ctx, t, db, rows)
+	db := grpcDB(t, "&graph="+grpcPagedGraph)
+	seedGRPCPagedRows(ctx, t, db, want)
 
-	// Control arm: the engine really does hold that many rows, so a short read
-	// below is the transport's doing and not an empty graph.
+	// Control arm: the engine really holds that many rows, so a short read
+	// below is the driver's doing and not a thin seed.
 	var total int64
 	if err := db.QueryRowContext(ctx,
-		"MATCH (n:GRPCCancelProbe) RETURN count(n)").Scan(&total); err != nil {
+		"MATCH (n:GRPCPageProbe) RETURN count(n)").Scan(&total); err != nil {
 		t.Fatalf("count over gRPC: %v", err)
 	}
-	if total < int64(rows) {
-		t.Fatalf("engine holds %d GRPCCancelProbe rows, want at least %d — the seed did not land",
-			total, rows)
+	if total != int64(want) {
+		t.Fatalf("engine holds %d GRPCPageProbe rows, want exactly %d — the seed did not land",
+			total, want)
 	}
 
-	r, err := db.QueryContext(ctx, "MATCH (n:GRPCCancelProbe) RETURN n.i")
+	r, err := db.QueryContext(ctx,
+		"MATCH (n:GRPCPageProbe) RETURN n.i ORDER BY n.i")
 	if err != nil {
 		t.Fatalf("QueryContext over gRPC: %v", err)
 	}
+	defer func() { _ = r.Close() }()
+
 	read := 0
 	for r.Next() {
+		var got int64
+		if err := r.Scan(&got); err != nil {
+			t.Fatalf("Scan at row %d: %v", read, err)
+		}
+		if got != int64(read) {
+			t.Fatalf("row %d is n.i=%d, want %d: the pushed pages were reordered, "+
+				"duplicated or dropped", read, got, read)
+		}
 		read++
 	}
-	rowsErr := r.Err()
-	_ = r.Close()
+	if err := r.Err(); err != nil {
+		t.Fatalf("rows.Err() after %d of %d rows = %v; want nil — gRPC paging is "+
+			"server-pushed and the driver must consume it (GAP-SONNY806-04)",
+			read, want, err)
+	}
+	if read != want {
+		t.Fatalf("read %d of %d rows with no error: a truncated result set was handed "+
+			"to the caller as if it were complete", read, want)
+	}
+	t.Logf("gRPC paged read: %d rows across %d pushed pages, in order",
+		read, (read+grpcStreamPageSize-1)/grpcStreamPageSize)
+}
 
-	t.Logf("gRPC paged read: %d of %d rows, err=%v", read, total, rowsErr)
-
-	if rowsErr == nil {
-		if int64(read) == total {
-			t.Fatalf("gRPC returned all %d rows: the transport learned to page. "+
-				"Remove this gap test and the ErrUnsupportedOnTransport arm in "+
-				"GRPCTransport.SendProto.", total)
+// seedGRPCPagedRows brings the paging graph up to n rows over gRPC.
+//
+// One MERGE per row, not Pool.BatchExec: this is the control arm for the
+// paging test, so it must not depend on the code path under test. (BatchExec
+// over gRPC has its own test below.)
+func seedGRPCPagedRows(ctx context.Context, t *testing.T, db *sql.DB, n int) {
+	t.Helper()
+	for i := range n {
+		if _, err := db.ExecContext(ctx,
+			"MERGE (n:GRPCPageProbe {i: ?})", int64(i)); err != nil {
+			t.Fatalf("seed row %d over gRPC: %v", i, err)
 		}
-		t.Fatalf("gRPC returned %d of %d rows with NO error: a truncated result set was "+
-			"handed to the caller as if it were complete", read, total)
 	}
-	if !errors.Is(rowsErr, ErrUnsupportedOnTransport) {
-		t.Fatalf("rows.Err() = %v, want ErrUnsupportedOnTransport naming the missing PULL", rowsErr)
+}
+
+// TestIntegration_GRPCBatchExecPastOnePage mirrors the QUIC batch path over
+// gRPC at a size that used to be unreachable there.
+//
+// Pool.BatchExec runs every statement inside one transaction on one pinned
+// connection (batch.go batchExecTx). Over gRPC that means a unary Begin, N
+// server-streaming Executes and a unary Commit on the same session — and until
+// Task 14b the gRPC parity lane seeded row by row specifically to stay under
+// the engine's first page. Asserting a batch that crosses five page boundaries
+// AND its committed effect keeps that limit from quietly coming back.
+func TestIntegration_GRPCBatchExecPastOnePage(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+
+	const want = 5*grpcStreamPageSize + 7 // 647
+
+	pool := grpcPool(t, "&graph="+grpcBatchGraph)
+
+	stmts := make([]Statement, 0, want)
+	for i := range want {
+		stmts = append(stmts, Statement{
+			Query: "MERGE (n:GRPCBatchProbe {i: ?})",
+			Args:  []any{int64(i)},
+		})
 	}
-	if read != grpcStreamPageSize {
-		t.Errorf("read %d rows before the refusal, want the engine's gRPC page size %d",
-			read, grpcStreamPageSize)
+	if err := pool.BatchExec(ctx, stmts); err != nil {
+		t.Fatalf("BatchExec(%d statements) over gRPC: %v", want, err)
 	}
-	if got := Classify(rowsErr); got != RetryNever {
-		t.Errorf("Classify(rows.Err()) = %v, want RetryNever: no retry grows a PULL", got)
+
+	var total int64
+	if err := pool.DB().QueryRowContext(ctx,
+		"MATCH (n:GRPCBatchProbe) RETURN count(n)").Scan(&total); err != nil {
+		t.Fatalf("count after BatchExec over gRPC: %v", err)
+	}
+	if total != int64(want) {
+		t.Fatalf("BatchExec committed %d of %d rows over gRPC", total, want)
+	}
+
+	// And the rows read back whole, which is the half that needed the paging
+	// fix: reading 647 rows crosses five pushed page boundaries.
+	r, err := pool.DB().QueryContext(ctx,
+		"MATCH (n:GRPCBatchProbe) RETURN n.i ORDER BY n.i")
+	if err != nil {
+		t.Fatalf("QueryContext over gRPC: %v", err)
+	}
+	defer func() { _ = r.Close() }()
+	read := 0
+	for r.Next() {
+		var got int64
+		if err := r.Scan(&got); err != nil {
+			t.Fatalf("Scan at row %d: %v", read, err)
+		}
+		if got != int64(read) {
+			t.Fatalf("row %d is n.i=%d, want %d", read, got, read)
+		}
+		read++
+	}
+	if err := r.Err(); err != nil {
+		t.Fatalf("rows.Err() after %d rows: %v", read, err)
+	}
+	if read != want {
+		t.Fatalf("read back %d of %d batched rows", read, want)
 	}
 }
 

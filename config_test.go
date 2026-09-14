@@ -708,6 +708,43 @@ func TestParseDSN_InsecureTLSSkipVerify(t *testing.T) {
 	}
 }
 
+// TestParseDSN_GRPCDefaultsToVerifiedTLS pins the default that the gRPC
+// integration harness deliberately overrides.
+//
+// geode 0.8.15's gRPC listener is TLS-only in a release build
+// (src/transport/grpc_server.zig:690-733) and serves an auto-generated
+// self-signed certificate, so every harness DSN in this repo carries
+// insecure_tls_skip_verify=true. That is a TEST accommodation. A gRPC DSN that
+// does not ask for it must still verify the server's certificate: silently
+// skipping verification because the transport is gRPC would turn a per-DSN
+// opt-in into a transport-wide downgrade, and nothing in the connect path
+// would say so.
+func TestParseDSN_GRPCDefaultsToVerifiedTLS(t *testing.T) {
+	for _, dsn := range []string{
+		"grpc://localhost:50051",
+		"grpc://localhost:50051?graph=g&tenant=t",
+		"grpc://localhost:50051?user=geode&pass=secret&graph=g",
+	} {
+		t.Run(dsn, func(t *testing.T) {
+			cfg, err := ParseDSN(dsn)
+			if err != nil {
+				t.Fatalf("ParseDSN(%q): %v", dsn, err)
+			}
+			if cfg.Transport != TransportGRPC {
+				t.Fatalf("Transport = %v, want TransportGRPC", cfg.Transport)
+			}
+			if cfg.InsecureSkipVerify {
+				t.Error("InsecureSkipVerify = true for a gRPC DSN that never asked for it: " +
+					"certificate verification must stay on unless insecure_tls_skip_verify " +
+					"(or an alias) is set explicitly")
+			}
+			if cfg.TLSDisabled {
+				t.Error("TLSDisabled = true for a gRPC DSN that never set tls=0")
+			}
+		})
+	}
+}
+
 // TestParseDSN_Credentials tests user/username and pass/password parameters.
 func TestParseDSN_Credentials(t *testing.T) {
 	tests := []struct {
