@@ -8,6 +8,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"geodedb.com/geode/internal/validate"
@@ -75,10 +76,23 @@ func (c *Conn) markConnFailed() {
 	c.activeRows = nil
 }
 
+// connSeq numbers driver connections so a caller can assert that two
+// operations ran on the same one. It is a client-side identity only: the
+// server's own session identifier is shared by every stream multiplexed onto
+// one pooled QUIC connection (see adoptHelloState) and therefore cannot
+// distinguish two Conns.
+//
+//nolint:gochecknoglobals // monotonic counter for connection identity
+var connSeq atomic.Uint64
+
 // Conn represents a connection to a Geode database.
 type Conn struct {
 	cfg       *Config
 	transport Transport
+
+	// id is this connection's process-unique identity, assigned at
+	// construction and immutable thereafter — hence no mutex.
+	id uint64
 
 	mu         sync.Mutex
 	state      ConnState
@@ -132,6 +146,16 @@ func (c *Conn) BoundGraph() string { return c.boundGraph }
 // SessionID returns the session identifier the server issued in its HELLO
 // response, or "" when the server issued none.
 func (c *Conn) SessionID() string { return c.sessionID }
+
+// ConnID returns a process-unique identifier for this driver connection.
+// It never changes for the life of the Conn and is never reused.
+//
+// Use it to assert that several operations rode the same connection — and
+// therefore the same QUIC stream. SessionID cannot answer that question: every
+// stream multiplexed onto one pooled QUIC connection inherits the same
+// server-issued session id. Session.ConnID surfaces this value for a pinned
+// connection.
+func (c *Conn) ConnID() uint64 { return c.id }
 
 // drainExecStream reads all remaining ExecutionResponse frames from the stream
 // until the execution is complete (final data page + optional metrics/heartbeat).
@@ -210,6 +234,7 @@ func newConn(cfg *Config, transport Transport) *Conn {
 		cfg:       cfg,
 		transport: transport,
 		state:     StateIdle,
+		id:        connSeq.Add(1),
 	}
 }
 

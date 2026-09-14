@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Transaction pinning: `Pool.Session(ctx)` checks one connection out of the
+  pool and returns a `*Session` whose `ExecContext`, `QueryContext` and
+  `TX(ctx, opts, fn)` all ride that one connection — and therefore one QUIC
+  stream — so a multi-statement ingest or a run of transactions cannot straddle
+  connections. `Session.ConnID()` reports the pinned connection's identity
+  (also exposed on the driver connection as `(*Conn).ConnID()`), and
+  `Session.BoundGraph()` the graph it is bound to. `TX` runs the whole callback
+  on the pinned connection, commits on a nil return, rolls back on an error,
+  and rolls back then re-panics on a panic; a nested `TX` — or any statement
+  sent to the `Session` instead of to the `*sql.Tx` — reports `ErrSessionBusy`
+  instead of deadlocking. Once the pinned connection fails (a cancelled query
+  retires it, a transport error marks it), the `Session` is retired rather than
+  silently re-pinned to a different connection: every method then returns
+  `ErrSessionRetired`, which matches both `ErrSessionClosed` and
+  `driver.ErrBadConn`. `Close` is idempotent and releases the connection
+  exactly once (SONNY-806).
 - Capability discovery: `Connector.ServerInfo(ctx)` reports the engine's
   `SHOW VERSION` string verbatim, the raw ordered `SHOW CAPABILITIES` rows
   (`ServerInfo.Rows`), the boolean feature matrix built only from rows whose
