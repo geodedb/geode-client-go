@@ -84,7 +84,7 @@ func runTestMain(m *testing.M) int {
 	// restart would move the engine out from under any pool holding the
 	// original DSN — and TestIntegration_RecoversFromServerRestart would be
 	// measuring a wrong address rather than an orphaned connection.
-	hostPort, err := freeHostUDPPort()
+	hostPort, err := reserveHostPort()
 	if err != nil {
 		log.Fatalf("integration: failed to reserve a host port: %v", err)
 	}
@@ -99,10 +99,14 @@ func runTestMain(m *testing.M) int {
 		// Publish the engine on a FIXED host port. testcontainers' ExposedPorts
 		// does not accept a host:container spec, so the binding goes through
 		// the Docker HostConfig directly.
+		// The binding is on LOOPBACK, not 0.0.0.0: a test engine with a
+		// seeded admin credential and strict tenancy disabled for the harness
+		// tenant has no business being reachable from the rest of the network
+		// while the suite runs.
 		HostConfigModifier: func(hc *container.HostConfig) {
 			hc.PortBindings = network.PortMap{
 				enginePort: []network.PortBinding{
-					{HostIP: netip.IPv4Unspecified(), HostPort: hostPort},
+					{HostIP: netip.AddrFrom4([4]byte{127, 0, 0, 1}), HostPort: hostPort},
 				},
 			}
 		},
@@ -193,6 +197,19 @@ func runTestMain(m *testing.M) int {
 	}
 
 	return code
+}
+
+// reserveHostPort returns the host UDP port the engine container publishes on.
+//
+// GEODE_TEST_HOST_PORT pins it, which is what a caller needs when the
+// ephemeral range is not usable (a restricted sandbox, a firewalled host) or
+// when two lanes must be kept off each other's port. Otherwise a free
+// ephemeral port is reserved — see freeHostUDPPort for the race that implies.
+func reserveHostPort() (string, error) {
+	if port := os.Getenv("GEODE_TEST_HOST_PORT"); port != "" {
+		return port, nil
+	}
+	return freeHostUDPPort()
 }
 
 // freeHostUDPPort reserves an unused UDP port on the host and returns it. The

@@ -58,6 +58,24 @@ const (
 	// budget, not this one.
 	probeWarmupTimeout = 5 * time.Second
 
+	// probeStreamSetup is the EXTRA budget a probe gets when it has had to
+	// open a replacement stream on a connection that has already answered.
+	//
+	// Stream setup is paid per stream, not per connection: when a failed probe
+	// abandons its stream (see pooledConn.abandoned), the next probe opens a
+	// fresh one and pays the server-side materialisation cost again — ~70ms
+	// measured. Budgeting that replacement as a bare round trip is what
+	// evicted healthy connections: the retry spent most of its 100ms floor on
+	// stream setup, failed, and that second failure was the strike that
+	// condemned a connection the engine was merely slow to answer on.
+	//
+	// It is 500ms rather than probeWarmupTimeout because this budget is in the
+	// DETECTION path. The peer has already answered on this connection, so the
+	// cost of materialising one more stream on it is known (~70ms, and this is
+	// seven times that); a genuinely dead peer must not be able to hide behind
+	// a five-second replacement round while the pool keeps handing it out.
+	probeStreamSetup = 500 * time.Millisecond
+
 	// probeStrikes is how many CONSECUTIVE failed probes condemn a connection.
 	//
 	// One failure is not evidence: a probe can lose its race with a saturated
@@ -103,6 +121,7 @@ const (
 	probeErrPoolClosed     = "geode: pool is closed"
 	probeErrPoolDraining   = "geode: pool is draining"
 	probeErrNoPooledConns  = "geode: no pooled connections to probe"
+	probeErrUnverified     = "geode: no pooled connection could be verified"
 	probeErrNotInitialized = "geode: pool is not initialised"
 	probeErrUnknown        = "geode: health probe failed"
 )
@@ -146,11 +165,16 @@ type HealthStatus struct {
 	// PooledConns is the number of underlying QUIC connections the pool holds.
 	PooledConns int
 
-	// LiveConns is how many of them answered the last probe.
+	// LiveConns is how many of them answered the last probe. A connection the
+	// probe skipped — one no HELLO has run on yet — is counted in PooledConns
+	// but NOT here, and never makes the status healthy: nothing about it was
+	// verified.
 	LiveConns int
 
-	// InFlightStreams is the number of QUIC streams checked out across those
-	// connections when the probe ran.
+	// InFlightStreams is the number of REQUEST streams checked out across
+	// those connections when the probe ran. The probe's own stream is not one
+	// of them: it is opened directly on the pooled connection and is counted
+	// neither here nor against max_streams_per_conn (see pooledConn.probe).
 	InFlightStreams int
 
 	// LastProbeErr is a static classification of the probe failure, empty when
@@ -215,6 +239,21 @@ func isRemoteCloseErr(err error) bool {
 // claim health from it: it performs one bounded round trip through
 // database/sql instead, which dials, handshakes and pings. That is the only
 // honest answer to "are you ready" from a cold pool.
+//
+// COST OF THE SYNCHRONOUS PATH. When Health has to probe for itself — which is
+// EVERY call when probing is disabled with health_probe_ms=0 — the call is
+// bounded by probeWarmupTimeout+probeRoundSlack, i.e. up to 5.25s in the worst
+// case (a connection whose probe stream has to be opened, against a server
+// that never answers). A steady-state round trip costs well under a
+// millisecond; the 5.25s is the ceiling, not the expectation. A readiness
+// endpoint that cannot afford that ceiling should either leave the probe loop
+// enabled — then Health reads a recorded result and does no I/O at all — or
+// pass a context with its own shorter deadline.
+//
+// Passing a short or already-cancelled context is safe: a probe that fails
+// because the CALLER's context ended is reported in the status but counts no
+// strike against any connection and does not disturb its probe stream, so
+// Health can never condemn the pool it is reporting on (see probeAll).
 //
 // Health never mutates application data: the probe is a protocol-level PING.
 func (p *Pool) Health(ctx context.Context) HealthStatus {

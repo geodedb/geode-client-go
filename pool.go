@@ -236,7 +236,10 @@ func (p *Pool) Config() *Config {
 // It also stops the pool's health-probe goroutine and closes the underlying
 // QUIC connections. Before the probe existed the QUIC pool was left to the
 // garbage collector; a goroutine is not collectable, so ownership is now
-// explicit.
+// explicit. A Pool that is never closed therefore outlives itself: its probe
+// goroutine keeps running and its pooled QUIC connections stay open on the
+// server until the process exits, so every Pool needs a Close (or a Drain,
+// which ends with one).
 func (p *Pool) Close() error {
 	if p == nil || p.db == nil {
 		return nil

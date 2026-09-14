@@ -355,18 +355,22 @@ func TestIntegration_RecoversFromServerRestart(t *testing.T) {
 		detected, probeInterval)
 	// Worst case, in the order it happens: the round already in flight when
 	// the engine died runs out its budget without being attributable to the
-	// kill, the loop waits one interval for the next tick, and that round runs
-	// out its own budget. Plus scheduling slack.
+	// kill (its timestamp predates the kill, so the watcher does not count
+	// it), the loop waits one interval for the next tick, and that round runs
+	// out its own budget. That round is the one the watcher sees, and it has
+	// to open a REPLACEMENT probe stream — the round before it abandoned the
+	// old one — so it carries probeStreamSetup on top of its round trip. Plus
+	// scheduling slack.
 	//
 	// With the default one-second interval that is a few seconds; the point is
 	// that it is a small multiple of the interval and bounded, where before
 	// the fix it was unbounded (the control arm below waits out whatever
 	// deadline its caller set, and quicMaxIdleTimeout is 120s).
 	budget := qp.probeTimeout()
-	if want := 2*probeInterval + 2*budget + 400*time.Millisecond; detected > want {
+	if want := 2*probeInterval + 2*budget + probeStreamSetup + 400*time.Millisecond; detected > want {
 		t.Errorf("probe took %v to notice the kill, want within %v "+
-			"(2 intervals of %v plus 2 probe budgets of %v plus slack)",
-			detected, want, probeInterval, budget)
+			"(2 intervals of %v, 2 probe budgets of %v, one replacement stream setup of %v, plus slack)",
+			detected, want, probeInterval, budget, probeStreamSetup)
 	}
 
 	qp.mu.Lock()
@@ -533,4 +537,191 @@ func killEngine(t *testing.T, ctx context.Context) time.Time {
 	}
 	t.Fatal("the engine container was still running 30s after SIGKILL")
 	return time.Time{}
+}
+
+// TestIntegration_AFailedProbeLeavesTheLivePooledConnectionServing is the live
+// half of the SONNY-1227 rule, and the one the unit tests cannot prove.
+//
+// A probe that fails at strike 1 does NOT evict its connection: the connection
+// stays in the pool, keeps its request streams and keeps serving. The first
+// cut of this code closed the probe stream on every send/receive failure, and
+// geode 0.8.15 answers a stream closing on a pooled connection by tearing the
+// whole connection down — so one slow probe would have killed every sibling
+// statement riding that connection. The stream is abandoned instead.
+//
+// The failure is induced with the probeBudget hook rather than by hurting the
+// engine, so the connection under test is provably healthy the whole time: a
+// probe that fails on a connection the engine is still happily answering is
+// exactly the false positive this rule has to survive.
+func TestIntegration_AFailedProbeLeavesTheLivePooledConnectionServing(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	// pool_size=1 so the probe and every statement below ride the SAME QUIC
+	// connection; health_probe_ms=0 so the only probes are the ones this test
+	// drives.
+	pool, err := NewPool(healthDSN("&pool_size=1&health_probe_ms=0"),
+		WithMaxOpenConns(4), WithMaxIdleConns(4))
+	if err != nil {
+		t.Fatalf("NewPool: %v", err)
+	}
+	defer pool.Close() //nolint:errcheck // best effort in cleanup
+
+	var one int64
+	if err := pool.QueryRowContext(ctx, "RETURN 1").Scan(&one); err != nil {
+		t.Fatalf("warm-up query: %v", err)
+	}
+
+	qp := pool.quicPool()
+	if qp == nil {
+		t.Fatal("pool has no QUIC pool to probe")
+	}
+	first := onlyPooledConn(t, qp)
+
+	if err := qp.Probe(ctx); err != nil {
+		t.Fatalf("warm-up probe: %v", err)
+	}
+
+	// A sibling statement in flight ACROSS the failed probe: *sql.Rows holds
+	// its own stream open on this very connection until it is closed.
+	rows, err := pool.QueryContext(ctx, "RETURN 42")
+	if err != nil {
+		t.Fatalf("in-flight query: %v", err)
+	}
+
+	// One nanosecond, not merely something small: the probe has to fail for
+	// certain, or the test proves nothing on a fast day.
+	qp.probeBudgetOverride.Store(int64(time.Nanosecond))
+	probeErr := qp.Probe(ctx)
+	qp.probeBudgetOverride.Store(0)
+	if probeErr == nil {
+		t.Fatal("a 1ns probe budget did not fail the probe")
+	}
+	t.Logf("induced probe failure: %v", probeErr)
+
+	// The point of the whole exercise: the connection is still here.
+	if got := onlyPooledConn(t, qp); got != first {
+		t.Fatal("one failed probe cost the pool its connection — the probe stream was closed " +
+			"on a live connection and 0.8.15 tore it down (SONNY-1227)")
+	}
+	if first.isDead() {
+		t.Fatal("one failed probe condemned the connection")
+	}
+	if got := first.abandonedProbes(); got != 1 {
+		t.Fatalf("abandoned probe streams = %d, want 1", got)
+	}
+
+	// The sibling statement that was in flight across the failure survived it.
+	if !rows.Next() {
+		t.Fatalf("the in-flight statement lost its rows across the failed probe: %v", rows.Err())
+	}
+	var got int64
+	if err := rows.Scan(&got); err != nil {
+		t.Fatalf("scan after the failed probe: %v", err)
+	}
+	if got != 42 {
+		t.Fatalf("in-flight statement returned %d, want 42", got)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatalf("rows.Close after the failed probe: %v", err)
+	}
+
+	// And the connection keeps serving new statements.
+	for i := range 5 {
+		if err := pool.QueryRowContext(ctx, "RETURN ?", int64(i)).Scan(&one); err != nil {
+			t.Fatalf("query %d after the failed probe: %v", i, err)
+		}
+		if one != int64(i) {
+			t.Fatalf("query %d after the failed probe returned %d", i, one)
+		}
+	}
+	if got := onlyPooledConn(t, qp); got != first {
+		t.Fatal("the pooled connection was replaced while serving after the failed probe")
+	}
+
+	// The next probe opens a FRESH stream on the same connection and answers
+	// on it — the abandoned one is never reused.
+	if err := qp.Probe(ctx); err != nil {
+		t.Fatalf("probe after the failure: %v", err)
+	}
+	if got := onlyPooledConn(t, qp); got != first {
+		t.Fatal("the recovery probe replaced the pooled connection")
+	}
+	if h := pool.Health(ctx); !h.Healthy || h.LiveConns != 1 {
+		t.Fatalf("Health after recovery = %+v, want healthy with 1 live connection", h)
+	}
+}
+
+// TestIntegration_SessionPinnedBeforeDrainIsRetiredNotHung pins the other end
+// of the drain contract. Pool.Session refuses a pin taken DURING a drain
+// (TestIntegration_DrainOrdering); a Session pinned BEFORE one keeps its
+// connection until the drain closes it, and must then report the retirement
+// rather than block on a connection that is gone.
+//
+// The drain itself cannot quiesce here — a pinned Session holds its connection
+// checked out for as long as it is open — so this is also the proof of step 4:
+// Drain returns ctx.Err() and closes everything anyway.
+func TestIntegration_SessionPinnedBeforeDrainIsRetiredNotHung(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	pool, err := NewPool(healthDSN("&pool_size=2&health_probe_ms=100"),
+		WithMaxOpenConns(2), WithMaxIdleConns(2))
+	if err != nil {
+		t.Fatalf("NewPool: %v", err)
+	}
+
+	s, err := pool.Session(ctx)
+	if err != nil {
+		t.Fatalf("Session: %v", err)
+	}
+	defer s.Close() //nolint:errcheck // best effort in cleanup
+
+	rows, err := s.QueryContext(ctx, "RETURN 1")
+	if err != nil {
+		t.Fatalf("pre-drain statement on the pinned Session: %v", err)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatalf("pre-drain rows.Close: %v", err)
+	}
+
+	drainCtx, drainCancel := context.WithTimeout(ctx, 3*time.Second)
+	drainErr := pool.Drain(drainCtx)
+	drainCancel()
+	if !errors.Is(drainErr, context.DeadlineExceeded) {
+		t.Fatalf("Drain with a Session still pinned = %v, want context.DeadlineExceeded "+
+			"(the pinned connection never lets the pool quiesce)", drainErr)
+	}
+
+	// The contract: an error, promptly. A Session whose connection was closed
+	// under it must not sit on a dead stream waiting out its own deadline —
+	// that is the defect this whole task exists to remove, one layer up.
+	done := make(chan error, 1)
+	go func() {
+		r, err := s.QueryContext(ctx, "RETURN 1")
+		if err == nil {
+			err = r.Close()
+		}
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a statement on a Session pinned before Drain SUCCEEDED after the drain closed the pool")
+		}
+		switch {
+		case errors.Is(err, ErrSessionRetired),
+			errors.Is(err, ErrClosed),
+			errors.Is(err, sql.ErrConnDone),
+			errors.Is(err, ErrPoolDraining):
+			t.Logf("post-drain statement on the pinned Session failed as documented: %v", err)
+		default:
+			t.Fatalf("post-drain statement on the pinned Session = %v, want a retirement "+
+				"or closed-pool error", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("a statement on a Session pinned before Drain HUNG after the drain: " +
+			"the retirement contract says it gets an error, not a deadline")
+	}
 }

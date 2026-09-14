@@ -301,9 +301,33 @@ what does not answer:
   would cause the outage it is meant to detect. It carries no HELLO, because on
   a pooled connection the server authenticates the connection — which is why
   every stream after the first already skips the handshake.
+- **A failed probe abandons its stream, it does not close it.** Eviction takes
+  `probeStrikes` (2) CONSECUTIVE failures, so at strike 1 the connection is
+  still pooled and still carrying live request streams — closing its probe
+  stream then is the SONNY-1227 teardown, i.e. the very outage being detected.
+  The stream is dropped instead, the next probe opens a fresh one, and every
+  abandoned stream is closed together with the connection in `discard` /
+  `Close`. A connection that has abandoned `probeStrikes` streams is condemned,
+  which bounds the abandoned set. Reproducers:
+  `TestQUICPool_FailedProbeNeverClosesTheStreamOfALiveConn`,
+  `TestQUICPool_EvictionClosesEveryProbeStream`,
+  `TestIntegration_AFailedProbeLeavesTheLivePooledConnectionServing`.
+- **Stream setup is budgeted per stream.** A reused probe stream gets the
+  steady-state budget (`probeTimeout`); a REPLACEMENT stream — opened because a
+  failure abandoned the last — gets that plus `probeStreamSetup` (500 ms),
+  because the server materialises a probe stream on its first frame (~70 ms
+  measured) and charging that to a bare round trip made the retry fail too,
+  which is strike 2 and a healthy connection evicted. The first stream on a
+  connection nothing has ever answered on still gets `probeWarmupTimeout` (5 s).
+- **A caller's cancellation is not evidence.** A probe that fails because the
+  caller's context ended is reported in the status but records no strike and
+  leaves the probe stream alone, so a `Pool.Health` call with a short or
+  already-cancelled context cannot condemn the pool it is reporting on.
 - A connection that fails a probe is marked dead, removed from the pool and
   closed. `pruneDeadLocked` treats the probe verdict as a liveness signal
-  alongside the local context check, so `acquire` can never hand one out.
+  alongside the local context check, so `acquire` can never hand one out. A
+  connection no HELLO has run on yet is SKIPPED by the probe and counts as
+  neither live nor healthy: nothing about it was verified.
 - A pool-owned goroutine runs the probe on `Config.HealthProbeInterval`
   (DSN `?health_probe_ms=N`, default 1000, 0 disables). It starts lazily on the
   first `acquire`, never runs concurrently with itself, and is stopped and
@@ -316,10 +340,13 @@ what does not answer:
   statements, then closes everything.
 
 **Evidence after the fix** (engine 0.8.15, `SIGKILL` restart, probe interval
-200 ms, three runs): the probe recorded the pool unhealthy 7 ms / 179 ms /
-140 ms after the engine was confirmed gone, the orphaned connection was evicted,
-and the first post-restart statement succeeded in 331 ms / 237 ms / 400 ms —
-against the same restart's control arm stalling the full 6 s every time.
+200 ms): the probe recorded the pool unhealthy 7 ms / 179 ms / 140 ms after the
+engine was confirmed gone, the orphaned connection was evicted, and the first
+post-restart statement succeeded in 331 ms / 237 ms / 400 ms — against the same
+restart's control arm stalling the full 6 s every time. After the review fixes
+above (the round that notices the kill now has to open a replacement probe
+stream, and pays `probeStreamSetup` for it): unhealthy 638 ms after the kill,
+first post-restart statement 555 ms, control 6.001 s.
 
 ### BUG-0001: QUIC stream desynchronization on sequential queries
 

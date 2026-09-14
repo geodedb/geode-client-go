@@ -27,6 +27,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is everything closed; it is idempotent and closes the pool even if `ctx`
   expires first.
 
+  A probe never closes a stream on a connection that is still in the pool.
+  A failed probe ABANDONS its stream — it takes `probeStrikes` (2) consecutive
+  failures to evict a connection, so at strike 1 the connection is still
+  serving, and geode 0.8.15 answers a stream closing on a pooled connection by
+  tearing the whole connection down (SONNY-1227). The next probe opens a fresh
+  stream; abandoned streams are closed with the connection itself, and a
+  connection that has abandoned `probeStrikes` of them is condemned, which
+  bounds them. Two budgets follow from that: a reused stream gets the
+  steady-state budget, while a replacement stream gets it plus a stream-setup
+  allowance, because the server materialises a probe stream when its first
+  frame arrives (~70 ms measured) and charging that to a bare round trip was
+  enough to evict a healthy connection after one slow moment. A probe that
+  fails because the CALLER's context ended is reported but records no strike
+  and does not disturb the stream, so a short or cancelled `Health` context can
+  never condemn the pool. A connection no HELLO has run on yet is skipped by
+  the probe and is counted neither live nor healthy.
+
   This replaces a local-only liveness check that could not see an orphaned
   connection: after an ungraceful server restart the pool kept handing out a
   pre-restart connection and every statement on it waited out its caller's full

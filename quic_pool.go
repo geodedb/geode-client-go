@@ -3,6 +3,7 @@ package geode
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -61,6 +62,11 @@ const (
 	// of the old one-stream-per-conn workaround, BUG-0002) against per-stream
 	// receive-window memory.  A value of 1 reduces the pool to the old
 	// no-multiplex behaviour (one in-flight stream per connection).
+	//
+	// The liveness probe's stream is NOT counted here, nor against
+	// DefaultMaxStreams: it is opened directly on the pooled connection rather
+	// than through acquire, so a pooled connection carries up to this many
+	// REQUEST streams plus its own probe stream (see pooledConn.probe).
 	//
 	// Override via DSN `?max_streams_per_conn=N` (minimum 1).
 	DefaultMaxStreamsPerConn = 8
@@ -123,6 +129,11 @@ type QUICPool struct {
 	// it to observe the serialisation; it is nil in production.
 	probeHook func()
 
+	// probeBudgetOverride, when non-zero, replaces the per-probe deadline (in
+	// nanoseconds). Tests use it to force a probe failure against a live
+	// engine without hurting the engine; it is zero in production.
+	probeBudgetOverride atomic.Int64
+
 	// slotsCh is a counting semaphore bounding in-flight streams.  Capacity
 	// equals maxStreams; tokens are consumed by acquireSlot and returned
 	// by releaseSlot.  Pre-populated at construction so the channel acts
@@ -162,21 +173,50 @@ type pooledConn struct {
 	// live streams on them.
 	strikes atomic.Int32
 
-	// warmed records that this connection has answered a probe at least once,
-	// so later probes are budgeted as steady-state round trips rather than
-	// paying the one-off server-side stream setup again. It matters after a
-	// failure: the probe stream is discarded then (a late response would be
-	// read as the NEXT probe's answer), and the re-opened stream must not buy
-	// a dead connection another warmup budget.
+	// warmed records that the PEER has answered a probe on this connection at
+	// least once. It says nothing about any particular stream — stream setup
+	// is paid per stream (see probeStreamSetup) — only that this connection's
+	// round trip is known to work, which is what lets a replacement stream be
+	// budgeted as "one known round trip plus one known stream setup" instead
+	// of the open-ended probeWarmupTimeout a never-verified connection needs.
 	warmed atomic.Bool
 
 	// probe is a long-lived stream used only for liveness PINGs, opened
 	// lazily on the first probe and reused by every later one. It is NOT
 	// opened and closed per probe: geode 0.8.15 tears the whole pooled QUIC
 	// connection down when a stream that carried a handshake goes away
-	// (SONNY-1227), so the probe closes its stream only when the connection
-	// itself is being discarded. Guarded by mu.
-	probe *QUICTransport
+	// (SONNY-1227), so a probe stream is closed only when the connection
+	// itself is going away. Guarded by mu.
+	//
+	// The probe stream is not a REQUEST stream: it is opened directly on the
+	// pooled connection rather than through acquire, so it is counted neither
+	// against maxStreams (HealthStatus.InFlightStreams) nor against
+	// maxStreamsPerConn (see DefaultMaxStreamsPerConn). A pooled connection
+	// therefore carries up to maxStreamsPerConn request streams PLUS one probe
+	// stream, plus at most probeStrikes abandoned ones.
+	probe Transport
+
+	// abandoned holds probe streams a failed probe walked away from.
+	//
+	// A failed probe must NOT close its stream. At strike 1 the connection is
+	// not evicted — it stays in the pool and keeps serving live request
+	// streams — and geode 0.8.15 answers a stream closing on a pooled
+	// connection by tearing the WHOLE connection down (SONNY-1227), which is
+	// the outage the probe exists to detect. So the stream is dropped instead:
+	// the next probe opens a fresh one, and every abandoned stream is closed
+	// together with the connection itself in discard / QUICPool.Close.
+	//
+	// The list is bounded by probeStrikes: a connection that has abandoned
+	// that many streams is condemned (recordProbeFailure), so at most
+	// probeStrikes of them can exist before the connection — and with it all
+	// of them — is closed. With probeStrikes=2 at most one abandoned stream
+	// exists before eviction. Guarded by mu.
+	abandoned []Transport
+
+	// probeOpener, when set, replaces the "open a stream on this connection"
+	// step of probeTransport. Tests use it to drive the probe state machine
+	// without a live QUIC connection; it is nil in production.
+	probeOpener func(ctx context.Context) (Transport, error)
 }
 
 // NewQUICPool creates a new QUIC connection pool for the given config.
@@ -454,7 +494,7 @@ func (p *QUICPool) Close() error {
 
 	var firstErr error
 	for _, pc := range p.conns {
-		pc.closeProbe()
+		pc.closeProbeStreams()
 		// nil-safe: a pool assembled by a test fixture may hold connections
 		// with no quic.Conn behind them, and Close must still be callable.
 		if pc.qConn == nil {
@@ -539,8 +579,17 @@ func (p *QUICPool) pruneDeadLocked() {
 // CONSECUTIVE failures mark it dead. Evicting on a single failure closes a
 // healthy connection — with live streams on it — every time a probe loses its
 // race with a saturated engine. See probeStrikes for the measurement.
+//
+// A connection that has ABANDONED probeStrikes probe streams is condemned too,
+// however its strike count fell. Every genuine failure leaves one stream
+// behind that cannot be closed while the connection is still serving traffic
+// (see pooledConn.abandoned), so without this bound a connection that failed
+// and recovered over and over would leak one server-side stream per failure.
+//
+// A probe that failed because the CALLER's context ended is not counted at
+// all: see probeAll.
 func (pc *pooledConn) recordProbeFailure() bool {
-	if pc.strikes.Add(1) < probeStrikes {
+	if pc.strikes.Add(1) < probeStrikes && pc.abandonedProbes() < probeStrikes {
 		return false
 	}
 	pc.dead.Store(true)
@@ -573,7 +622,7 @@ func (pc *pooledConn) isDead() bool {
 // not answer, and leaving them alone means every one of their callers waits out
 // its own full deadline. That is the defect this whole path exists to fix.
 func (pc *pooledConn) discard(reason string) {
-	pc.closeProbe()
+	pc.closeProbeStreams()
 	if pc.qConn != nil {
 		_ = pc.qConn.CloseWithError(0, reason)
 	}
@@ -735,14 +784,17 @@ func (p *QUICPool) probeAll(ctx context.Context, conns []*pooledConn) (HealthSta
 	}
 
 	errs := make([]error, len(conns))
+	probed := make([]bool, len(conns))
 	var wg sync.WaitGroup
 	for i, pc := range conns {
 		// A connection nothing has handshaken on yet has no session for the
 		// server to have forgotten; probing it would only race the HELLO that
-		// is about to run on it.
+		// is about to run on it. It does not count as LIVE either: nothing
+		// about it was verified, and health fails closed.
 		if !pc.isAuthed() {
 			continue
 		}
+		probed[i] = true
 		wg.Add(1)
 		go func(i int, pc *pooledConn) {
 			defer wg.Done()
@@ -754,6 +806,9 @@ func (p *QUICPool) probeAll(ctx context.Context, conns []*pooledConn) (HealthSta
 	var firstErr error
 	var dead []*pooledConn
 	for i, pc := range conns {
+		if !probed[i] {
+			continue
+		}
 		if errs[i] == nil {
 			pc.recordProbeSuccess()
 			status.LiveConns++
@@ -762,15 +817,45 @@ func (p *QUICPool) probeAll(ctx context.Context, conns []*pooledConn) (HealthSta
 		if firstErr == nil {
 			firstErr = errs[i]
 		}
+		// The caller's own cancellation is not evidence about the connection.
+		// Reporting it is honest; striking a connection for it is not — a
+		// caller that passes an already-cancelled or very short context to
+		// Pool.Health would otherwise condemn every connection in the pool in
+		// two calls, and take their probe streams with it.
+		if probeCallerCancelled(ctx, errs[i]) {
+			continue
+		}
 		if pc.recordProbeFailure() {
 			dead = append(dead, pc)
 		}
 	}
 	p.evict(dead)
 
-	status.Healthy = firstErr == nil
+	// Healthy means a round trip answered on every connection this probe could
+	// verify, AND that there was at least one. A pool whose connections were
+	// all skipped verified nothing, and nothing verified is not health.
+	status.Healthy = firstErr == nil && status.LiveConns > 0
 	status.LastProbeErr = classifyProbeErr(firstErr)
+	if firstErr == nil && !status.Healthy {
+		status.LastProbeErr = probeErrUnverified
+	}
 	return status, firstErr
+}
+
+// probeCallerCancelled reports whether a probe failure is the CALLER's doing
+// rather than the connection's.
+//
+// A probe's own budget only ever expires on a context the pool made, which
+// leaves the caller's context untouched — so a caller context that is done is
+// the tell. A Canceled error is another: no probe budget produces one.
+func probeCallerCancelled(ctx context.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+	if ctx.Err() != nil {
+		return true
+	}
+	return errors.Is(err, context.Canceled)
 }
 
 // evict removes probe-failed connections from the pool and closes them, so
@@ -791,48 +876,112 @@ func (p *QUICPool) evict(dead []*pooledConn) {
 
 // probeConn performs one bounded PING round trip on pc's probe stream.
 //
-// The budget depends on whether the stream is new: the server materialises a
-// probe stream when its first frame arrives, which costs real work, while
-// every later probe on that stream is a bare round trip. See probeWarmupTimeout.
-func (p *QUICPool) probeConn(ctx context.Context, pc *pooledConn) error {
-	openCtx, openCancel := context.WithTimeout(ctx, probeWarmupTimeout)
-	t, fresh, err := pc.probeTransport(openCtx)
-	openCancel()
-	if err != nil {
+// The budget depends on whether the STREAM is new, not merely on whether the
+// connection has answered before: the server materialises a probe stream when
+// its first frame arrives (~70ms against 0.8.15), while every later probe on
+// that stream is a bare round trip (~0.4ms). A replacement stream — the one
+// opened after a failure abandoned the last — therefore gets the round trip's
+// budget PLUS that setup cost. Budgeting it as a bare round trip is how a
+// healthy connection got evicted for one slow moment: the retry paid ~70ms of
+// stream setup out of a 100ms budget, failed, and that second failure was the
+// strike that condemned it. See probeBudget.
+//
+// A failure ABANDONS the stream instead of closing it — pc is still in the
+// pool and may still be carrying live request streams, and closing a stream on
+// a pooled connection is what SONNY-1227 answers with a full connection
+// teardown. See probeStreamFailed.
+func (p *QUICPool) probeConn(parent context.Context, pc *pooledConn) error {
+	if err := parent.Err(); err != nil {
+		// The caller is already gone. Opening a stream for it would only
+		// produce a failure nobody asked about.
 		return err
 	}
 
-	// Only a connection that has never answered pays the warmup budget; see
-	// pooledConn.warmed.
-	budget := p.probeTimeout()
-	if fresh && !pc.warmed.Load() {
-		budget = probeWarmupTimeout
+	openCtx, openCancel := context.WithTimeout(parent, probeWarmupTimeout)
+	t, fresh, err := pc.probeTransport(openCtx)
+	openCancel()
+	if err != nil {
+		// Nothing was opened, so there is no stream to abandon.
+		return err
 	}
-	ctx, cancel := context.WithTimeout(ctx, budget)
+
+	ctx, cancel := context.WithTimeout(parent, p.probeBudget(pc, fresh))
 	defer cancel()
 
 	probeCount.Add(1)
 	p.probeTripCount.Add(1)
 	if err := t.SendProto(ctx, proto.NewPingMessage(&proto.PingRequest{})); err != nil {
-		pc.closeProbe()
-		return err
+		return pc.probeStreamFailed(parent, err)
 	}
 	resp, err := t.ReceiveProto(ctx)
 	if err != nil {
-		pc.closeProbe()
-		return err
+		return pc.probeStreamFailed(parent, err)
 	}
 	ping := resp.GetPing()
 	if ping == nil {
 		// The probe stream is desynchronised; it can never be trusted again.
-		pc.closeProbe()
-		return errProbeUnexpectedFrame
+		return pc.probeStreamFailed(parent, errProbeUnexpectedFrame)
 	}
 	if !ping.GetOk() {
+		// The server answered, so the connection is alive and the stream is
+		// in step. Only the verdict is bad; the stream is kept.
 		return errProbeRefused
 	}
 	pc.warmed.Store(true)
 	return nil
+}
+
+// probeBudget bounds one probe round trip. There are three cases, and the
+// middle one is the fix for a healthy connection being evicted after a single
+// slow moment:
+//
+//   - a REUSED stream is a bare round trip (~0.4ms against 0.8.15), bounded by
+//     probeTimeout, which tracks the configured interval;
+//   - a REPLACEMENT stream on a connection the peer has already answered on
+//     pays one known round trip plus one known stream setup, so it gets
+//     probeTimeout plus probeStreamSetup. Stream setup is per STREAM, and a
+//     replacement exists precisely because the last probe failed — budgeting
+//     it as a bare round trip made the retry fail too, which is strike 2;
+//   - the FIRST stream on a connection nothing has ever answered on has no
+//     measured cost to lean on and is not yet part of any detection story, so
+//     it gets the open-ended probeWarmupTimeout.
+func (p *QUICPool) probeBudget(pc *pooledConn, fresh bool) time.Duration {
+	if override := p.probeBudgetOverride.Load(); override > 0 {
+		return time.Duration(override)
+	}
+	switch {
+	case !fresh:
+		return p.probeTimeout()
+	case pc.warmed.Load():
+		return p.probeTimeout() + probeStreamSetup
+	default:
+		return probeWarmupTimeout
+	}
+}
+
+// probeStreamFailed records a probe failure that leaves pc's probe stream
+// untrustworthy — a timed-out send may have written half a length-prefixed
+// frame, and a timed-out receive leaves the answer to arrive later, where the
+// NEXT probe would read it as its own.
+//
+// The stream is ABANDONED, never closed. pc remains in the pool until
+// probeStrikes consecutive failures condemn it, so at strike 1 it is still
+// serving live request streams, and geode 0.8.15 answers a stream closing on a
+// pooled connection by tearing the whole connection down (SONNY-1227) — which
+// would make a single slow probe cause the outage the probe exists to detect.
+// Abandoned streams are closed with the connection itself (closeProbeStreams).
+//
+// A failure the CALLER caused is different and leaves the stream alone: the
+// probe stream carries nothing but PING replies, so a late one makes at worst
+// the next probe's answer one round trip stale, while abandoning a stream for
+// something the connection did not do would let cancelled Health calls consume
+// the connection's whole abandoned-stream budget and condemn it.
+func (pc *pooledConn) probeStreamFailed(parent context.Context, err error) error {
+	if parent.Err() != nil {
+		return err
+	}
+	pc.abandonProbe()
+	return err
 }
 
 // probeTimeout bounds a single connection's probe. It tracks the configured
@@ -860,30 +1009,45 @@ func (p *QUICPool) probeTimeout() time.Duration {
 // authenticates the CONNECTION, which is why every stream after the first
 // already skips the handshake (see pooledHello).
 //
+// The stream is opened DIRECTLY on the pooled connection, not through
+// acquire, so it consumes no admission slot: it is counted neither against
+// maxStreams (and therefore not in HealthStatus.InFlightStreams) nor against
+// maxStreamsPerConn. A probe can therefore never be blocked by, or steal
+// capacity from, the request streams it is checking on.
+//
 // fresh reports whether this call opened the stream, so the caller can budget
 // the server-side stream setup that the first frame on it pays for.
-func (pc *pooledConn) probeTransport(ctx context.Context) (t *QUICTransport, fresh bool, err error) {
+func (pc *pooledConn) probeTransport(ctx context.Context) (t Transport, fresh bool, err error) {
 	pc.mu.Lock()
-	if existing := pc.probe; existing != nil {
-		pc.mu.Unlock()
+	existing, opener := pc.probe, pc.probeOpener
+	pc.mu.Unlock()
+	if existing != nil {
 		return existing, false, nil
 	}
-	pc.mu.Unlock()
 
-	stream, err := pc.openStream(ctx)
-	if err != nil {
-		return nil, false, err
-	}
-	t = &QUICTransport{
-		pc:       pc,
-		stream:   stream,
-		rdStream: stream,
-		br:       bufio.NewReaderSize(stream, quicReadBufferSize),
-		addr:     pc.addr,
+	if opener != nil {
+		if t, err = opener(ctx); err != nil {
+			return nil, false, err
+		}
+	} else {
+		stream, serr := pc.openStream(ctx)
+		if serr != nil {
+			return nil, false, serr
+		}
+		t = &QUICTransport{
+			pc:       pc,
+			stream:   stream,
+			rdStream: stream,
+			br:       bufio.NewReaderSize(stream, quicReadBufferSize),
+			addr:     pc.addr,
+		}
 	}
 
 	pc.mu.Lock()
 	if existing := pc.probe; existing != nil {
+		// Unreachable while Probe is serialised by probeMu — which it is — so
+		// this closes a stream that never carried a frame rather than one the
+		// connection is using.
 		pc.mu.Unlock()
 		_ = t.Close()
 		return existing, false, nil
@@ -893,21 +1057,51 @@ func (pc *pooledConn) probeTransport(ctx context.Context) (t *QUICTransport, fre
 	return t, true, nil
 }
 
-// closeProbe closes and forgets the probe stream. Safe to call repeatedly and
+// abandonProbe drops the probe stream WITHOUT closing it, so the next probe
+// opens a fresh one. See pooledConn.abandoned for why it is not closed, and
+// recordProbeFailure for what bounds the list it moves to.
+func (pc *pooledConn) abandonProbe() {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	if pc.probe == nil {
+		return
+	}
+	pc.abandoned = append(pc.abandoned, pc.probe)
+	pc.probe = nil
+}
+
+// abandonedProbes reports how many probe streams this connection has walked
+// away from and not yet closed.
+func (pc *pooledConn) abandonedProbes() int {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	return len(pc.abandoned)
+}
+
+// closeProbeStreams closes and forgets every probe stream this connection ever
+// opened — the live one and every abandoned one. Safe to call repeatedly and
 // on a connection that never had one.
 //
-// This is the ONLY place a probe stream is closed, and it runs in exactly
-// three situations, all of which end with the connection gone: the pool is
-// closing, the connection is being discarded, or a probe on it has just failed
-// (which is immediately followed by discarding it). It never runs while the
-// connection is still in service — that is the SONNY-1227 rule.
-func (pc *pooledConn) closeProbe() {
+// This is the ONLY place a probe stream is closed, and it runs in exactly two
+// situations, both of which end with the connection gone: the pool is closing
+// (QUICPool.Close) or the connection is being discarded (discard, which every
+// eviction goes through). It NEVER runs while the connection is still in the
+// pool — that is the SONNY-1227 rule. A failed probe does not close its
+// stream; it abandons it (probeStreamFailed), because at strike 1 the
+// connection stays in service.
+func (pc *pooledConn) closeProbeStreams() {
 	pc.mu.Lock()
 	t := pc.probe
 	pc.probe = nil
+	abandoned := pc.abandoned
+	pc.abandoned = nil
 	pc.mu.Unlock()
+
 	if t != nil {
 		_ = t.Close()
+	}
+	for _, a := range abandoned {
+		_ = a.Close()
 	}
 }
 
