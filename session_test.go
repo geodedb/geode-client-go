@@ -23,6 +23,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -517,5 +518,110 @@ func assertSentOps(t *testing.T, mt *mockTransport, want ...string) {
 		if got[i] != want[i] {
 			t.Fatalf("transaction messages = %v, want %v", got, want)
 		}
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Agreement between the pin-time and per-operation health checks
+// ─────────────────────────────────────────────────────────────────────────────
+
+// foreignConn is a driver connection that is NOT a *geode.Conn. It exists to
+// pin the one behaviour adoptPinned and checkPinned used to disagree about:
+// adoptPinned refused such a connection while checkPinned waved it through as
+// healthy.
+type foreignConn struct{}
+
+func (foreignConn) Prepare(string) (driver.Stmt, error) { return nil, driver.ErrSkip }
+func (foreignConn) Close() error                        { return nil }
+func (foreignConn) Begin() (driver.Tx, error)           { return nil, driver.ErrSkip }
+
+// foreignConnector hands database/sql connections this driver does not own.
+type foreignConnector struct{}
+
+func (foreignConnector) Connect(context.Context) (driver.Conn, error) { return foreignConn{}, nil }
+func (foreignConnector) Driver() driver.Driver                        { return &registeredDriver }
+
+func newForeignPool(t *testing.T) *Pool {
+	t.Helper()
+	db := sql.OpenDB(foreignConnector{})
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	return &Pool{db: db, cfg: &Config{}}
+}
+
+// TestPool_SessionRejectsForeignDriverConn is the pin-time half: adoptPinned
+// refuses a driver connection that is not a *geode.Conn.
+func TestPool_SessionRejectsForeignDriverConn(t *testing.T) {
+	p := newForeignPool(t)
+
+	s, err := p.Session(context.Background())
+	if err == nil {
+		_ = s.Close()
+		t.Fatal("Session pinned a connection this driver does not own")
+	}
+	if !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("Session = %v, want an error matching ErrInvalidState", err)
+	}
+}
+
+// TestSession_CheckPinnedRejectsForeignDriverConn is the per-operation half.
+// A Session is built directly (bypassing adoptPinned, which would have refused
+// the connection) so checkPinned is the code under test: it must reach the
+// same verdict as adoptPinned rather than reporting the connection healthy.
+func TestSession_CheckPinnedRejectsForeignDriverConn(t *testing.T) {
+	p := newForeignPool(t)
+
+	conn, err := p.db.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("Conn: %v", err)
+	}
+	s := &Session{conn: conn}
+	t.Cleanup(func() { _ = s.Close() })
+
+	_, err = s.ExecContext(context.Background(), "RETURN 1")
+	if err == nil {
+		t.Fatal("ExecContext succeeded on a connection this driver does not own")
+	}
+	if !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("ExecContext = %v, want an error matching ErrInvalidState", err)
+	}
+
+	// The disagreement mattered because checkPinned is also the retirement
+	// authority: having refused the connection it must retire the Session, not
+	// leave it open to try again on the same unreadable connection.
+	if _, err := s.QueryContext(context.Background(), "RETURN 1"); !errors.Is(err, ErrSessionRetired) {
+		t.Fatalf("QueryContext after the refusal = %v, want ErrSessionRetired", err)
+	}
+}
+
+// TestSession_TXRetiresWhenTheCallbackReportsABadConn asserts TX observes the
+// callback's error the way ExecContext and QueryContext observe theirs: a
+// callback error that reports the connection is gone retires the Session
+// immediately, not on the next operation's probe.
+func TestSession_TXRetiresWhenTheCallbackReportsABadConn(t *testing.T) {
+	p, tc := newSessionTestPool(t, 2)
+	s, mt := newPinnedSession(t, p, tc)
+
+	mt.push(mockBeginMsg())
+	mt.push(mockRollbackMsg())
+
+	fnErr := fmt.Errorf("write failed: %w", driver.ErrBadConn)
+	err := s.TX(context.Background(), nil, func(*sql.Tx) error { return fnErr })
+	if !errors.Is(err, driver.ErrBadConn) {
+		t.Fatalf("TX = %v, want the callback's bad-connection error", err)
+	}
+
+	// Retired by the observation itself: the pinned connection's own health is
+	// untouched here (the mock transport still reports it fine), so a Session
+	// that waited for checkPinned would still be open.
+	if state := sessionState(s.state.Load()); state != sessionRetired {
+		t.Fatalf("session state = %d, want retired (%d)", state, sessionRetired)
+	}
+	if _, err := s.ExecContext(context.Background(), "RETURN 1"); !errors.Is(err, ErrSessionRetired) {
+		t.Fatalf("ExecContext after the retirement = %v, want ErrSessionRetired", err)
+	}
+	if s.ConnID() == 0 {
+		t.Fatal("a retired Session forgot which connection it pinned")
 	}
 }

@@ -24,7 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   silently re-pinned to a different connection: every method then returns
   `ErrSessionRetired`, which matches both `ErrSessionClosed` and
   `driver.ErrBadConn`. `Close` is idempotent and releases the connection
-  exactly once (SONNY-806).
+  exactly once. Caller contract after a retirement (SONNY-1227): geode 0.8.15
+  closes the whole pooled QUIC connection when the stream that carried its
+  handshake goes away, so a `Session` pinned immediately after a retirement may
+  fail on its first statement with an error matching `driver.ErrBadConn` —
+  close that `Session` and pin again. `Pool.Session` deliberately does not hide
+  this behind a validating round trip at pin time (SONNY-806).
 - Capability discovery: `Connector.ServerInfo(ctx)` reports the engine's
   `SHOW VERSION` string verbatim, the raw ordered `SHOW CAPABILITIES` rows
   (`ServerInfo.Rows`), the boolean feature matrix built only from rows whose

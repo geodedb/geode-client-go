@@ -116,6 +116,36 @@ type Session struct {
 //
 // The context governs only the wait for a free connection; it does not bound
 // the Session's lifetime.
+//
+// # Pinning immediately after a retirement (SONNY-1227)
+//
+// Tearing down a retired connection can leave one stale connection behind on
+// the shared QUIC pool: geode 0.8.15 closes the whole pooled QUIC connection
+// when the stream that carried its handshake goes away, and the driver only
+// discovers that on the next write. database/sql absorbs this for an UNPINNED
+// statement by retrying on another connection; a pinned one cannot, by design,
+// because retrying would hand the caller a different connection than the one it
+// asked to ride.
+//
+// So a Session pinned immediately after a retirement may fail on its first
+// statement with an error matching driver.ErrBadConn. The contract is: close
+// that Session and pin again.
+//
+//	s, err := pool.Session(ctx)
+//	if err != nil {
+//	    return err
+//	}
+//	if _, err := s.ExecContext(ctx, stmt); errors.Is(err, driver.ErrBadConn) {
+//	    _ = s.Close()
+//	    if s, err = pool.Session(ctx); err != nil { // pin again, once
+//	        return err
+//	    }
+//	}
+//
+// Session deliberately does not hide this behind a validating round trip at pin
+// time: that would cost every pin a PING, and the whole point of the type is
+// that nothing re-pins silently. Pool.Health drives the same liveness check on
+// the pool's own schedule instead.
 func (p *Pool) Session(ctx context.Context) (*Session, error) {
 	if p == nil || p.db == nil {
 		return nil, fmt.Errorf("geode: Pool.Session: %w", ErrPoolNotInitialized)
@@ -157,8 +187,14 @@ func (s *Session) adoptPinned() error {
 // ConnID returns the process-unique identity of the pinned driver connection.
 // Every statement and transaction issued through this Session runs on that
 // connection, so two calls that report the same ConnID provably shared one
-// connection and one QUIC stream. Distinct live Sessions never share an id,
-// and ids are never reused.
+// connection and one QUIC stream. Two live Sessions never share an id, and an
+// id is never reused for a DIFFERENT connection.
+//
+// An id does not identify a Session, though: database/sql recycles idle driver
+// connections, so a Session pinned after an earlier one closed may be handed
+// the same pooled connection and will then report the same id. "Same ConnID"
+// means "same connection", not "same Session" — which is exactly what the
+// pinning assertions need.
 //
 // A zero-value, nil or closed Session that never pinned anything reports 0.
 func (s *Session) ConnID() uint64 {
@@ -208,10 +244,23 @@ func (s *Session) acquire(op string) error {
 // Returning driver.ErrBadConn from inside Raw also tells database/sql to
 // discard the connection, so a retired Session cannot leave a poisoned
 // connection in the pool.
+//
+// A driver connection that is not a *geode.Conn is rejected here exactly as
+// adoptPinned rejects it at pin time: this Session cannot vouch for a
+// connection whose health it cannot read, so treating it as healthy would be
+// the one answer that is certainly wrong. The Session is retired and the
+// connection discarded, and the caller is told which invariant broke
+// (ErrInvalidState) rather than the generic retirement reason.
 func (s *Session) checkPinned() error {
+	var foreign error
 	err := s.conn.Raw(func(dc any) error {
 		c, ok := dc.(*Conn)
-		if !ok || c.IsValid() {
+		if !ok {
+			foreign = fmt.Errorf("%w: pinned connection is %T, not *geode.Conn",
+				ErrInvalidState, dc)
+			return driver.ErrBadConn
+		}
+		if c.IsValid() {
 			return nil
 		}
 		return driver.ErrBadConn
@@ -220,6 +269,9 @@ func (s *Session) checkPinned() error {
 		return nil
 	}
 	s.retire()
+	if foreign != nil {
+		return foreign
+	}
 	return ErrSessionRetired
 }
 
@@ -307,6 +359,12 @@ func (s *Session) TX(ctx context.Context, opts *sql.TxOptions, fn func(*sql.Tx) 
 	}()
 
 	if fnErr := fn(tx); fnErr != nil {
+		// Symmetry with ExecContext/QueryContext: a callback error that reports
+		// the connection is gone retires the Session now, rather than leaving
+		// it "open" until the next acquire's probe notices. The rollback below
+		// is still attempted — on a dead connection it fails harmlessly and is
+		// reported, and the probe remains the authority either way.
+		s.observe(fnErr)
 		if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
 			s.observe(rbErr)
 			return errors.Join(fnErr, fmt.Errorf("geode: Session.TX: rollback: %w", rbErr))
