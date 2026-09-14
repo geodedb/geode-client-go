@@ -79,20 +79,31 @@ var (
 	// refusal and not a connection failure: the same request over the same
 	// transport fails identically, so it classifies RetryNever.
 	//
-	// At present it has exactly one reachable cause, and it is load-bearing:
-	// the gRPC transport cannot send a PULL. geode 0.8.15 serves Execute over
-	// gRPC as a SERVER-STREAMING RPC — the engine pushes the schema and then
-	// every data page itself and ends the stream
-	// (src/transport/grpc_server.zig:1008-1101 handleExecuteStreaming) — so
-	// the QUIC protocol's client-driven PULL has no gRPC counterpart and
-	// GeodeService has no method to carry one (proto/geode.proto). The driver's
-	// Rows pages with PULL (rows.go fetchNextPage), so a gRPC result larger
-	// than the engine's gRPC stream page size (128 rows,
-	// src/client/quic_query_runner.zig:5 via grpc_server.zig:915) stops at the
-	// first page and reports this error rather than silently returning a
-	// truncated result set.
+	// Reachable causes, both in GRPCTransport.SendProto:
 	//
-	// Callers that must page large results today use the QUIC transport.
+	//  1. A message type GeodeService declares no method for. The
+	//     QuicClientMessage oneof carries savepoint, rollback_to, backup,
+	//     restore and upload_backup (proto/geode.proto); the gRPC service
+	//     declares none of them (proto/geode_grpc.pb.go
+	//     GeodeService_ServiceDesc), so they end in the default arm. The
+	//     driver does not build these messages today; a caller that does gets
+	//     this error instead of an opaque "unknown message type".
+	//
+	//  2. A PULL. This is now a defensive assertion rather than a limit: the
+	//     gRPC surface is server-pushed (Transport.PagesArePushed) and
+	//     Rows.fetchNextPage reads the engine's pushed pages instead of asking
+	//     for them, so the driver's page loop no longer sends a PULL over gRPC.
+	//     One arriving anyway means a caller reached past the page loop, and a
+	//     blind write followed by a read that could only block is worse than a
+	//     typed refusal.
+	//
+	// It is NOT the reason a gRPC result set can be short. It was, until
+	// Task 14b: GAP-SONNY806-04 was a DRIVER defect — the engine pushes every
+	// page over gRPC (src/transport/grpc_server.zig:1009-1101
+	// handleExecuteStreaming) and GRPCTransport.ReceiveProto always returned
+	// them, but rows.go sent a PullRequest anyway and this sentinel was
+	// reported when the write failed. Paging over gRPC now works; nothing here
+	// caps a result set.
 	ErrUnsupportedOnTransport = errors.New("geode: message type is not supported by this transport")
 )
 

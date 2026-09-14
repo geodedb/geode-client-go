@@ -4,20 +4,21 @@ Last updated: 2026-09-14
 Reviewed by: Adversarial Security Review Agent (2026-03-21); divelife bulk-seed investigation (2026-06-17); Lane D tenancy/role binding (SONNY-806 / GEO-GO-UP-001, 2026-09-13)
 Repository: devnw/codepros/geode/geode-client-go
 Commit: b27e102 → acf49a2 → 5f9a4b0 (see git log)
-Review type: Comprehensive adversarial security review (Round 6 - no new findings); BUG-0001 closed 2026-03-21; BUG-0002 filed 2026-06-17 (high-concurrency connection-establishment stall); GAP-SONNY806-01 and GAP-SONNY806-02 filed 2026-09-13 against engine 0.8.15; GAP-ENG4658-02 (pooled connections never verified with network I/O) closed 2026-09-13
+Review type: Comprehensive adversarial security review (Round 6 - no new findings); BUG-0001 closed 2026-03-21; BUG-0002 filed 2026-06-17 (high-concurrency connection-establishment stall); GAP-SONNY806-01 and GAP-SONNY806-02 filed 2026-09-13 against engine 0.8.15; GAP-ENG4658-02 (pooled connections never verified with network I/O) closed 2026-09-13; GAP-SONNY806-04 filed and closed 2026-09-14 (gRPC paging — a DRIVER defect, Lane D Task 14/14b)
 
 ## Summary
 
 Open findings by severity:
 
 - Critical: 1 (GAP-SONNY806-02 — engine cross-tenant read leak, filed 2026-09-13)
-- High: 1 (GAP-SONNY806-04 — gRPC cannot page past the first 128-row page, filed 2026-09-14)
+- High: 0
 - Medium: 2 (GAP-SONNY806-01 — engine refuses `$param` in CALL arguments, filed 2026-09-13;
   GAP-SONNY806-03 — engine ignores the `--listen-grpc` bind address, filed 2026-09-14)
 - Low: 1 (BUG-0002 — downgraded 2026-06-17)
 - Info: 0
 
-Closed findings: 29 (Issues #1-#23, #25-#28; BUG-0001; GAP-ENG4658-02)
+Closed findings: 30 (Issues #1-#23, #25-#28; BUG-0001; GAP-ENG4658-02;
+GAP-SONNY806-04 — gRPC paging, driver defect, closed 2026-09-14)
 Won't Do findings: 1 (Issue #24)
 
 Top risks (remaining):
@@ -41,51 +42,6 @@ Top risks (remaining):
 
 ## Open Findings
 
-### GAP-SONNY806-04: gRPC results longer than one page cannot be paged
-
-- **Severity:** High (feature gap, fail-closed — no silent truncation)
-- **Component:** protocol asymmetry (geode ENGINE 0.8.15 gRPC surface) +
-  `grpc_transport.go`, `rows.go`
-- **Status:** **Open** (filed 2026-09-14, SONNY-806 / GEO-GO-UP-001 Task 14)
-- **Reproducer:** `integration_grpc_test.go` →
-  `TestIntegration_GRPCPagedResultRefusesRatherThanTruncates` (GREEN: it
-  asserts the refusal, not the capability)
-
-geode 0.8.15 serves `Execute` over gRPC as a SERVER-STREAMING RPC. The engine
-sends the schema/first response and then pushes every data page itself before
-ending the stream (`src/transport/grpc_server.zig:1008-1101`,
-`handleExecuteStreaming`), paging at `grpc_stream_page_size`
-(`grpc_server.zig:915` → `src/client/quic_query_runner.zig:5` = **128 rows**).
-There is no client-driven `PULL` on this surface and `GeodeService` declares no
-method that could carry one (`proto/geode.proto`, `GeodeService_ServiceDesc` in
-`proto/geode_grpc.pb.go`).
-
-The driver's `Rows` pages the QUIC way: `fetchNextPage` (`rows.go:294`) sends a
-`PullRequest` after every non-final page. `GRPCTransport.SendProto` has no
-`PULL` arm, so the second page is where a gRPC read stops.
-
-**What changed.** Before Task 14 that arm fell through to
-`fmt.Errorf("unknown message type")` — an untyped error on a result set that
-was silently 128 rows short. It now returns a `*TransportError` wrapping the
-new `ErrUnsupportedOnTransport` sentinel, which names the missing `PULL` and
-classifies `RetryNever`. A caller can tell "this transport cannot page" from
-"the query returned that many rows", and cannot mistake a truncated result for
-a complete one.
-
-**Impact.** Over gRPC, any statement whose result exceeds 128 rows fails. That
-includes `Pool.BatchExec`, which is why the gRPC parity tests seed row by row.
-Single-row and small reads — the shape `ServerInfo`, `EXPLAIN`, `PROFILE`,
-health probes and most seed queries use — are unaffected.
-
-**Fix (driver side, preferred).** Teach `Rows` to consume the engine's PUSHED
-pages on the gRPC transport instead of asking for them: the pages are already
-on the stream, `GRPCTransport.ReceiveProto` already returns them, and the only
-thing in the way is `fetchNextPage`'s unconditional `PULL`. A
-`Transport`-level "pages are pushed" predicate would keep the QUIC path
-untouched.
-
-**Workaround.** Use the QUIC transport for anything that pages.
-
 ### GAP-SONNY806-03: `--listen-grpc <addr>:<port>` ignores the bind address
 
 - **Severity:** Medium (operability; silently unreachable listener)
@@ -97,7 +53,9 @@ untouched.
 `grpc_transport.GeodeGrpcServer.init(gpa, grpc_port, cert_path, key_path,
 grpc_config)`. `grpc_address` is used solely in the "gRPC server started" log
 line. The vendored grpc-zig binds `GrpcServer.DEFAULT_BIND_ADDRESS =
-"127.0.0.1"` (grpc-zig v0.1.9 `src/server.zig:138`, loopback-by-default by
+"127.0.0.1"` (grpc-zig `grpc_zig-0.1.8-7FnvpKz7BQAM3rNTfY4gV_dBgDfEB4JScP6cE--HzBl9`
+— the content hash geode's `build.zig.zon:305-310` resolves `ref=v0.1.9` to —
+`src/server.zig:138`, loopback-by-default by
 design), so `serve --listen-grpc 0.0.0.0:50051` binds **127.0.0.1:50051** while
 logging `address=0.0.0.0`.
 
@@ -331,6 +289,61 @@ for `.Param`. Plus documented `CALL` syntax for `algo.bfs`/`dfs`/`dijkstra`.
     surfacing, and it is why the lane is not yet reliably green at 0 failures.
 
 ## Closed Findings
+
+### GAP-SONNY806-04: gRPC results stopped at the engine's first pushed page
+
+- **Severity:** High (silent-truncation class; fail-closed while open)
+- **Component:** **Go DRIVER** — `rows.go` (`fetchNextPage`), `grpc_transport.go`.
+  NOT an engine defect and NOT a protocol asymmetry.
+- **Status:** **Closed** (filed 2026-09-14, fixed 2026-09-14, SONNY-806 /
+  GEO-GO-UP-001 Lane D Task 14b)
+- **Reproducer:** `integration_grpc_test.go` →
+  `TestIntegration_GRPCPagedResultIsConsumedAcrossPushedPages` (5×128+7 rows,
+  asserts the full count and the ordering); unit coverage in
+  `rows_pushed_test.go`
+
+**Observed (while open).** Over gRPC, any statement whose result exceeded 128
+rows failed with a `*TransportError` wrapping `ErrUnsupportedOnTransport` after
+exactly 128 rows. `Pool.BatchExec` was included, which is why the first round of
+gRPC parity tests seeded row by row.
+
+**Root cause — driver, not engine.** geode 0.8.15 serves `Execute` over gRPC as
+a SERVER-STREAMING RPC and pushes the WHOLE result: `handleExecuteStreaming`
+(`src/transport/grpc_server.zig:1009-1101`) sends the schema/first response and
+then loops `buildStreamDataPageLocked` → `sendStreamResponse` until the page it
+built is final, paging at `grpc_stream_page_size` (`grpc_server.zig:915` →
+`src/client/quic_query_runner.zig:5` = **128 rows**), then ends the stream. Every
+page was already on the wire, and `GRPCTransport.ReceiveProto` already returned
+them off `execStream.Recv()`. The driver asked for them anyway:
+`Rows.fetchNextPage` sent a `PullRequest` after every non-final page because the
+QUIC protocol requires one, and `GeodeService` declares no `Pull` method
+(`proto/geode_grpc.pb.go`, `GeodeService_ServiceDesc`), so the WRITE failed and
+the read never happened.
+
+The original diagnosis ("protocol asymmetry; gRPC cannot page") mistook the
+driver's PULL for a requirement of the wire. It was not: the pages were there to
+be read.
+
+**Fix.** `Transport.PagesArePushed() bool` — false on QUIC (PULL-driven), true on
+gRPC (server-pushed). `Rows.fetchNextPage` sends the `PullRequest` only when the
+transport is PULL-driven and otherwise reads the next pushed page off the same
+stream, honouring `DataPage.final` exactly as before. The QUIC path is unchanged.
+The Task 9 cancellation contract holds on both wires: a cancel while parked
+waiting for a page surfaces the wrapped `ctx.Err()` and retires the connection
+(`GRPCTransport.ReceiveProto` reports the context error rather than the gRPC
+`recv` status; the RPC is bound to the same context, so a parked `Recv` unblocks
+on cancel). `Conn.absorbPlanFrame`'s page loop takes the same branch.
+
+`ErrUnsupportedOnTransport` is kept and re-scoped: its live cause is the five
+`QuicClientMessage` oneof arms `GeodeService` declares no method for (savepoint,
+rollback_to, backup, restore, upload_backup); the `PULL` arm remains as a
+defensive assertion for a caller that reaches past the page loop. It no longer
+caps any result set.
+
+**Residual limit (engine, not driver).** `handleExecuteStreaming` stops after
+1000 pages as a safety limit (`grpc_server.zig:1069`), i.e. ~128,000 rows per
+gRPC result set. Not reached by anything in this lane; recorded here so a future
+short read over gRPC is diagnosed there rather than re-litigated as a paging bug.
 
 ### GAP-ENG4658-02: pooled connections were never verified with network I/O
 

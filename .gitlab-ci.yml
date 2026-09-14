@@ -151,7 +151,9 @@ integration:geode:
     # Bind the service's gRPC listener on every interface. The command above
     # already asks for --listen-grpc 0.0.0.0:50051, but geode 0.8.15 parses
     # that address and discards it (src/server/main.zig:2122-2152) and the
-    # vendored grpc-zig binds 127.0.0.1 by default (v0.1.9 src/server.zig:138),
+    # vendored grpc-zig binds 127.0.0.1 by default (src/server.zig:138 of
+    # grpc_zig-0.1.8-7FnvpKz7BQAM3rNTfY4gV_dBgDfEB4JScP6cE--HzBl9 —
+    # the content hash geode's build.zig.zon:305-310 pins ref=v0.1.9 to),
     # so without this the service answers nothing on 50051 from the job
     # container. Job variables reach service containers, which is why it lives
     # here and not only in integration:geode:grpc.

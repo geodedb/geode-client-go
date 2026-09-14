@@ -80,8 +80,11 @@ var sharedDSN string
 //     0.0.0.0:50051` parses the address and then throws it away — only the
 //     port reaches GeodeGrpcServer.init (geode 0.8.15
 //     src/server/main.zig:2122-2152) — and the vendored grpc-zig defaults to
-//     GrpcServer.DEFAULT_BIND_ADDRESS = "127.0.0.1"
-//     (grpc-zig v0.1.9 src/server.zig:138). Inside a container that means the
+//     GrpcServer.DEFAULT_BIND_ADDRESS = "127.0.0.1" (grpc-zig
+//     grpc_zig-0.1.8-7FnvpKz7BQAM3rNTfY4gV_dBgDfEB4JScP6cE--HzBl9
+//     src/server.zig:138 — the content hash geode's build.zig.zon:305-310
+//     resolves ref=v0.1.9 to; cite the hash, not the mutable tag).
+//     Inside a container that means the
 //     published port reaches nothing. GRPC_ZIG_BIND_ADDR=0.0.0.0 (read at
 //     grpc-zig src/server.zig:145-151) is the documented opt-in and is set in
 //     the container Env below, in the Makefile docker-start recipe, and in the
@@ -169,7 +172,9 @@ func runTestMain(m *testing.M) int {
 			// Bind the gRPC listener on every interface so the published port
 			// reaches it. --listen-grpc's address argument is parsed and
 			// discarded by the engine (geode 0.8.15 src/server/main.zig:2122-2152),
-			// and grpc-zig binds 127.0.0.1 by default (v0.1.9 src/server.zig:138),
+			// and grpc-zig binds 127.0.0.1 by default (src/server.zig:138 of
+			// grpc_zig-0.1.8-7FnvpKz7BQAM3rNTfY4gV_dBgDfEB4JScP6cE--HzBl9,
+			// the content hash build.zig.zon:305-310 pins ref=v0.1.9 to),
 			// which inside a container is unreachable from the host. See the
 			// grpcDSN doc comment.
 			"GRPC_ZIG_BIND_ADDR": "0.0.0.0",

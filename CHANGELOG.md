@@ -34,20 +34,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   anyway — the address argument is parsed and discarded — so the server needs
   `GRPC_ZIG_BIND_ADDR=0.0.0.0` before a published container port reaches it.
 
+- `Transport.PagesArePushed() bool`, the predicate that says who drives paging
+  on a wire: `false` on QUIC (the driver sends a `PullRequest` for each page
+  after the first), `true` on gRPC (the server pushes every page and the driver
+  only reads). `Rows.fetchNextPage` and `Conn.absorbPlanFrame` branch on it.
+
+  This is a **breaking change for anyone implementing `Transport` outside this
+  package**: the method must be added, and the safe answer for a PULL-driven
+  wire is `false`.
+
 - `ErrUnsupportedOnTransport`, a typed refusal for a protocol message the
   selected transport cannot carry. It classifies `RetryNever`: the same request
   over the same transport fails identically, and no new connection changes
   that.
 
-  It has one reachable cause today, and it is load-bearing. geode 0.8.15 serves
-  `Execute` over gRPC as a SERVER-STREAMING RPC — the engine pushes the schema
-  and then every data page itself — so there is no client-driven `PULL` and
-  `GeodeService` declares no method that could carry one. The driver's `Rows`
-  pages with `PULL`, so **a gRPC result longer than the engine's gRPC page
-  (128 rows) cannot be paged**. It now stops with this error instead of the
-  previous opaque `unknown message type`, so a short result set can never be
-  mistaken for a complete one. Callers that must page large results use the
-  QUIC transport.
+  Its live cause is the five `QuicClientMessage` oneof arms `GeodeService`
+  declares no method for — savepoint, rollback_to, backup, restore,
+  upload_backup — which end in `GRPCTransport.SendProto`'s default arm instead
+  of an opaque `unknown message type`. The `PULL` arm is kept as a defensive
+  assertion for a caller that reaches past the page loop. **It does not cap any
+  result set**; see the paging fix below.
 
 - Query-plan metadata. `Pool.Explain` / `Pool.Profile` (and the same pair on
   `Session` and on the driver `Conn`) return typed `*ExplainPlan` and
@@ -244,6 +250,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   different vocabularies; neither is derived from the other (SONNY-806).
 
 ### Fixed
+
+- **gRPC results are no longer capped at the engine's first 128-row page**
+  (GAP-SONNY806-04, SONNY-806). Any statement returning more than 128 rows over
+  gRPC — `Pool.BatchExec` included — used to fail after exactly 128 rows with a
+  `*TransportError` wrapping `ErrUnsupportedOnTransport`.
+
+  This was a **driver** defect, not a protocol asymmetry. geode 0.8.15 serves
+  `Execute` over gRPC as a server-streaming RPC and pushes the whole result,
+  page by page, until one is marked final; `GRPCTransport.ReceiveProto` already
+  returned those pages. `Rows.fetchNextPage` asked for the next page anyway with
+  a `PullRequest` the service has no method to answer, so the write failed and
+  the read that would have succeeded never happened. The page loop now consumes
+  the pushed pages on transports that report `PagesArePushed()`, and the QUIC
+  PULL path is unchanged.
+
+  Cancellation semantics are identical on both wires: a cancel while waiting for
+  a page reports the wrapped `ctx.Err()` (never a transport error) and retires
+  the connection.
 
 - A failed liveness probe could leak one server-side probe stream per failure.
   The bound on abandoned probe streams was evaluated only in

@@ -37,7 +37,10 @@ GEODE_PORT ?= 3141
 #     insecure_tls_skip_verify=true, not tls=0, in every gRPC DSN below;
 #   * `--listen-grpc 0.0.0.0:PORT` parses the address and discards it
 #     (src/server/main.zig:2122-2152) and the vendored grpc-zig binds
-#     127.0.0.1 by default (v0.1.9 src/server.zig:138), so the container needs
+#     127.0.0.1 by default (src/server.zig:138 of the pinned content hash
+#     grpc_zig-0.1.8-7FnvpKz7BQAM3rNTfY4gV_dBgDfEB4JScP6cE--HzBl9 —
+#     what geode's build.zig.zon:305-310 resolves ref=v0.1.9 to; the TAG is
+#     mutable, the hash is what actually ships), so the container needs
 #     GRPC_ZIG_BIND_ADDR=0.0.0.0 or the published port reaches nothing.
 GEODE_GRPC_PORT ?= 50051
 # Tenant bound by every manual-lane GEODE_TEST_DSN below. docker-start runs the
@@ -329,10 +332,11 @@ test-integration-docker-manual: docker-start docker-wait
 #
 # The suite is NOT re-run wholesale over gRPC. GEODE_TEST_DSN stays QUIC and
 # GEODE_TEST_GRPC_DSN adds the gRPC endpoint, because the two DSNs address the
-# same engine and the gRPC transport cannot page a result past the engine's
-# first gRPC page (no PULL — see ErrUnsupportedOnTransport in errors.go). The
-# gRPC tests assert that refusal explicitly; pointing the whole suite at gRPC
-# would instead turn it into noise.
+# same engine: re-running every QUIC test over gRPC would re-assert engine
+# behaviour rather than transport behaviour. The mirrors below assert what is
+# actually different below the Transport interface. (gRPC paging is no longer
+# among the differences — Task 14b taught Rows to consume the engine's
+# server-pushed pages; see Transport.PagesArePushed.)
 test-integration-grpc:
 	@echo "Running gRPC parity tests (manual server)..."
 	@echo ""
