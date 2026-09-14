@@ -185,6 +185,13 @@ func NewConnector(cfg *Config) (*Connector, error) {
 	if out.Conformance == "" {
 		out.Conformance = DefaultConformance
 	}
+	// HealthProbeInterval is deliberately NOT backfilled. Zero is a legitimate
+	// setting for it — "do not probe" — and there is no way to tell an unset
+	// field from a deliberate zero on a struct the caller filled in. ParseDSN
+	// applies DefaultHealthProbeInterval because a DSN that omits
+	// health_probe_ms genuinely has no opinion; a programmatic Config that
+	// leaves the field at zero is taken at its word. Callers who want the
+	// default set it explicitly.
 
 	if err := out.Validate(); err != nil {
 		return nil, err

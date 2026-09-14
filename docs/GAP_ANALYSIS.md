@@ -4,7 +4,7 @@ Last updated: 2026-09-13
 Reviewed by: Adversarial Security Review Agent (2026-03-21); divelife bulk-seed investigation (2026-06-17); Lane D tenancy/role binding (SONNY-806 / GEO-GO-UP-001, 2026-09-13)
 Repository: devnw/codepros/geode/geode-client-go
 Commit: b27e102 → acf49a2 → 5f9a4b0 (see git log)
-Review type: Comprehensive adversarial security review (Round 6 - no new findings); BUG-0001 closed 2026-03-21; BUG-0002 filed 2026-06-17 (high-concurrency connection-establishment stall); GAP-SONNY806-01 and GAP-SONNY806-02 filed 2026-09-13 against engine 0.8.15
+Review type: Comprehensive adversarial security review (Round 6 - no new findings); BUG-0001 closed 2026-03-21; BUG-0002 filed 2026-06-17 (high-concurrency connection-establishment stall); GAP-SONNY806-01 and GAP-SONNY806-02 filed 2026-09-13 against engine 0.8.15; GAP-ENG4658-02 (pooled connections never verified with network I/O) closed 2026-09-13
 
 ## Summary
 
@@ -16,7 +16,7 @@ Open findings by severity:
 - Low: 1 (BUG-0002 — downgraded 2026-06-17)
 - Info: 0
 
-Closed findings: 28 (Issues #1-#23, #25-#28; BUG-0001)
+Closed findings: 29 (Issues #1-#23, #25-#28; BUG-0001; GAP-ENG4658-02)
 Won't Do findings: 1 (Issue #24)
 
 Top risks (remaining):
@@ -255,6 +255,71 @@ for `.Param`. Plus documented `CALL` syntax for `algo.bfs`/`dfs`/`dijkstra`.
     surfacing, and it is why the lane is not yet reliably green at 0 failures.
 
 ## Closed Findings
+
+### GAP-ENG4658-02: pooled connections were never verified with network I/O
+
+- **Severity:** High (availability)
+- **Component:** QUIC connection pool (`quic_pool.go`) / pool health
+- **Status:** **Closed** (fixed 2026-09-13, SONNY-806 / GEO-GO-UP-001 Lane D
+  Task 11)
+- **Reproducer:** `integration_health_test.go` →
+  `TestIntegration_RecoversFromServerRestart` (both arms: probed and unprobed)
+
+**Observed.** `isQUICConnAlive` (`quic_pool.go`) decided whether a pooled QUIC
+connection was usable by reading its local `quic.Conn` context and nothing else
+— no network I/O. That is the right answer for a connection the client tore
+down, and the wrong answer for one the SERVER forgot. When the Geode process
+dies without closing its connections (a crash, an OOM kill, a `SIGKILL`
+rollout, a network partition), no CONNECTION_CLOSE ever reaches the client:
+the context stays live, `pruneDeadLocked` keeps the connection, `acquire` keeps
+handing it out, and every statement on it waits out its caller's full deadline.
+`quicMaxIdleTimeout` is 120 s, so the transport does not rescue those callers
+either.
+
+Measured against engine 0.8.15 on the restart test's control arm (an otherwise
+identical pool with probing disabled — i.e. the pre-fix driver): the first
+statement after a `SIGKILL` restart consumed **6.000 s of its 6 s deadline** and
+then failed with `context.DeadlineExceeded`, three runs out of three.
+
+A graceful `docker stop` does NOT reproduce it: the engine closes its
+connections on SIGTERM, quic-go cancels the context, and even the unprobed pool
+recovers in ~37 ms. The defect is specifically the ungraceful death — which is
+the one that happens in production.
+
+**Downstream impact.** `mentats/internal/geodegraph` carries a ~100-line
+watchdog (`geodegraph.go:36-81`) whose entire job is to work around this from
+outside the driver. It can now be deleted.
+
+**Fix.** The pool verifies its connections with a real round trip and evicts
+what does not answer:
+
+- `(*QUICPool).Probe(ctx)` PINGs every pooled connection over a **long-lived
+  probe stream**, concurrently, each on a bounded deadline. The stream is
+  opened once per connection and reused, never opened and closed per probe:
+  geode 0.8.15 tears the whole pooled QUIC connection down when a stream that
+  carried a handshake goes away (SONNY-1227), so a probe that closed its stream
+  would cause the outage it is meant to detect. It carries no HELLO, because on
+  a pooled connection the server authenticates the connection — which is why
+  every stream after the first already skips the handshake.
+- A connection that fails a probe is marked dead, removed from the pool and
+  closed. `pruneDeadLocked` treats the probe verdict as a liveness signal
+  alongside the local context check, so `acquire` can never hand one out.
+- A pool-owned goroutine runs the probe on `Config.HealthProbeInterval`
+  (DSN `?health_probe_ms=N`, default 1000, 0 disables). It starts lazily on the
+  first `acquire`, never runs concurrently with itself, and is stopped and
+  waited for by `Drain` and `Close`.
+- `Pool.Health(ctx)` reads the last recorded result (cheap) and returns a
+  `HealthStatus` whose zero value is unhealthy — health fails closed.
+  `LastProbeErr` is a static classification, never the underlying error, so a
+  readiness endpoint cannot leak a `*TransportError`'s remote address.
+- `Pool.Drain(ctx)` refuses new work with `ErrPoolDraining`, waits for in-flight
+  statements, then closes everything.
+
+**Evidence after the fix** (engine 0.8.15, `SIGKILL` restart, probe interval
+200 ms, three runs): the probe recorded the pool unhealthy 7 ms / 179 ms /
+140 ms after the engine was confirmed gone, the orphaned connection was evicted,
+and the first post-restart statement succeeded in 331 ms / 237 ms / 400 ms —
+against the same restart's control arm stalling the full 6 s every time.
 
 ### BUG-0001: QUIC stream desynchronization on sequential queries
 

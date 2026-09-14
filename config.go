@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"geodedb.com/geode/internal/validate"
 )
@@ -200,6 +201,23 @@ type Config struct {
 	//
 	// Tune via DSN: `?max_streams_per_conn=8`.
 	MaxStreamsPerConn int
+
+	// HealthProbeInterval is how often the driver verifies its pooled QUIC
+	// connections with a real network round trip, and therefore how long an
+	// orphaned connection can survive in the pool.
+	//
+	// The local liveness check (isQUICConnAlive) reads the quic.Conn context
+	// and performs no I/O, so a connection orphaned by a server restart still
+	// looks alive: the server no longer recognises its connection ID, drops its
+	// packets, and every operation on it blocks for the caller's full deadline
+	// instead of failing. The probe is what turns that into a prompt eviction.
+	//
+	// Zero disables probing entirely. ParseDSN defaults it to
+	// DefaultHealthProbeInterval; a Config assembled programmatically keeps
+	// whatever the caller set, including zero (see NewConnector).
+	//
+	// Tune via DSN: `?health_probe_ms=1000` (0 disables).
+	HealthProbeInterval time.Duration
 }
 
 // Addr returns the server address in host:port format.
@@ -292,6 +310,13 @@ func (c *Config) FormatDSN() string {
 	if c.MaxStreamsPerConn > 0 && c.MaxStreamsPerConn != DefaultMaxStreamsPerConn {
 		q.Set("max_streams_per_conn", strconv.Itoa(c.MaxStreamsPerConn))
 	}
+	// Emitted whenever it differs from the default, INCLUDING zero: zero means
+	// "probing disabled", which is a real setting and not an absent one, so
+	// omitting it would silently re-enable probing on a round trip through
+	// String -> ParseDSN.
+	if c.HealthProbeInterval != DefaultHealthProbeInterval {
+		q.Set("health_probe_ms", strconv.FormatInt(c.HealthProbeInterval.Milliseconds(), 10))
+	}
 
 	var userinfo string
 	switch {
@@ -359,7 +384,8 @@ func ParseDSN(dsn string) (*Config, error) {
 		HelloVersion: DefaultHelloVersion,
 		Conformance:  DefaultConformance,
 
-		MaxStreamsPerConn: DefaultMaxStreamsPerConn,
+		MaxStreamsPerConn:   DefaultMaxStreamsPerConn,
+		HealthProbeInterval: DefaultHealthProbeInterval,
 	}
 
 	// Apply environment variable defaults
@@ -604,6 +630,20 @@ func applyQueryParams(params url.Values, cfg *Config) error {
 				n = 1
 			}
 			cfg.MaxStreamsPerConn = n
+
+		case "health_probe_ms":
+			// Milliseconds, not seconds: the whole point of the probe is to
+			// catch an orphaned connection inside one operation's latency
+			// budget, and the useful settings live well under a second.
+			n, err := strconv.Atoi(val)
+			if err != nil || n < 0 {
+				return &ConfigError{
+					Field:   "health_probe_ms",
+					Value:   val,
+					Message: "must be a non-negative integer (milliseconds; 0 disables)",
+				}
+			}
+			cfg.HealthProbeInterval = time.Duration(n) * time.Millisecond
 
 		case "hello_name":
 			if val == "" {

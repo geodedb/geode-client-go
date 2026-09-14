@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Pool health probing and graceful drain. `Pool.Health(ctx)` returns a
+  `HealthStatus` (`Healthy`, `PooledConns`, `LiveConns`, `InFlightStreams`,
+  `LastProbeErr`, `LastProbeAt`) whose zero value is unhealthy — health fails
+  closed — and whose `LastProbeErr` is a static classification rather than the
+  underlying error, so a readiness endpoint cannot leak a transport error's
+  remote address. Behind it, `(*QUICPool).Probe(ctx)` verifies every pooled QUIC
+  connection with a REAL round trip (a protocol-level PING on a long-lived probe
+  stream) and evicts the ones that do not answer, so `acquire` can never hand
+  out a connection the server has forgotten. A pool-owned goroutine runs the
+  probe every `Config.HealthProbeInterval` (DSN `?health_probe_ms=N`, default
+  1000 ms, 0 disables); it starts lazily on first use, never runs concurrently
+  with itself, and is stopped and waited for by `Drain` and `Close`.
+  `Pool.Drain(ctx)` is the graceful counterpart to `Close`: new work is refused
+  with `ErrPoolDraining` (including `Pool.Session`, which reports it instead of
+  blocking), in-flight statements are given until `ctx` expires, and only then
+  is everything closed; it is idempotent and closes the pool even if `ctx`
+  expires first.
+
+  This replaces a local-only liveness check that could not see an orphaned
+  connection: after an ungraceful server restart the pool kept handing out a
+  pre-restart connection and every statement on it waited out its caller's full
+  deadline (measured: 6.000 s of a 6 s budget against engine 0.8.15).
+  Downstream watchdogs written to work around that are no longer needed
+  (SONNY-806).
+
 - Transaction pinning: `Pool.Session(ctx)` checks one connection out of the
   pool and returns a `*Session` whose `ExecContext`, `QueryContext` and
   `TX(ctx, opts, fn)` all ride that one connection — and therefore one QUIC

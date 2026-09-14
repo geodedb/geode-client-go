@@ -45,6 +45,14 @@ var (
 	// concurrent connections.
 	ErrPoolExhausted = errors.New("geode: connection pool exhausted (all connections busy at pool_size)")
 
+	// ErrPoolDraining reports work offered to a pool that is shutting down.
+	// Pool.Drain stops new acquires before it waits for the in-flight ones, so
+	// a caller that asks for a connection mid-drain is told immediately rather
+	// than blocking on a connection that will never be handed out. It is a
+	// distinct sentinel from ErrClosed: draining means "this pool is on its way
+	// out", closed means "it is gone".
+	ErrPoolDraining = errors.New("geode: connection pool is draining")
+
 	// ErrTenantRequired reports a configuration that enables strict tenancy
 	// without naming a concrete tenant. The engine rejects tenant-scoped
 	// operations from a session whose tenant is unset, empty, or "default"

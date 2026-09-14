@@ -30,11 +30,15 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"net"
+	"net/netip"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/network"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
@@ -51,6 +55,11 @@ import (
 // applyQueryParams in config.go), and a test that needs NO scope strips it with
 // dsnWithoutTenant.
 var sharedDSN string
+
+// testContainer is the testcontainers-managed engine, nil in manual-server
+// mode (GEODE_TEST_DSN). Restart-recovery tests drive it directly: only the
+// container-managed lane can stop and start the engine under a live pool.
+var testContainer testcontainers.Container
 
 // TestMain runs once for the entire integration test binary.
 // It starts a Geode container (or uses GEODE_TEST_DSN), runs all tests,
@@ -69,9 +78,34 @@ func runTestMain(m *testing.M) int {
 
 	ctx := context.Background()
 
+	// Pin the container's port to a free HOST port instead of letting Docker
+	// choose an ephemeral one per start. A container started with an ephemeral
+	// publish gets a DIFFERENT host port every time it is started, so a
+	// restart would move the engine out from under any pool holding the
+	// original DSN — and TestIntegration_RecoversFromServerRestart would be
+	// measuring a wrong address rather than an orphaned connection.
+	hostPort, err := freeHostUDPPort()
+	if err != nil {
+		log.Fatalf("integration: failed to reserve a host port: %v", err)
+	}
+	enginePort, err := network.ParsePort(defaultGeodePort)
+	if err != nil {
+		log.Fatalf("integration: failed to parse %q: %v", defaultGeodePort, err)
+	}
+
 	req := testcontainers.ContainerRequest{
 		Image:        getGeodeImage(),
 		ExposedPorts: []string{defaultGeodePort},
+		// Publish the engine on a FIXED host port. testcontainers' ExposedPorts
+		// does not accept a host:container spec, so the binding goes through
+		// the Docker HostConfig directly.
+		HostConfigModifier: func(hc *container.HostConfig) {
+			hc.PortBindings = network.PortMap{
+				enginePort: []network.PortBinding{
+					{HostIP: netip.IPv4Unspecified(), HostPort: hostPort},
+				},
+			}
+		},
 		Env: map[string]string{
 			// Initialise the HMAC chain so the server auto-creates the admin
 			// user on first boot.
@@ -114,6 +148,7 @@ func runTestMain(m *testing.M) int {
 	if err != nil {
 		log.Fatalf("integration: failed to start Geode container: %v", err)
 	}
+	testContainer = container
 
 	// Change the auto-generated one-time password to a known passphrase.
 	if err := setupContainerAuth(ctx, container); err != nil {
@@ -158,6 +193,24 @@ func runTestMain(m *testing.M) int {
 	}
 
 	return code
+}
+
+// freeHostUDPPort reserves an unused UDP port on the host and returns it. The
+// port is released before it is handed to Docker, which leaves a small race
+// window; an ephemeral port is not handed out again immediately, so in
+// practice the container claims it first.
+func freeHostUDPPort() (string, error) {
+	c, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		return "", fmt.Errorf("reserve udp port: %w", err)
+	}
+	defer c.Close() //nolint:errcheck // reservation probe only
+
+	_, port, err := net.SplitHostPort(c.LocalAddr().String())
+	if err != nil {
+		return "", fmt.Errorf("split reserved addr: %w", err)
+	}
+	return port, nil
 }
 
 // hostPortFromDSN extracts "host:port" from the shared integration DSN so a

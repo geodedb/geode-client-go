@@ -150,6 +150,13 @@ func (p *Pool) Session(ctx context.Context) (*Session, error) {
 	if p == nil || p.db == nil {
 		return nil, fmt.Errorf("geode: Pool.Session: %w", ErrPoolNotInitialized)
 	}
+	// A pin during a drain is refused rather than served: database/sql may
+	// still have an idle connection to hand over, but that connection is about
+	// to be closed under the caller, and a Session that discovered its pin had
+	// evaporated is exactly the surprise Drain exists to avoid.
+	if p.draining.Load() {
+		return nil, fmt.Errorf("geode: Pool.Session: %w", ErrPoolDraining)
+	}
 
 	conn, err := p.db.Conn(ctx)
 	if err != nil {

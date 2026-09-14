@@ -1,12 +1,16 @@
 package geode
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/quic-go/quic-go"
+
+	"geodedb.com/geode/proto"
 )
 
 // Default QUIC pool settings.
@@ -81,6 +85,44 @@ type QUICPool struct {
 	maxStreamsPerConn int
 	closed            bool
 
+	// probeInterval is how often the probe loop verifies every pooled
+	// connection with a real round trip. Zero disables probing.
+	probeInterval time.Duration
+
+	// draining is set by Drain. It is read on the acquire fast path, before
+	// the admission semaphore, so a caller offered work during a drain is
+	// refused with ErrPoolDraining instead of blocking for a slot that the
+	// drain is trying to reclaim.
+	draining atomic.Bool
+
+	// probeMu serialises Probe with itself: two concurrent probes would open
+	// two probe streams on one pooled connection and double the server-side
+	// stream count for no extra information.
+	probeMu sync.Mutex
+
+	// health is the last recorded probe result. Pool.Health reads it instead
+	// of performing I/O, which is what makes a readiness endpoint cheap.
+	health atomic.Pointer[HealthStatus]
+
+	// Probe-loop lifecycle. probeStop is closed by stopProbeLoop, probeDone by
+	// the loop itself, so a Drain or Close can WAIT for the goroutine to be
+	// gone rather than merely asking it to leave.
+	probeOnce     sync.Once
+	probeStopOnce sync.Once
+	probeStop     chan struct{}
+	probeDone     chan struct{}
+	probeStarted  atomic.Bool
+
+	// probeTripCount counts this pool's own probe round trips. The exported
+	// ProbeCount is process-wide and therefore useless for asserting anything
+	// about ONE pool while other pools in the same process are probing on
+	// their own schedules.
+	probeTripCount atomic.Uint64
+
+	// probeHook, when set, runs inside the probe critical section. Tests use
+	// it to observe the serialisation; it is nil in production.
+	probeHook func()
+
 	// slotsCh is a counting semaphore bounding in-flight streams.  Capacity
 	// equals maxStreams; tokens are consumed by acquireSlot and returned
 	// by releaseSlot.  Pre-populated at construction so the channel acts
@@ -107,6 +149,34 @@ type pooledConn struct {
 	graph     string
 	sessionID string
 	helloCaps []string
+
+	// dead is set when this connection has been condemned by consecutive
+	// failed liveness probes. It is the half of the liveness answer that
+	// isQUICConnAlive cannot give: an orphaned connection's quic.Conn context
+	// is still live locally, because nothing local went wrong.
+	dead atomic.Bool
+
+	// strikes counts CONSECUTIVE failed probes; a success resets it. See
+	// probeStrikes: one failure is reported but not acted on, because
+	// evicting on a single slow round trip closes healthy connections with
+	// live streams on them.
+	strikes atomic.Int32
+
+	// warmed records that this connection has answered a probe at least once,
+	// so later probes are budgeted as steady-state round trips rather than
+	// paying the one-off server-side stream setup again. It matters after a
+	// failure: the probe stream is discarded then (a late response would be
+	// read as the NEXT probe's answer), and the re-opened stream must not buy
+	// a dead connection another warmup budget.
+	warmed atomic.Bool
+
+	// probe is a long-lived stream used only for liveness PINGs, opened
+	// lazily on the first probe and reused by every later one. It is NOT
+	// opened and closed per probe: geode 0.8.15 tears the whole pooled QUIC
+	// connection down when a stream that carried a handshake goes away
+	// (SONNY-1227), so the probe closes its stream only when the connection
+	// itself is being discarded. Guarded by mu.
+	probe *QUICTransport
 }
 
 // NewQUICPool creates a new QUIC connection pool for the given config.
@@ -149,13 +219,25 @@ func NewQUICPool(cfg *Config, maxSize int) *QUICPool {
 		admitBound = streamCap
 	}
 
+	// Health probing follows the Config exactly: ParseDSN defaults it to
+	// DefaultHealthProbeInterval, a programmatic Config keeps whatever the
+	// caller set (zero disables). A nil cfg — only reachable from tests that
+	// never dial — disables it too.
+	var probeInterval time.Duration
+	if cfg != nil {
+		probeInterval = cfg.HealthProbeInterval
+	}
+
 	p := &QUICPool{
 		cfg:               cfg,
 		maxSize:           maxSize,
 		maxStreams:        maxStreams,
 		maxStreamsPerConn: maxStreamsPerConn,
+		probeInterval:     probeInterval,
 		slotsCh:           make(chan struct{}, admitBound),
 		closedCh:          make(chan struct{}),
+		probeStop:         make(chan struct{}),
+		probeDone:         make(chan struct{}),
 	}
 	// Pre-populate the semaphore: every slot starts available.
 	for i := 0; i < admitBound; i++ {
@@ -220,6 +302,12 @@ func (p *QUICPool) releaseSlot() {
 // slot is released or ctx is cancelled.  See QUICPool docs for the
 // rationale behind admission control.
 func (p *QUICPool) acquire(ctx context.Context) (*pooledConn, error) {
+	// Checked before the semaphore: a drain is trying to reclaim slots, so a
+	// new caller must be turned away rather than queued behind it.
+	if p.draining.Load() {
+		return nil, ErrPoolDraining
+	}
+
 	if err := p.acquireSlot(ctx); err != nil {
 		return nil, err
 	}
@@ -230,6 +318,10 @@ func (p *QUICPool) acquire(ctx context.Context) (*pooledConn, error) {
 	if p.closed {
 		p.releaseSlot()
 		return nil, ErrClosed
+	}
+	if p.draining.Load() {
+		p.releaseSlot()
+		return nil, ErrPoolDraining
 	}
 
 	// Remove dead connections
@@ -246,6 +338,7 @@ func (p *QUICPool) acquire(ctx context.Context) (*pooledConn, error) {
 	if idx := selectConnWithCapacity(p.conns, p.maxStreamsPerConn); idx >= 0 {
 		pc := p.conns[idx]
 		atomic.AddInt32(&pc.active, 1)
+		p.startProbeLoop()
 		return pc, nil
 	}
 
@@ -256,6 +349,7 @@ func (p *QUICPool) acquire(ctx context.Context) (*pooledConn, error) {
 			return nil, err
 		}
 		atomic.AddInt32(&pc.active, 1)
+		p.startProbeLoop()
 		return pc, nil
 	}
 
@@ -323,11 +417,16 @@ func (p *QUICPool) remove(pc *pooledConn) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.removeLocked(pc)
+}
 
+// removeLocked drops pc from the pool without closing it.
+// Must be called with p.mu held.
+func (p *QUICPool) removeLocked(pc *pooledConn) {
 	for i, c := range p.conns {
 		if c == pc {
 			p.conns = append(p.conns[:i], p.conns[i+1:]...)
-			break
+			return
 		}
 	}
 }
@@ -335,6 +434,10 @@ func (p *QUICPool) remove(pc *pooledConn) {
 // Close closes all pooled QUIC connections and unblocks any goroutines
 // waiting on acquireSlot.
 func (p *QUICPool) Close() error {
+	// Outside the lock: the probe loop takes p.mu on every tick, so waiting
+	// for it while holding p.mu would deadlock.
+	p.stopProbeLoop()
+
 	p.mu.Lock()
 
 	if p.closed {
@@ -351,6 +454,12 @@ func (p *QUICPool) Close() error {
 
 	var firstErr error
 	for _, pc := range p.conns {
+		pc.closeProbe()
+		// nil-safe: a pool assembled by a test fixture may hold connections
+		// with no quic.Conn behind them, and Close must still be callable.
+		if pc.qConn == nil {
+			continue
+		}
 		if err := pc.qConn.CloseWithError(0, "pool closing"); err != nil && firstErr == nil {
 			firstErr = err
 		}
@@ -395,21 +504,89 @@ func (p *QUICPool) dialLocked(ctx context.Context) (*pooledConn, error) {
 	return pc, nil
 }
 
-// pruneDeadLocked removes connections that are no longer usable.
+// pruneDeadLocked removes connections that are no longer usable — those whose
+// local quic.Conn has gone away AND those a liveness probe found orphaned. The
+// second class is the one acquire could not see before: an orphaned connection
+// looks perfectly alive locally.
 // Must be called with p.mu held.
 func (p *QUICPool) pruneDeadLocked() {
 	alive := p.conns[:0]
+	var dropped []*pooledConn
 	for _, pc := range p.conns {
-		if isQUICConnAlive(pc.qConn) {
-			alive = append(alive, pc)
+		if pc.isDead() {
+			dropped = append(dropped, pc)
+			continue
 		}
+		alive = append(alive, pc)
+	}
+	// Zero the tail so a pruned connection is not kept reachable through the
+	// slice's spare capacity.
+	for i := len(alive); i < len(p.conns); i++ {
+		p.conns[i] = nil
 	}
 	p.conns = alive
+
+	for _, pc := range dropped {
+		pc.discard("failed liveness probe")
+	}
+}
+
+// recordProbeFailure counts one failed probe and reports whether that condemns
+// the connection.
+//
+// Report now, act on confirmation: the caller already counts this connection
+// as not live (so the status is unhealthy immediately), but only probeStrikes
+// CONSECUTIVE failures mark it dead. Evicting on a single failure closes a
+// healthy connection — with live streams on it — every time a probe loses its
+// race with a saturated engine. See probeStrikes for the measurement.
+func (pc *pooledConn) recordProbeFailure() bool {
+	if pc.strikes.Add(1) < probeStrikes {
+		return false
+	}
+	pc.dead.Store(true)
+	return true
+}
+
+// recordProbeSuccess clears the strike count: the strikes that condemn a
+// connection must be consecutive.
+func (pc *pooledConn) recordProbeSuccess() {
+	pc.strikes.Store(0)
+}
+
+// isDead reports whether this connection must not be handed out again. It is
+// the union of the two liveness signals: the local one (quic-go cancels the
+// connection's context when the connection is closed or times out) and the
+// probed one (a real round trip that the peer did not answer).
+//
+// A zero-value pooledConn — the shape the pool-policy unit tests use — has no
+// quic.Conn and is not dead; only the probe flag can condemn it.
+func (pc *pooledConn) isDead() bool {
+	if pc.dead.Load() {
+		return true
+	}
+	return pc.qConn != nil && !isQUICConnAlive(pc.qConn)
+}
+
+// discard closes this connection for good: its probe stream first, then the
+// QUIC connection itself. Any stream still in flight on it dies with it, which
+// is the point — after a failed probe those streams are riding a peer that did
+// not answer, and leaving them alone means every one of their callers waits out
+// its own full deadline. That is the defect this whole path exists to fix.
+func (pc *pooledConn) discard(reason string) {
+	pc.closeProbe()
+	if pc.qConn != nil {
+		_ = pc.qConn.CloseWithError(0, reason)
+	}
 }
 
 // isQUICConnAlive checks if a QUIC connection is still usable by inspecting
 // its context. quic-go cancels the connection's context when the connection
 // is closed or times out.
+//
+// It is a LOCAL check and performs no I/O, so it cannot see a connection the
+// server has forgotten: after a restart the peer drops the connection's
+// packets without answering, nothing cancels the context, and this keeps
+// reporting true. QUICPool.Probe is the network-level answer.
 func isQUICConnAlive(qConn *quic.Conn) bool {
 	return qConn.Context().Err() == nil
 }
@@ -475,4 +652,407 @@ func (pc *pooledConn) openStream(ctx context.Context) (*quic.Stream, error) {
 		}
 	}
 	return stream, nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Liveness probing (SONNY-806, Lane D Task 11)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Probe verifies every pooled QUIC connection with a real network round trip
+// and evicts the ones that do not answer, then records the result for
+// Pool.Health to read.
+//
+// The probe is a protocol-level PING on a long-lived probe stream — the
+// cheapest round trip geode 0.8.15 answers, and one that mutates nothing. Each
+// connection gets its own bounded deadline (probeTimeout) and they are probed
+// concurrently, so one round costs about one timeout however many connections
+// are orphaned.
+//
+// Probe never runs concurrently with itself, so a pooled connection never has
+// more than one probe stream.
+//
+// It returns the first probe failure, errNoPooledConns when there is nothing
+// to verify, or ErrClosed / ErrPoolDraining when the pool is on its way out.
+func (p *QUICPool) Probe(ctx context.Context) error {
+	if p == nil {
+		return ErrClosed
+	}
+
+	p.probeMu.Lock()
+	defer p.probeMu.Unlock()
+	if p.probeHook != nil {
+		p.probeHook()
+	}
+
+	conns, err := p.probeTargets()
+	if err != nil {
+		return err
+	}
+
+	status, firstErr := p.probeAll(ctx, conns)
+	p.storeHealth(status)
+	return firstErr
+}
+
+// probeTargets snapshots the connections a probe should verify. When there are
+// none to verify — the pool is closed, draining, or empty — it records the
+// fail-closed status itself and returns the reason, because in every one of
+// those cases nothing was verified and nothing may be claimed.
+func (p *QUICPool) probeTargets() ([]*pooledConn, error) {
+	p.mu.Lock()
+	closed := p.closed
+	conns := append([]*pooledConn(nil), p.conns...)
+	p.mu.Unlock()
+
+	var reason string
+	var err error
+	switch {
+	case closed:
+		reason, err = probeErrPoolClosed, ErrClosed
+	case p.draining.Load():
+		reason, err = probeErrPoolDraining, ErrPoolDraining
+	case len(conns) == 0:
+		reason, err = probeErrNoPooledConns, errNoPooledConns
+	default:
+		return conns, nil
+	}
+	p.storeHealth(HealthStatus{LastProbeAt: time.Now(), LastProbeErr: reason})
+	return nil, err
+}
+
+// probeAll probes every connection concurrently, evicts the ones that did not
+// answer, and returns the resulting status together with the first failure.
+//
+// Concurrency is what keeps a round cheap: a probe against an orphaned
+// connection never returns early — the peer simply does not answer — so a
+// serial round would cost one timeout per orphan. Probed together, a whole
+// round costs about one timeout however many connections went away at once,
+// which is exactly the case a server restart produces.
+func (p *QUICPool) probeAll(ctx context.Context, conns []*pooledConn) (HealthStatus, error) {
+	status := HealthStatus{LastProbeAt: time.Now(), PooledConns: len(conns)}
+	for _, pc := range conns {
+		status.InFlightStreams += int(atomic.LoadInt32(&pc.active))
+	}
+
+	errs := make([]error, len(conns))
+	var wg sync.WaitGroup
+	for i, pc := range conns {
+		// A connection nothing has handshaken on yet has no session for the
+		// server to have forgotten; probing it would only race the HELLO that
+		// is about to run on it.
+		if !pc.isAuthed() {
+			continue
+		}
+		wg.Add(1)
+		go func(i int, pc *pooledConn) {
+			defer wg.Done()
+			errs[i] = p.probeConn(ctx, pc)
+		}(i, pc)
+	}
+	wg.Wait()
+
+	var firstErr error
+	var dead []*pooledConn
+	for i, pc := range conns {
+		if errs[i] == nil {
+			pc.recordProbeSuccess()
+			status.LiveConns++
+			continue
+		}
+		if firstErr == nil {
+			firstErr = errs[i]
+		}
+		if pc.recordProbeFailure() {
+			dead = append(dead, pc)
+		}
+	}
+	p.evict(dead)
+
+	status.Healthy = firstErr == nil
+	status.LastProbeErr = classifyProbeErr(firstErr)
+	return status, firstErr
+}
+
+// evict removes probe-failed connections from the pool and closes them, so
+// acquire can never hand one out again.
+func (p *QUICPool) evict(dead []*pooledConn) {
+	if len(dead) == 0 {
+		return
+	}
+	p.mu.Lock()
+	for _, pc := range dead {
+		p.removeLocked(pc)
+	}
+	p.mu.Unlock()
+	for _, pc := range dead {
+		pc.discard("failed liveness probe")
+	}
+}
+
+// probeConn performs one bounded PING round trip on pc's probe stream.
+//
+// The budget depends on whether the stream is new: the server materialises a
+// probe stream when its first frame arrives, which costs real work, while
+// every later probe on that stream is a bare round trip. See probeWarmupTimeout.
+func (p *QUICPool) probeConn(ctx context.Context, pc *pooledConn) error {
+	openCtx, openCancel := context.WithTimeout(ctx, probeWarmupTimeout)
+	t, fresh, err := pc.probeTransport(openCtx)
+	openCancel()
+	if err != nil {
+		return err
+	}
+
+	// Only a connection that has never answered pays the warmup budget; see
+	// pooledConn.warmed.
+	budget := p.probeTimeout()
+	if fresh && !pc.warmed.Load() {
+		budget = probeWarmupTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+
+	probeCount.Add(1)
+	p.probeTripCount.Add(1)
+	if err := t.SendProto(ctx, proto.NewPingMessage(&proto.PingRequest{})); err != nil {
+		pc.closeProbe()
+		return err
+	}
+	resp, err := t.ReceiveProto(ctx)
+	if err != nil {
+		pc.closeProbe()
+		return err
+	}
+	ping := resp.GetPing()
+	if ping == nil {
+		// The probe stream is desynchronised; it can never be trusted again.
+		pc.closeProbe()
+		return errProbeUnexpectedFrame
+	}
+	if !ping.GetOk() {
+		return errProbeRefused
+	}
+	pc.warmed.Store(true)
+	return nil
+}
+
+// probeTimeout bounds a single connection's probe. It tracks the configured
+// interval so the detection budget stays roughly two intervals — the number
+// the integration test asserts — while never collapsing to something a local
+// round trip cannot make, nor stretching past the point where a probe round
+// would outlive its own schedule.
+func (p *QUICPool) probeTimeout() time.Duration {
+	d := p.probeInterval
+	switch {
+	case d < minProbeTimeout:
+		return minProbeTimeout
+	case d > maxProbeTimeout:
+		return maxProbeTimeout
+	default:
+		return d
+	}
+}
+
+// probeTransport returns pc's probe stream, opening it on first use.
+//
+// The stream is long-lived on purpose: it is opened once and reused by every
+// later probe, so a probe never closes a stream on a live pooled connection
+// (SONNY-1227). It carries no HELLO — on a pooled connection the server
+// authenticates the CONNECTION, which is why every stream after the first
+// already skips the handshake (see pooledHello).
+//
+// fresh reports whether this call opened the stream, so the caller can budget
+// the server-side stream setup that the first frame on it pays for.
+func (pc *pooledConn) probeTransport(ctx context.Context) (t *QUICTransport, fresh bool, err error) {
+	pc.mu.Lock()
+	if existing := pc.probe; existing != nil {
+		pc.mu.Unlock()
+		return existing, false, nil
+	}
+	pc.mu.Unlock()
+
+	stream, err := pc.openStream(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	t = &QUICTransport{
+		pc:       pc,
+		stream:   stream,
+		rdStream: stream,
+		br:       bufio.NewReaderSize(stream, quicReadBufferSize),
+		addr:     pc.addr,
+	}
+
+	pc.mu.Lock()
+	if existing := pc.probe; existing != nil {
+		pc.mu.Unlock()
+		_ = t.Close()
+		return existing, false, nil
+	}
+	pc.probe = t
+	pc.mu.Unlock()
+	return t, true, nil
+}
+
+// closeProbe closes and forgets the probe stream. Safe to call repeatedly and
+// on a connection that never had one.
+//
+// This is the ONLY place a probe stream is closed, and it runs in exactly
+// three situations, all of which end with the connection gone: the pool is
+// closing, the connection is being discarded, or a probe on it has just failed
+// (which is immediately followed by discarding it). It never runs while the
+// connection is still in service — that is the SONNY-1227 rule.
+func (pc *pooledConn) closeProbe() {
+	pc.mu.Lock()
+	t := pc.probe
+	pc.probe = nil
+	pc.mu.Unlock()
+	if t != nil {
+		_ = t.Close()
+	}
+}
+
+// lastHealth returns the last recorded probe result. The zero value — nothing
+// probed yet — is unhealthy, so a caller that reads it before the first probe
+// gets the fail-closed answer.
+func (p *QUICPool) lastHealth() HealthStatus {
+	if p == nil {
+		return HealthStatus{}
+	}
+	if h := p.health.Load(); h != nil {
+		return *h
+	}
+	return HealthStatus{}
+}
+
+// probeTrips reports how many probe round trips THIS pool has performed.
+func (p *QUICPool) probeTrips() uint64 {
+	if p == nil {
+		return 0
+	}
+	return p.probeTripCount.Load()
+}
+
+// isClosed reports whether Close has run.
+func (p *QUICPool) isClosed() bool {
+	if p == nil {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.closed
+}
+
+func (p *QUICPool) storeHealth(h HealthStatus) {
+	p.health.Store(&h)
+}
+
+// counts reports how many connections the pool holds and how many streams are
+// in flight across them, without probing anything.
+func (p *QUICPool) counts() (pooled, inFlight int) {
+	if p == nil {
+		return 0, 0
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, pc := range p.conns {
+		pooled++
+		inFlight += int(atomic.LoadInt32(&pc.active))
+	}
+	return pooled, inFlight
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The probe loop
+// ─────────────────────────────────────────────────────────────────────────────
+
+// startProbeLoop starts the periodic probe, at most once for the life of the
+// pool. It is called from acquire, so a pool that is never used never starts a
+// goroutine, and a pool configured with health_probe_ms=0 never starts one at
+// all.
+func (p *QUICPool) startProbeLoop() {
+	if p.probeInterval <= 0 {
+		return
+	}
+	select {
+	case <-p.probeStop:
+		return // already stopped; do not resurrect the loop
+	default:
+	}
+	p.probeOnce.Do(func() {
+		p.probeStarted.Store(true)
+		go p.probeLoop()
+	})
+}
+
+// probeLoop is the pool's own goroutine. It runs one Probe per tick — never
+// two at once, because it is a single goroutine and Probe serialises anyway —
+// and exits on stopProbeLoop or Close, closing probeDone so a drain can wait
+// for it.
+func (p *QUICPool) probeLoop() {
+	defer close(p.probeDone)
+
+	ticker := time.NewTicker(p.probeInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-p.probeStop:
+			return
+		case <-p.closedCh:
+			return
+		case <-ticker.C:
+			ctx, cancel := context.WithTimeout(context.Background(), probeWarmupTimeout+probeRoundSlack)
+			_ = p.Probe(ctx)
+			cancel()
+		}
+	}
+}
+
+// stopProbeLoop asks the probe goroutine to exit and waits until it has. It is
+// idempotent and safe on a pool whose loop never started.
+func (p *QUICPool) stopProbeLoop() {
+	p.probeStopOnce.Do(func() { close(p.probeStop) })
+	if p.probeStarted.Load() {
+		<-p.probeDone
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Drain
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Drain stops the pool handing out connections, waits for the streams already
+// in flight to finish, then closes every pooled QUIC connection.
+//
+// New acquires fail with ErrPoolDraining from the moment Drain is entered —
+// before the wait, so the wait can actually finish. If ctx expires first, Drain
+// returns ctx.Err() and closes the pool anyway: a half-drained pool is not a
+// state anything should be left in. Drain is idempotent.
+func (p *QUICPool) Drain(ctx context.Context) error {
+	if p == nil {
+		return nil
+	}
+	p.draining.Store(true)
+	p.stopProbeLoop()
+
+	var waitErr error
+	ticker := time.NewTicker(drainPollInterval)
+	defer ticker.Stop()
+	for {
+		if _, inFlight := p.counts(); inFlight == 0 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			waitErr = ctx.Err()
+		case <-ticker.C:
+			continue
+		}
+		break
+	}
+
+	if err := p.Close(); err != nil && waitErr == nil {
+		waitErr = err
+	}
+	return waitErr
 }

@@ -3,6 +3,7 @@ package geode
 import (
 	"context"
 	"database/sql"
+	"sync/atomic"
 	"time"
 
 	"geodedb.com/geode/internal/redact"
@@ -50,6 +51,26 @@ const (
 type Pool struct {
 	db  *sql.DB
 	cfg *Config
+
+	// quic is the shared QUIC connection pool underneath database/sql, when
+	// this Pool owns one (QUIC transport only). It is what Health probes and
+	// what Drain closes; a Pool built over gRPC, or over a *sql.DB this
+	// package did not create, leaves it nil and falls back to a ping.
+	quic *QUICPool
+
+	// draining is set by Drain, before it waits. Pool.Session reads it so a
+	// caller that pins during a shutdown is refused immediately instead of
+	// blocking on a connection the drain will never hand out.
+	draining atomic.Bool
+}
+
+// quicPool returns the shared QUIC connection pool underneath this Pool, or
+// nil when there is none to probe.
+func (p *Pool) quicPool() *QUICPool {
+	if p == nil {
+		return nil
+	}
+	return p.quic
 }
 
 // poolConfig holds pool-specific configuration separate from the connection Config.
@@ -127,10 +148,15 @@ func NewPool(dsn string, opts ...PoolOption) (*Pool, error) {
 		opt(&pc)
 	}
 
-	db, err := sql.Open("geode", dsn)
+	// Built through the connector rather than sql.Open("geode", dsn) — which
+	// is what sql.Open does internally for a DriverContext driver anyway — so
+	// the Pool keeps a handle on the shared QUIC pool underneath it. Health
+	// and Drain both need to reach it; sql.Open gives no way back to it.
+	connector, err := registeredDriver.OpenConnector(dsn)
 	if err != nil {
 		return nil, err
 	}
+	db := sql.OpenDB(connector)
 
 	db.SetMaxOpenConns(pc.maxOpenConns)
 	db.SetMaxIdleConns(pc.maxIdleConns)
@@ -140,12 +166,23 @@ func NewPool(dsn string, opts ...PoolOption) (*Pool, error) {
 	// Verify the pool can establish a connection.
 	ctx, cancel := context.WithTimeout(context.Background(), DefaultPingTimeout)
 	defer cancel()
+	var quic *QUICPool
+	if gc, ok := connector.(*Connector); ok {
+		quic = gc.quicPool
+	}
+
 	if err := db.PingContext(ctx); err != nil {
 		db.Close()
+		// The ping reached acquire, which may have started the probe loop;
+		// close the QUIC pool so a failed constructor leaves no goroutine and
+		// no dialled connection behind.
+		if quic != nil {
+			_ = quic.Close()
+		}
 		return nil, err
 	}
 
-	return &Pool{db: db, cfg: cfg}, nil
+	return &Pool{db: db, cfg: cfg, quic: quic}, nil
 }
 
 // NewPoolFromConfig creates a connection pool from a programmatic Config
@@ -173,10 +210,13 @@ func NewPoolFromConfig(cfg *Config, opts ...PoolOption) (*Pool, error) {
 	defer cancel()
 	if err := db.PingContext(ctx); err != nil {
 		db.Close()
+		if c.quicPool != nil {
+			_ = c.quicPool.Close()
+		}
 		return nil, err
 	}
 
-	return &Pool{db: db, cfg: cfg.Clone()}, nil
+	return &Pool{db: db, cfg: cfg.Clone(), quic: c.quicPool}, nil
 }
 
 // DB returns the underlying *sql.DB for advanced use cases such as
@@ -190,9 +230,26 @@ func (p *Pool) Config() *Config {
 	return p.cfg.Clone()
 }
 
-// Close closes all connections in the pool.
+// Close closes all connections in the pool immediately. Drain is the graceful
+// counterpart: Close does not wait for in-flight statements.
+//
+// It also stops the pool's health-probe goroutine and closes the underlying
+// QUIC connections. Before the probe existed the QUIC pool was left to the
+// garbage collector; a goroutine is not collectable, so ownership is now
+// explicit.
 func (p *Pool) Close() error {
-	return p.db.Close()
+	if p == nil || p.db == nil {
+		return nil
+	}
+	err := p.db.Close()
+	if qp := p.quicPool(); qp != nil {
+		// Closes the probe loop (and waits for it) before closing the
+		// connections.
+		if qerr := qp.Close(); qerr != nil && err == nil {
+			err = qerr
+		}
+	}
+	return err
 }
 
 // PingContext verifies a connection to the database is still alive.
