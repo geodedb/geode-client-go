@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Target release: **v0.2.0** — the GraphRAG driver surface (SONNY-806 /
+GEO-GO-UP-001).
+
+Engine pin: this release is developed and tested against **geode 0.8.15**
+(`geodedb/geode:0.8.15`, index digest
+`sha256:96a194cfce01e59ee1dbe1504aa0ed79c0141f7e2e8b23389da18e73e6adc8ee`).
+`engine_pin_test.go` asserts the running engine reports it, and the 0.8.15
+capability contract is pinned as a 59-row golden file. Behaviour described
+below as an "engine fact" is pinned to that version and may change with the
+engine.
+
+Known-RED integration tests, each an open defect rather than a flake, and the
+gate on tagging v0.2.0:
+
+- `TestIntegration_CrossTenantReadIsDenied` — SONNY-1229 / GAP-SONNY806-02
+  (Critical): geode 0.8.15 does not apply the session tenant filter on the
+  `MATCH` read path, so tenant binding is not an isolation boundary. Engine
+  fix required; the driver cannot work around it.
+- `TestLoad_BurstExceedsPoolSize_NoDeadlock` — SONNY-1219 / BUG-0002 (Low):
+  more concurrent connections than `pool_size` intermittently time out
+  (~0.06%).
+- `TestMultiplex_FindCreate_And_Merge_NoWedge` — asserts a throughput floor
+  and fails on a loaded host; a measurement bound, not a correctness defect.
+
+Known engine limit on the gRPC wire: **a single `Execute` stalls past roughly
+64 KiB of pushed payload** (GAP-SONNY806-07, High — engine/grpc-zig does not
+act on HTTP/2 `WINDOW_UPDATE`). gRPC is usable for small results only at
+0.8.15 and **QUIC remains the release transport**; a stalled result surfaces
+as an error, never as a short result set that looks complete.
+
 ### Added
 
 - gRPC transport parity lane. ENG-4658 requires the feature set to pass

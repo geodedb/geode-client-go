@@ -56,8 +56,19 @@ geode-client-go/
 ├── result.go          # Exec result
 ├── errors.go          # Error types (DriverError, TransportError, etc.)
 ├── config.go          # DSN parsing, Config struct, TransportType
-├── transport.go       # QUIC transport layer
-├── grpc_transport.go  # gRPC transport layer
+├── transport.go       # Transport interface + QUIC transport layer
+├── grpc_transport.go  # gRPC transport layer (server-pushed pages, per-Execute cancel)
+├── params.go          # `?` -> typed proto.Param binding (no text interpolation)
+├── vector.go          # geode.Vector (typed embedding parameter)
+├── readonly.go        # Read-only classifier (fail-closed) + CALL allow-list
+├── capabilities.go    # ServerInfo / Capabilities (SHOW VERSION, SHOW CAPABILITIES)
+├── pool.go            # geode.Pool over *sql.DB
+├── quic_pool.go       # Shared QUIC connection pool (stream multiplexing)
+├── session.go         # Pool.Session: one pinned connection
+├── health.go          # Pool.Health / Pool.Drain, probe stream
+├── retryclass.go      # Classify + RetryClass
+├── retry.go           # RetryPolicy, Pool.RetrySession
+├── plan.go            # EXPLAIN / PROFILE typed payloads
 ├── types.go           # GQL type definitions
 ├── security.go        # TLS configuration
 ├── unicode.go         # Unicode conversion utilities
@@ -138,6 +149,18 @@ grpc://[2001:db8::1]:50051
 | `tls` | Enable/disable TLS (`0` or `false` to disable) | enabled |
 | `user`/`username` | Authentication username | |
 | `pass`/`password` | Authentication password | |
+| `read_only` | Refuse mutating statements (aliases `readonly`, `read-only`) | false |
+| `graph` | Graph bound at connect | |
+| `tenant`/`tenant_id` | Tenant bound at HELLO | |
+| `role` | Role bound at HELLO | |
+| `strict_tenancy` | Refuse a config with no concrete tenant | false |
+| `pool_size` | Max QUIC connections in the shared pool | 16 |
+| `max_streams` | Max concurrent streams across the pool | 64 |
+| `max_streams_per_conn` | Max streams per pooled connection | 8 |
+| `health_probe_ms` | Probe interval in ms; `0` disables | 1000 |
+
+A repeated key resolves to its LAST occurrence, so a base DSN can be extended
+by appending overrides.
 
 Environment variables: `GEODE_HOST`, `GEODE_PORT`, `GEODE_TLS_CA`
 
@@ -154,8 +177,30 @@ The driver uses Protocol Buffers (protobuf) for wire encoding over both transpor
 #### gRPC Transport
 
 - Standard gRPC over HTTP/2
-- Streaming responses for query execution
-- TLS 1.3 by default (can be disabled with `tls=0` for testing)
+- `Execute` is a SERVER-STREAMING RPC: the engine pushes every page until one
+  is final. The driver reads them; it never sends a `PullRequest` (the service
+  has no `Pull` method).
+- The release engine's gRPC listener is TLS-only, so a test DSN needs
+  `insecure_tls_skip_verify=true` — `tls=0` cannot connect. The engine also
+  discards `--listen-grpc`'s address and binds loopback, so the server needs
+  `GRPC_ZIG_BIND_ADDR=0.0.0.0` (SONNY-1336 / GAP-SONNY806-03).
+- No QUIC pool, therefore no probe stream and no pooled-connection census:
+  `Pool.Health` degrades to a ping.
+
+#### Who drives paging
+
+`Transport.PagesArePushed()` is the predicate: `false` on QUIC (the driver
+PULLs each page after the first), `true` on gRPC. `Rows.fetchNextPage` branches
+on it. Two consequences worth knowing before touching `Rows` or `Conn`:
+
+- A non-final `Rows.Close()` on a pushed-page transport must CANCEL the RPC
+  (`streamCanceller` / `GRPCTransport.CancelActiveStream`). An abandoned stream
+  parks geode's push loop on the session mutex and wedges the next statement on
+  that session. Cancel, do not `markConnFailed`: the connection is still good.
+- `Conn.drainTrailingFrames` runs on PULL-driven transports only. Only the
+  context an `Execute` stream was created from binds that stream, so a
+  background drain deadline cannot unblock a gRPC `Recv` — and on that wire the
+  frame it would read is a page of the caller's result.
 
 ### Error Types
 
@@ -193,5 +238,35 @@ Test categories:
 - Concurrent Access
 - Data Types (null, list, map)
 - Social Network Fixtures
+
+The gRPC parity lane lives in `integration_grpc_test.go`
+(`TestIntegration_GRPC*`, `make test-integration-docker-grpc-race`): every QUIC
+property asserted again on the gRPC wire, with a `GRPC` infix so the pairing is
+greppable.
+
+Engine pin: the lane runs `geodedb/geode:0.8.15` (index digest
+`sha256:96a194cfce01e59ee1dbe1504aa0ed79c0141f7e2e8b23389da18e73e6adc8ee`), and
+`engine_pin_test.go` asserts the running server reports it. Three integration
+tests are known-RED and are NOT regressions:
+`TestIntegration_CrossTenantReadIsDenied` (SONNY-1229, engine tenant-filter
+defect), `TestLoad_BurstExceedsPoolSize_NoDeadlock` (SONNY-1219) and
+`TestMultiplex_FindCreate_And_Merge_NoWedge` (throughput floor on a loaded
+host).
+
+Host load is part of the result. Several integration tests seed their fixture
+INSIDE the same context budget they then assert against —
+`TestIntegration_CancelMidStream` seeds 2500 rows through `BatchExec` under a
+120 s base context and then requires a post-cancel query to answer within what
+is left. On a loaded host the seed alone can take most of that, and the test
+fails at `query after cancellation: context deadline exceeded` with nothing
+wrong in the driver. `-count=3` tells the two apart in one container: the seed
+runs once (`cancelSeedOnce`), so if iterations 2 and 3 pass in under a second
+the first failure was the seed competing for the budget, not a regression.
+
+Running ONE integration test:
+`make test-integration-docker-race GOFLAGS="-run=TestName -count=1"`. Do not
+anchor the pattern with `$` — the shell eats it, `-run` then matches nothing
+and the target exits 0 with no test having run. Confirm a
+`--- PASS: <TestName>` line before believing a green exit code.
 
 Benchmarks (prefixed with `BenchmarkDocker_`) test real-world performance against a running Geode instance.

@@ -117,6 +117,17 @@ grpc://[2001:db8::1]:50051
 | `user`/`username` | Authentication username | |
 | `pass`/`password` | Authentication password | |
 | `read_only` | Refuse mutating statements (aliases: `readonly`, `read-only`) | false |
+| `graph` | Graph bound at connect (`USE GRAPH`, created first unless read-only) | |
+| `tenant`/`tenant_id` | Tenant bound for the session at HELLO | |
+| `role` | Role bound for the session at HELLO | |
+| `strict_tenancy` | Refuse a config with no concrete tenant (`ErrTenantRequired`) | false |
+| `pool_size` | Max QUIC connections in the shared pool (QUIC only) | 16 |
+| `max_streams` | Max concurrent streams across the pool (QUIC only) | 64 |
+| `max_streams_per_conn` | Max streams multiplexed on one pooled connection (QUIC only) | 8 |
+| `health_probe_ms` | Pooled-connection liveness probe interval, ms; `0` disables (QUIC only) | 1000 |
+
+A repeated DSN key resolves to its **last** occurrence, so appending an option
+to a DSN that already sets it overrides it.
 
 ### Read-only connections
 
@@ -174,6 +185,277 @@ Two behaviours worth knowing:
 | `GEODE_HOST` | Default host |
 | `GEODE_PORT` | Default port |
 | `GEODE_TLS_CA` | Default CA certificate path |
+
+## Parameters
+
+`?` placeholders are bound as **typed wire parameters**. The driver rewrites
+each `?` into a generated name (`$_gq0`, `$_gq1`, …) and sends the value in
+`ExecuteRequest.params` as a typed `proto.Param`. **No argument value is ever
+written into query text** — there is no string interpolation path left in the
+driver to escape badly.
+
+```go
+// The engine receives "MERGE (n:Chunk {chunk_id: $_gq0, score: $_gq1})"
+// plus two typed params. "c-1" never appears in the statement.
+_, err := db.ExecContext(ctx,
+    "MERGE (n:Chunk {chunk_id: ?, score: ?})", "c-1", 0.91)
+```
+
+- Named `$name` references in your own statement text pass through untouched;
+  bind them with `sql.Named("name", v)`.
+- `_gq` is a **reserved** parameter-name prefix. A caller-supplied name in that
+  namespace is refused with `ErrReservedParamName` rather than silently
+  shadowing a positional argument.
+- Scalars (`string`, `[]byte`, `bool`, integers, floats, `time.Time`) bind as
+  typed values; slices, arrays and maps keep their structural `list_val` /
+  `map_val` encoding.
+- The property is fuzzed, not merely tested: `FuzzBindParameters` asserts that
+  the statement text the engine receives is **independent of the argument
+  values**, for arbitrary inputs (`params_fuzz_test.go`).
+
+## Vectors
+
+`geode.Vector` is a `[]float32` that binds as a typed vector parameter:
+
+```go
+var ids any
+err := db.QueryRowContext(ctx,
+    "RETURN knn('embedding', ?, ?, 'cosine')",
+    geode.Vector{0.1, 0.2, 0.3}, 10,
+).Scan(&ids)
+```
+
+- The call shape is `knn('property', ?, k, 'metric')` — the property name and
+  the metric are literals, the query vector and `k` are bound.
+- Dimensions are capped at 65535. Over that, the driver refuses before the
+  wire.
+- Engine facts at 0.8.15: a dimension mismatch answers GQLSTATE `22000` and a
+  metric mismatch `42704` (both in `DriverError.Code`); only `vectorf32($v)`
+  storage arms the vector index (SONNY-1224); and `knn` silently downgrades to
+  a scan when another graph shares the property name (SONNY-1223).
+
+## Tenancy
+
+`?tenant=` (alias `tenant_id`) and `?role=` bind the session at HELLO — a
+tenant is a property of the connection, not of a statement, so every statement
+on that connection inherits it.
+
+`?strict_tenancy=true` asserts the client intends to run tenant-scoped. A
+config with no concrete tenant (empty or `default`) is refused at parse time
+with `ErrTenantRequired`, and the engine's own refusal (GQLSTATE `42501`,
+"Tenant scope required") is surfaced as the typed `ErrTenantScopeRequired`, so
+callers gate startup on `errors.Is` instead of matching engine prose.
+
+> **Known engine defect (SONNY-1229, GAP-SONNY806-02, Critical).** geode 0.8.15
+> does **not** apply the session tenant filter on the `MATCH` read path. Two
+> sessions bound to different tenants read each other's rows in the same graph,
+> even with `GEODE_STRICT_TENANCY=1`. The driver cannot work around it. The
+> reproducer `TestIntegration_CrossTenantReadIsDenied` is RED by design until
+> the engine fixes it. **Do not rely on tenant binding as an isolation boundary
+> at 0.8.15.**
+
+## Cancellation
+
+Cancelling a query's context stops the read promptly and reports the **context**
+error, not the transport error the cancellation manifests as on the wire:
+
+```go
+ctx, cancel := context.WithCancel(parent)
+rows, _ := db.QueryContext(ctx, "MATCH (n:Chunk) RETURN n.id")
+rows.Next()
+cancel()
+// rows.Err() satisfies errors.Is(err, context.Canceled)
+```
+
+A `Rows` abandoned mid-result under a cancelled context **retires its
+connection**: `Conn.IsValid()` becomes false and `ResetSession` returns
+`driver.ErrBadConn`, so `database/sql` discards the connection instead of
+handing a desynchronised stream to the next borrower. 0.8.15 has no
+client-to-server cancel or discard message, so the stream itself is what gets
+closed.
+
+Closing a `Rows` **early** (before its final page) with a still-live context is
+different and cheap: on gRPC the driver cancels the abandoned server-streaming
+RPC and keeps the connection, because an uncancelled one would leave the
+engine's push loop holding the session mutex and wedge the next statement on
+that session.
+
+## Capability discovery
+
+Ask the server what it supports before using a feature; unknown features are
+**unsupported**, never assumed:
+
+```go
+cfg, _ := geode.ParseDSN("quic://localhost:3141")
+connector, _ := geode.NewConnector(cfg)
+
+info, err := connector.ServerInfo(ctx)          // SHOW VERSION + SHOW CAPABILITIES
+if err != nil { return err }
+if !info.Capabilities.Has(geode.CapVectorKNN) {
+    return fmt.Errorf("engine %s lacks vector_knn", info.Version)
+}
+```
+
+`ServerInfo` uses a dedicated connection by design (see SONNY-1227), and the
+0.8.15 capability contract is pinned as a golden set of **59 rows** —
+`capabilities_test.go` fails when the engine's advertised set drifts.
+
+## Pool health and drain
+
+`geode.Pool` adds liveness the `database/sql` pool does not have:
+
+```go
+pool, _ := geode.NewPool("quic://localhost:3141?health_probe_ms=1000")
+h := pool.Health(ctx)   // zero value is UNHEALTHY — a failed probe never reads as healthy
+_ = pool.Drain(ctx)     // stop handing out connections, let in-flight work finish
+```
+
+Pooled QUIC connections are verified with **real protocol I/O** (a PING on a
+long-lived per-connection probe stream, never opened or closed per probe), so a
+connection whose server side went away is evicted instead of being handed to
+the next query. **Consumers no longer need an external pool-recovery
+watchdog.**
+
+Over gRPC there is no QUIC pool, so there is no probe stream and no
+pooled-connection census: `Health` degrades to a round trip through
+`database/sql`.
+
+## Retry classes
+
+`Classify(err)` maps any error to one of four `RetryClass` values, so a bulk
+loader can act on a failure instead of guessing:
+
+| Class | Meaning |
+|-------|---------|
+| `RetryNever` | Deterministic. The same request fails the same way. |
+| `RetrySameConn` | Transient; retry on the connection you have. |
+| `RetryNewConn` | The connection or its server is wrong; take a new one. |
+| `RetryBackoff` | Overloaded/exhausted; wait before retrying. |
+
+`RetryPolicy.Classes` selects which classes a `Retry` attempt covers, and
+`Pool.RetrySession` re-pins a session across attempts (honouring
+`RetryNewConn` by closing and re-pinning).
+
+Three classifications are pinned to engine behaviour at 0.8.15 and deviate from
+the obvious reading of the GQLSTATE:
+
+- `40001` with the engine's `ClusterNotLeader` / `ClusterWriteNotReplicable`
+  message prefixes → `RetryNewConn` (another node can serve it), not
+  `RetrySameConn`.
+- `08006` → `RetryNever`. It is a generic connection-timeout code whose outcome
+  is **unknown**; a blind retry can duplicate a row.
+- `53200` (out of memory) → `RetryNever`.
+
+> **`Pool.RetrySession` is not idempotent for you.** It re-runs your function.
+> Only pass work that is safe to run twice (`MERGE`, not `CREATE`).
+
+## Query plans
+
+`Explain` and `Profile` return typed values, so a retrieval path can **record**
+which access path a query used instead of guessing:
+
+```go
+plan, err := pool.Explain(ctx, "MATCH (n:Chunk) WHERE n.chunk_id = ? RETURN n", "c-1")
+if err != nil { return err }
+if !plan.UsesIndex() {
+    log.Printf("seed query is a scan: %s", plan.Schema)
+}
+```
+
+- Both are gated on the engine advertising `explain` / `profile` in
+  `SHOW CAPABILITIES`, and the gate **fails closed** in both directions — an
+  unlisted capability and a probe that could not be completed both refuse with
+  `ErrCapabilityUnsupported` before anything reaches the wire. That matters
+  most for `PROFILE`, which EXECUTES the statement.
+- Arguments are bound through the same parameter path a real query uses, so the
+  plan describes the parameterised statement.
+- `ExplainPlan.UsesIndex()` fails closed: an empty, nil or unreadable plan
+  reports `false`.
+- `ErrPlanKindMismatch` refuses a response whose payload does not match the
+  request, instead of handing back a zero-valued report with a nil error.
+
+> **`ProfileReport.UsesIndex()` is gated on `Measured()` (SONNY-1335).** A
+> tenant-bound or RLS-evaluating session is demoted off geode 0.8.15's planned
+> read runtime, and the statement fallback that answers appends a
+> `NodeIndexScan` for **any** equality predicate with no catalog lookup, naming
+> it the literal `heuristic_index`. Timings from that path are synthetic too.
+> `Measured()` reports whether the profile is real; ask **EXPLAIN** which index
+> was used.
+
+## Transaction pinning
+
+`Pool.Session` pins one connection so a multi-statement unit of work cannot
+straddle connections:
+
+```go
+s, err := pool.Session(ctx)
+if err != nil { return err }
+defer s.Close()
+
+err = s.TX(ctx, nil, func(tx *sql.Tx) error {
+    _, err := tx.ExecContext(ctx, "MERGE (n:Chunk {chunk_id: ?})", "c-1")
+    return err
+})
+```
+
+`Session.ConnID()` identifies the pinned connection, nesting a second operation
+returns `ErrSessionBusy`, and a session whose connection was retired by a
+cancellation returns `ErrSessionRetired` (re-pin with `Pool.RetrySession`).
+
+## gRPC transport parity
+
+The gRPC transport carries the same driver surface as QUIC — parameters,
+vectors, read-only, tenancy, cancellation, plans, `Session` — and the parity is
+asserted against a real listener (`TestIntegration_GRPC*`, run by
+`make test-integration-docker-grpc-race`). One engine limit and four
+deliberate differences separate the two wires.
+
+> **gRPC is for SMALL results at engine 0.8.15 (GAP-SONNY806-07, High).** A
+> single `Execute` delivers roughly **64 KiB** of pushed payload — a few
+> thousand narrow rows, or a few hundred wide ones — and then stalls until an
+> engine-side timeout, whatever the client does. It is HTTP/2 flow control:
+> the engine does not act on the `WINDOW_UPDATE` frames grpc-go emits as the
+> driver consumes each page, and the driver has no lever. The same query over
+> QUIC returns 50 000 rows in ~1.5 s. **QUIC is the release transport**; use
+> gRPC where the wire is mandated and the results are small. A stalled result
+> surfaces as an error, never as a short result set that looks complete
+> (`TestIntegration_GRPCLargePushedResultFailsLoudly`).
+
+The four deliberate differences:
+
+- **Pages are server-pushed.** geode serves `Execute` as a server-streaming RPC
+  and pushes every page until one is final; the driver reads them. QUIC is
+  PULL-driven (the driver asks for each page after the first). `Transport`
+  answers which wire it is with `PagesArePushed()`.
+- **No QUIC pool.** No connection pool, no probe stream, no `Drain` of pooled
+  connections; `Pool.Health` degrades to a ping.
+- **TLS-only listener.** A release engine's gRPC listener does not speak
+  plaintext, so a test/dev DSN needs `insecure_tls_skip_verify=true` against
+  the self-signed certificate — `tls=0` cannot connect.
+- **`--listen-grpc <addr>` ignores the address (SONNY-1336,
+  GAP-SONNY806-03).** The engine parses and discards it and the vendored
+  grpc-zig binds `127.0.0.1`, so a published container port reaches nothing.
+  Start the server with `GRPC_ZIG_BIND_ADDR=0.0.0.0`.
+
+Five `QuicClientMessage` types have no `GeodeService` method — savepoint,
+rollback_to, backup, restore, upload_backup — and are refused with the typed
+`ErrUnsupportedOnTransport` (`RetryNever`).
+
+## Engine support
+
+This driver is developed and tested against **geode 0.8.15**
+(`geodedb/geode:0.8.15`, index digest
+`sha256:96a194cfce01e59ee1dbe1504aa0ed79c0141f7e2e8b23389da18e73e6adc8ee`). The
+integration lane pins that image, and `engine_pin_test.go` asserts the running
+server reports it.
+
+Known-RED tests, each tracking a defect rather than a flake:
+
+| Test | Tracking | Cause |
+|------|----------|-------|
+| `TestIntegration_CrossTenantReadIsDenied` | SONNY-1229 / GAP-SONNY806-02 | Engine does not filter by tenant on the MATCH read path |
+| `TestLoad_BurstExceedsPoolSize_NoDeadlock` | SONNY-1219 / BUG-0002 | More concurrent conns than `pool_size` intermittently times out (~0.06%) |
+| `TestMultiplex_FindCreate_And_Merge_NoWedge` | — | Asserts a throughput floor; fails on a loaded host, not a correctness defect |
 
 ## Transactions
 
