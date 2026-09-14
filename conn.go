@@ -115,6 +115,14 @@ type Conn struct {
 	helloCaps  []string
 	boundGraph string
 	sessionID  string
+
+	// caps memoises the engine's SHOW CAPABILITIES feature matrix for this
+	// connection. It is read by the EXPLAIN/PROFILE capability gate (plan.go)
+	// so the gate costs one extra round trip per connection lifetime rather
+	// than one per call, and it is answered by the same engine that will
+	// answer the statement. Nil until the first successful probe; a failed
+	// probe is never stored, so a transient failure cannot pin a refusal.
+	caps atomic.Pointer[Capabilities]
 }
 
 // adoptHelloState copies the HELLO response metadata recorded on an

@@ -140,6 +140,7 @@ func TestClassify_EverySentinel(t *testing.T) {
 		{"ErrNoTx", ErrNoTx, RetryNever},
 		{"ErrStmtClosed", ErrStmtClosed, RetryNever},
 		{"ErrRowsClosed", ErrRowsClosed, RetryNever},
+		{"ErrCapabilityUnsupported", ErrCapabilityUnsupported, RetryNever},
 
 		// The pool is going away; no connection it could hand back outlives it.
 		{"ErrPoolDraining", ErrPoolDraining, RetryNever},
@@ -156,12 +157,12 @@ func TestClassify_EverySentinel(t *testing.T) {
 		{"ErrSessionRetired", ErrSessionRetired, RetryNewConn},
 	}
 
-	// 28 cases: the 27 sentinels this package declares, plus driver.ErrBadConn,
+	// 29 cases: the 28 sentinels this package declares, plus driver.ErrBadConn,
 	// which the Session layer wraps into ErrSessionRetired and which
 	// database/sql raises directly. Bump it deliberately when a sentinel is
 	// added, having decided its class.
-	if len(cases) != 28 {
-		t.Fatalf("the sentinel table holds %d cases, want 28 — a sentinel was "+
+	if len(cases) != 29 {
+		t.Fatalf("the sentinel table holds %d cases, want 29 — a sentinel was "+
 			"added or removed without deciding its retry class", len(cases))
 	}
 

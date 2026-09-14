@@ -9,6 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Query-plan metadata. `Pool.Explain` / `Pool.Profile` (and the same pair on
+  `Session` and on the driver `Conn`) return typed `*ExplainPlan` and
+  `*ProfileReport` values, so a retrieval path can RECORD which access path a
+  seed query used instead of guessing. `ExplainPlan.UsesIndex()` is the
+  assertion that matters and it FAILS CLOSED: an empty plan, a nil plan and a
+  plan the driver could not read all report `false`.
+
+  Arguments are bound as parameters through the same `bindParameters` path a
+  real query uses, so the plan describes the parameterised statement — no
+  value is ever concatenated into the statement text.
+
+  Both calls are gated on the engine advertising `explain` / `profile` in
+  `SHOW CAPABILITIES`, and the gate fails closed in both directions: a
+  capability the engine does not list, AND a capability probe that could not be
+  completed, refuse the call with an error matching the new
+  `ErrCapabilityUnsupported` before anything reaches the wire. That matters
+  most for `PROFILE`, which EXECUTES the statement. The probe result is cached
+  per connection, so it costs one extra round trip per connection lifetime.
+  `ErrCapabilityUnsupported` classifies `RetryNever`.
+
+  Wire shape against the pinned engine (0.8.15): EXPLAIN and PROFILE are NOT
+  row-shaped. The QUIC and gRPC handlers answer with a dedicated
+  `ExplainPayload` / `ProfilePayload` protobuf submessage and no result rows
+  (`src/server/quic_connection_handler.zig`, `src/transport/grpc_server.zig`);
+  the metric/value text rows documented in the engine's
+  `docs/EXPLAIN_PROFILE.md` are produced by an execution-layer path those
+  transports never reach. Both shapes are decoded, so the driver keeps working
+  against an engine that answers either way.
+
+  Two engine facts the typed values surface rather than hide:
+
+  - `ProfileReport.Columns` is 0 whenever the engine answered with the
+    structured payload — no column count is on the wire in either payload
+    variant. Only the text-row form carries one.
+  - `ProfileReport.Measured()` reports whether the timings are real. A
+    concrete TENANT scope demotes a data-touching read off geode 0.8.15's
+    planned read runtime (GAP-0846/GAP-0509), and the statement fallback that
+    then answers builds per-operator times from a deterministic synthetic
+    model rather than a clock. A tenant-bound connection therefore gets
+    `profile_version` 1 and synthetic timings; `Measured()` returns false and
+    the numbers must be read as plan shape, not latency.
+
+
 - Retry classes. `Classify(err)` maps any error to a `RetryClass` —
   `RetryNever`, `RetrySameConn`, `RetryNewConn` or `RetryBackoff` — so a bulk
   ingest caller can tell "re-run this on the same connection" from "re-acquire

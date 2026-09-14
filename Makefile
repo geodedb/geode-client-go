@@ -47,7 +47,7 @@ FUZZ_TIME ?= 30s
         test-integration-race test-integration-docker-race \
         test-load test-load-docker \
         bench bench-integration lint fmt fmt-check vet doc coverage ci ci-quick ci-full \
-        fuzz fuzz-dsn fuzz-frame fuzz-query fuzz-param fuzz-value fuzz-type fuzz-params \
+        fuzz fuzz-dsn fuzz-frame fuzz-query fuzz-param fuzz-value fuzz-type fuzz-params fuzz-plan \
         docker-start docker-stop docker-logs docker-status docker-pull docker-wait \
         pre-commit pre-commit-install pre-commit-run pre-commit-update \
         generate-proto proto-tools proto-check \
@@ -399,6 +399,7 @@ fuzz:
 	@echo "  FuzzBindParametersArity - Fuzz parameter binding across varying arg counts"
 	@echo "  FuzzEncodeParamValue - Fuzz typed parameter encoding"
 	@echo "  FuzzVectorParams    - Fuzz Vector parameter encoding (query-text leakage)"
+	@echo "  FuzzPlanTextDecode  - Fuzz EXPLAIN/PROFILE text-row decoding"
 	@echo ""
 	@echo "Run with: make fuzz-dsn (or fuzz-frame, fuzz-query, etc.)"
 	@echo "Or directly: go test -fuzz=FuzzParseDSN -fuzztime=$(FUZZ_TIME)"
@@ -426,6 +427,10 @@ fuzz-value:
 fuzz-type:
 	@echo "Fuzzing GQL type parsing..."
 	$(GO) test -fuzz=FuzzParseGQLType -fuzztime=$(FUZZ_TIME)
+
+fuzz-plan:
+	@echo "Fuzzing EXPLAIN/PROFILE text-row decoding..."
+	$(GO) test -fuzz=FuzzPlanTextDecode -fuzztime=$(FUZZ_TIME) .
 
 fuzz-params:
 	@echo "Fuzzing parameter binding..."

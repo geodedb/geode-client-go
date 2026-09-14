@@ -55,18 +55,18 @@ func (c *Conn) guardReadOnly(query string) error {
 //
 //nolint:gochecknoglobals // package-level lookup table avoids per-call allocation
 var readOnlyLeadingKeywords = map[string]bool{
-	"MATCH":    true,
-	"RETURN":   true,
-	"SHOW":     true,
-	"EXPLAIN":  true,
-	"PROFILE":  true,
-	"FOR":      true,
-	"LET":      true,
-	"FILTER":   true,
-	"ORDER":    true,
-	"SKIP":     true,
-	"LIMIT":    true,
-	"OPTIONAL": true,
+	"MATCH":        true,
+	"RETURN":       true,
+	"SHOW":         true,
+	keywordExplain: true,
+	keywordProfile: true,
+	"FOR":          true,
+	"LET":          true,
+	"FILTER":       true,
+	"ORDER":        true,
+	"SKIP":         true,
+	"LIMIT":        true,
+	"OPTIONAL":     true,
 }
 
 // mutatingKeywords are keywords that make a statement mutating no matter

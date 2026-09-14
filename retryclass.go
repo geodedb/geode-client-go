@@ -214,7 +214,8 @@ func isDeterministicRefusal(err error) bool {
 		errors.Is(err, ErrNoTx),
 		errors.Is(err, ErrStmtClosed),
 		errors.Is(err, ErrRowsClosed),
-		errors.Is(err, ErrMalformedCapabilityRows):
+		errors.Is(err, ErrMalformedCapabilityRows),
+		errors.Is(err, ErrCapabilityUnsupported):
 		return true
 	}
 	return false
