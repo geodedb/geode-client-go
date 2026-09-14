@@ -56,6 +56,38 @@ import (
 // dsnWithoutTenant.
 var sharedDSN string
 
+// grpcDSN addresses the SAME engine over gRPC. It is the gRPC half of the
+// Task 14 parity lane: integration_grpc_test.go asserts on it the properties
+// the QUIC lane asserts on sharedDSN.
+//
+// Empty when the engine exposes no reachable gRPC listener — a manual server
+// started QUIC-only, or GEODE_TEST_GRPC_DSN left unset. The gRPC tests then
+// FAIL rather than skip when the QUIC lane is live (requireGRPCDSN in
+// integration_grpc_test.go): "the parity lane did not run" is a result, not a
+// non-event.
+//
+// Two engine facts shape the DSN this harness builds:
+//
+//   - The gRPC listener is TLS-only in a release build. geode 0.8.15 refuses a
+//     plaintext fallback with error.TlsRequired unless the build is Debug AND
+//     GEODE_GRPC_ALLOW_PLAINTEXT_FALLBACK is set
+//     (geode src/transport/grpc_server.zig:690-733); the published image is a
+//     release build, so `tls=0` cannot work against it. The listener serves
+//     the engine's auto-generated self-signed certificate (CN=geode.local), so
+//     the DSN carries insecure_tls_skip_verify=true, exactly as the QUIC half
+//     carries insecure=true.
+//   - The listener binds LOOPBACK unless told otherwise. `--listen-grpc
+//     0.0.0.0:50051` parses the address and then throws it away — only the
+//     port reaches GeodeGrpcServer.init (geode 0.8.15
+//     src/server/main.zig:2122-2152) — and the vendored grpc-zig defaults to
+//     GrpcServer.DEFAULT_BIND_ADDRESS = "127.0.0.1"
+//     (grpc-zig v0.1.9 src/server.zig:138). Inside a container that means the
+//     published port reaches nothing. GRPC_ZIG_BIND_ADDR=0.0.0.0 (read at
+//     grpc-zig src/server.zig:145-151) is the documented opt-in and is set in
+//     the container Env below, in the Makefile docker-start recipe, and in the
+//     .gitlab-ci.yml integration service.
+var grpcDSN string
+
 // testContainer is the testcontainers-managed engine, nil in manual-server
 // mode (GEODE_TEST_DSN). Restart-recovery tests drive it directly: only the
 // container-managed lane can stop and start the engine under a live pool.
@@ -73,6 +105,9 @@ func runTestMain(m *testing.M) int {
 	// Manual-server fast path: no container needed.
 	if dsn := os.Getenv("GEODE_TEST_DSN"); dsn != "" {
 		sharedDSN = dsn
+		// A manual server may or may not carry a gRPC listener, and only the
+		// caller knows where it is. Taken verbatim, like GEODE_TEST_DSN.
+		grpcDSN = os.Getenv("GEODE_TEST_GRPC_DSN")
 		return m.Run()
 	}
 
@@ -94,8 +129,11 @@ func runTestMain(m *testing.M) int {
 	}
 
 	req := testcontainers.ContainerRequest{
-		Image:        getGeodeImage(),
-		ExposedPorts: []string{defaultGeodePort},
+		Image: getGeodeImage(),
+		// defaultGeodeGRPCPort is published on an ephemeral host port: only the
+		// QUIC port needs a fixed binding (the restart-recovery test), and the
+		// gRPC lane re-reads the mapping after every start.
+		ExposedPorts: []string{defaultGeodePort, defaultGeodeGRPCPort},
 		// Publish the engine on a FIXED host port. testcontainers' ExposedPorts
 		// does not accept a host:container spec, so the binding goes through
 		// the Docker HostConfig directly.
@@ -128,11 +166,22 @@ func runTestMain(m *testing.M) int {
 			// integration_tenancy_test.go proves anything.
 			"GEODE_STRICT_TENANCY":                  "1",
 			"GEODE_QUIC_ENABLE_STREAM_MULTIPLEXING": "1",
+			// Bind the gRPC listener on every interface so the published port
+			// reaches it. --listen-grpc's address argument is parsed and
+			// discarded by the engine (geode 0.8.15 src/server/main.zig:2122-2152),
+			// and grpc-zig binds 127.0.0.1 by default (v0.1.9 src/server.zig:138),
+			// which inside a container is unreachable from the host. See the
+			// grpcDSN doc comment.
+			"GRPC_ZIG_BIND_ADDR": "0.0.0.0",
 		},
 		WaitingFor: wait.ForLog(`"status":"listening"`).WithStartupTimeout(startupTimeout),
 		Cmd: []string{
 			"serve",
 			"--listen", "0.0.0.0:3141",
+			// The gRPC half of the ENG-4658 gate ("QUIC/TLS 1.3 AND gRPC
+			// integration/race tests"). One engine, two listeners: the parity
+			// tests must observe the same engine state the QUIC tests do.
+			"--listen-grpc", "0.0.0.0:50051",
 			"--log-level", "info",
 			// SONNY-1218 workaround: the image's default CMD passes --data-dir
 			// /data, but this harness overrides Cmd and drops it. Without a
@@ -185,6 +234,14 @@ func runTestMain(m *testing.M) int {
 	}
 
 	sharedDSN = adminDSN + "&tenant=" + harnessTenant
+
+	grpcDSN, err = containerGRPCDSN(ctx, container, testAdminUser, testAdminPassphrase)
+	if err != nil {
+		// Not fatal: the QUIC lane is the release gate and must still run.
+		// requireGRPCDSN turns the empty value into a loud failure in the gRPC
+		// lane itself rather than a silent skip.
+		log.Printf("integration: gRPC DSN unavailable, gRPC parity tests will fail: %v", err)
+	}
 
 	// Run all tests.
 	code := m.Run()

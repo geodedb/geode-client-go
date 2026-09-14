@@ -29,6 +29,16 @@ GEODE_DEV_HMAC_KEY ?= deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefde
 GEODE_DEV_ADMIN_PASSWORD ?= devgeode123 # gitleaks:allow
 GEODE_HOST ?= 127.0.0.1
 GEODE_PORT ?= 3141
+# Host port the container's gRPC listener is published on. Two engine facts
+# govern this lane (see the grpcDSN doc comment in integration_main_test.go):
+#   * the gRPC listener is TLS-only in a release build (geode 0.8.15
+#     src/transport/grpc_server.zig:690-733), serving the engine's
+#     auto-generated self-signed certificate — hence
+#     insecure_tls_skip_verify=true, not tls=0, in every gRPC DSN below;
+#   * `--listen-grpc 0.0.0.0:PORT` parses the address and discards it
+#     (src/server/main.zig:2122-2152) and the vendored grpc-zig binds
+#     127.0.0.1 by default (v0.1.9 src/server.zig:138), so the container needs
+#     GRPC_ZIG_BIND_ADDR=0.0.0.0 or the published port reaches nothing.
 GEODE_GRPC_PORT ?= 50051
 # Tenant bound by every manual-lane GEODE_TEST_DSN below. docker-start runs the
 # engine with GEODE_STRICT_TENANCY=1, under which a data statement from a
@@ -45,6 +55,7 @@ FUZZ_TIME ?= 30s
 
 .PHONY: all build clean test test-unit test-integration test-integration-docker test-integration-docker-manual test-all \
         test-integration-race test-integration-docker-race \
+        test-integration-grpc test-integration-docker-grpc test-integration-docker-grpc-race \
         test-load test-load-docker \
         bench bench-integration lint fmt fmt-check vet doc coverage ci ci-quick ci-full \
         fuzz fuzz-dsn fuzz-frame fuzz-query fuzz-param fuzz-value fuzz-type fuzz-params fuzz-plan \
@@ -90,8 +101,9 @@ help:
 	@echo "  make test-integration-docker-manual - Run integration tests with manual Docker container"
 	@echo "  make test-integration-race         - Run integration tests under -race (requires manual server)"
 	@echo "  make test-integration-docker-race  - Run integration tests under -race with testcontainers"
-	@echo "  make test-integration-grpc         - Run gRPC integration tests (requires manual server)"
-	@echo "  make test-integration-docker-grpc  - Run gRPC integration tests with testcontainers"
+	@echo "  make test-integration-grpc         - Run gRPC parity tests (requires manual server)"
+	@echo "  make test-integration-docker-grpc  - Run gRPC parity tests with testcontainers"
+	@echo "  make test-integration-docker-grpc-race - Run gRPC parity tests under -race with testcontainers"
 	@echo "  make test-load                     - Run load tests only (requires manual Geode server)"
 	@echo "  make test-load-docker              - Run load tests only with testcontainers"
 	@echo "  make test-all       - Run unit + Docker integration tests"
@@ -145,6 +157,7 @@ help:
 	@echo "  GEODE_IMAGE         - Docker image (default: pinned geodedb/geode:0.8.15 by digest)"
 	@echo "  GEODE_GRPC_PORT     - Geode gRPC port (default: 50051)"
 	@echo "  GEODE_TEST_DSN      - DSN for manual server tests"
+	@echo "  GEODE_TEST_GRPC_DSN - gRPC DSN for manual server tests (gRPC parity lane)"
 	@echo "  GEODE_TEST_TENANT   - Tenant bound by the manual-lane DSN (default: it-harness)"
 	@echo "  GEODE_TEST_HOST_PORT - Pin the host UDP port the testcontainers engine publishes on"
 	@echo "                         (default: a free ephemeral port). Set it when the ephemeral"
@@ -310,25 +323,46 @@ test-integration-docker-manual: docker-start docker-wait
 	@echo "✓ Docker integration tests complete"
 	$(MAKE) docker-stop
 
+# gRPC parity lane (SONNY-806 Task 14). ENG-4658 requires the feature set to
+# pass "QUIC/TLS 1.3 AND gRPC integration/race tests", so these targets run the
+# TestIntegration_GRPC* mirrors in integration_grpc_test.go.
+#
+# The suite is NOT re-run wholesale over gRPC. GEODE_TEST_DSN stays QUIC and
+# GEODE_TEST_GRPC_DSN adds the gRPC endpoint, because the two DSNs address the
+# same engine and the gRPC transport cannot page a result past the engine's
+# first gRPC page (no PULL — see ErrUnsupportedOnTransport in errors.go). The
+# gRPC tests assert that refusal explicitly; pointing the whole suite at gRPC
+# would instead turn it into noise.
 test-integration-grpc:
-	@echo "Running gRPC integration tests (manual server)..."
+	@echo "Running gRPC parity tests (manual server)..."
 	@echo ""
-	@echo "Connecting to Geode gRPC server at $(GEODE_HOST):$(GEODE_GRPC_PORT)"
-	@echo "Start server first: cd ../geode && ./zig-out/bin/geode serve --listen-grpc 0.0.0.0:50051"
-	@echo "Or use: make docker-start"
+	@echo "Connecting to Geode at $(GEODE_HOST):$(GEODE_PORT) (QUIC) and $(GEODE_HOST):$(GEODE_GRPC_PORT) (gRPC)"
+	@echo "Start the server with BOTH listeners and GRPC_ZIG_BIND_ADDR=0.0.0.0, or use: make docker-start"
 	@echo ""
-	GEODE_TEST_DSN="grpc://$(GEODE_HOST):$(GEODE_GRPC_PORT)?tls=0&tenant=$(GEODE_TEST_TENANT)" $(GO) test -v -tags=integration $(GOFLAGS) ./...
+	GEODE_TEST_DSN="$(GEODE_HOST):$(GEODE_PORT)?insecure=true&user=geode&pass=$(strip $(GEODE_DEV_ADMIN_PASSWORD))&tenant=$(GEODE_TEST_TENANT)" \
+	GEODE_TEST_GRPC_DSN="grpc://$(GEODE_HOST):$(GEODE_GRPC_PORT)?insecure_tls_skip_verify=true&user=geode&pass=$(strip $(GEODE_DEV_ADMIN_PASSWORD))&tenant=$(GEODE_TEST_TENANT)" \
+	$(GO) test -v -tags=integration -run='^TestIntegration_GRPC' $(GOFLAGS) ./...
 	@echo ""
-	@echo "✓ gRPC integration tests complete"
+	@echo "✓ gRPC parity tests complete"
 
 test-integration-docker-grpc:
-	@echo "Running gRPC integration tests with Docker (testcontainers)..."
+	@echo "Running gRPC parity tests with Docker (testcontainers)..."
 	@echo ""
 	@echo "Using Docker image: $(GEODE_IMAGE)"
 	@echo ""
-	GEODE_IMAGE=$(GEODE_IMAGE) GEODE_TEST_TRANSPORT=grpc $(GO) test -v -tags=integration $(GOFLAGS) ./...
+	GEODE_IMAGE=$(GEODE_IMAGE) $(GO) test -v -tags=integration -timeout=$(LOAD_TIMEOUT) -run='^TestIntegration_GRPC' $(GOFLAGS) ./...
 	@echo ""
-	@echo "✓ Docker gRPC integration tests complete"
+	@echo "✓ Docker gRPC parity tests complete"
+
+# The gate ENG-4658 actually names: the gRPC mirrors under the race detector.
+# Go runs the tests of one package sequentially unless they call t.Parallel
+# (none of these do), so this is the same one-test-at-a-time execution the QUIC
+# lane gets.
+test-integration-docker-grpc-race:
+	@echo "Running gRPC parity tests under -race with Docker (testcontainers)..."
+	@echo "Using Docker image: $(GEODE_IMAGE)"
+	GEODE_IMAGE=$(GEODE_IMAGE) $(GO) test -race -v -tags=integration -timeout=$(LOAD_TIMEOUT) -run='^TestIntegration_GRPC' $(GOFLAGS) ./...
+	@echo "✓ Docker gRPC race parity tests complete"
 
 test-all: test-unit test-integration-docker
 	@echo "✓ All tests complete (including Docker integration)"
@@ -451,6 +485,7 @@ docker-start:
 		-p $(GEODE_GRPC_PORT):50051/tcp \
 		-e GEODE_STRICT_TENANCY=1 \
 		-e GEODE_QUIC_ENABLE_STREAM_MULTIPLEXING=1 \
+		-e GRPC_ZIG_BIND_ADDR=0.0.0.0 \
 		-e GEODE_AUTH_HMAC_KEY=$(strip $(GEODE_DEV_HMAC_KEY)) \
 		-e GEODE_ADMIN_PASSWORD=$(strip $(GEODE_DEV_ADMIN_PASSWORD)) \
 		$(GEODE_IMAGE) \

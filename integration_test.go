@@ -38,8 +38,14 @@ const (
 	// which carries no build tag so the pin is guarded by the unit lane too.
 	// Override the image with the GEODE_IMAGE environment variable if needed.
 	defaultGeodePort = "3141/udp"
-	startupTimeout   = 60 * time.Second
-	queryTimeout     = 30 * time.Second
+	// defaultGeodeGRPCPort is the container-side gRPC listener port. The
+	// engine's own default is 3142; 50051 is the port the Makefile
+	// docker-start recipe, the .gitlab-ci.yml integration service and
+	// integration_main_test.go all agree on, so the gRPC lane reads the same
+	// number everywhere.
+	defaultGeodeGRPCPort = "50051/tcp"
+	startupTimeout       = 60 * time.Second
+	queryTimeout         = 30 * time.Second
 
 	// testHMACKey is a fixed 64-hex-char key injected into test containers via
 	// GEODE_AUTH_HMAC_KEY.  The server uses it to initialise the HMAC chain and
@@ -189,6 +195,34 @@ func containerDSN(ctx context.Context, container testcontainers.Container, user,
 		host, mappedPort.Port(),
 		url.QueryEscape(user),
 		url.QueryEscape(pass),
+	), nil
+}
+
+// containerGRPCDSN builds the gRPC driver DSN for a running test container.
+//
+// It differs from containerDSN in two ways, both forced by the engine (see the
+// grpcDSN doc comment in integration_main_test.go): the scheme is grpc:// and
+// the TLS option is insecure_tls_skip_verify=true rather than insecure=true,
+// because the 0.8.15 gRPC listener is TLS-only in a release build and serves a
+// self-signed certificate.
+//
+// The harness tenant is bound here for the same reason sharedDSN binds it: the
+// engine runs with GEODE_STRICT_TENANCY=1, under which an unscoped session is
+// refused GQLSTATE 42501 on its first tenant-scoped statement.
+func containerGRPCDSN(ctx context.Context, container testcontainers.Container, user, pass string) (string, error) {
+	host, err := container.Host(ctx)
+	if err != nil {
+		return "", fmt.Errorf("container.Host: %w", err)
+	}
+	mappedPort, err := container.MappedPort(ctx, defaultGeodeGRPCPort)
+	if err != nil {
+		return "", fmt.Errorf("container.MappedPort(%s): %w", defaultGeodeGRPCPort, err)
+	}
+	return fmt.Sprintf("grpc://%s:%s?insecure_tls_skip_verify=true&user=%s&pass=%s&tenant=%s",
+		host, mappedPort.Port(),
+		url.QueryEscape(user),
+		url.QueryEscape(pass),
+		url.QueryEscape(harnessTenant),
 	), nil
 }
 

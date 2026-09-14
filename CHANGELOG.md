@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- gRPC transport parity lane. ENG-4658 requires the feature set to pass
+  "QUIC/TLS 1.3 **and** gRPC integration/race tests". The gRPC transport shares
+  `Conn`, `Rows`, the read-only classifier, the parameter binder, the plan
+  decoder and the `Session` layer with QUIC, but NOT the transport itself and
+  NOT the QUIC connection pool — so none of the QUIC evidence carried over by
+  construction. `integration_grpc_test.go` now mirrors each property against a
+  real gRPC listener on the SAME pinned engine, with a `GRPC` infix so the
+  parity is greppable (`TestIntegration_ParamsBindInPropertyMaps` ->
+  `TestIntegration_GRPCParamsBindInPropertyMaps`): typed parameter and vector
+  binding, the client read-only gate AND the engine's separate gRPC `read_only`
+  floor, strict tenancy, cancellation (prompt abort, wrapped
+  `context.Canceled`, connection retired), typed EXPLAIN/PROFILE payloads with
+  the index control arm, `ServerInfo`, and `Session` pinning.
+
+  A `make test-integration-docker-grpc-race` target and a
+  `integration:geode:grpc` CI job run the lane under `-race`.
+
+  Connecting to the engine's gRPC listener needs two things the obvious DSN
+  does not give you, both now handled by the harness, the Makefile and CI:
+  the listener is **TLS-only** in a release build (so
+  `insecure_tls_skip_verify=true`, not `tls=0`, against the engine's
+  self-signed certificate), and `--listen-grpc 0.0.0.0:PORT` binds **loopback**
+  anyway — the address argument is parsed and discarded — so the server needs
+  `GRPC_ZIG_BIND_ADDR=0.0.0.0` before a published container port reaches it.
+
 - `ErrUnsupportedOnTransport`, a typed refusal for a protocol message the
   selected transport cannot carry. It classifies `RetryNever`: the same request
   over the same transport fails identically, and no new connection changes

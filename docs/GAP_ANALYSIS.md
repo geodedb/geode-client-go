@@ -1,6 +1,6 @@
 # GAP Analysis
 
-Last updated: 2026-09-13
+Last updated: 2026-09-14
 Reviewed by: Adversarial Security Review Agent (2026-03-21); divelife bulk-seed investigation (2026-06-17); Lane D tenancy/role binding (SONNY-806 / GEO-GO-UP-001, 2026-09-13)
 Repository: devnw/codepros/geode/geode-client-go
 Commit: b27e102 → acf49a2 → 5f9a4b0 (see git log)
@@ -11,8 +11,9 @@ Review type: Comprehensive adversarial security review (Round 6 - no new finding
 Open findings by severity:
 
 - Critical: 1 (GAP-SONNY806-02 — engine cross-tenant read leak, filed 2026-09-13)
-- High: 0
-- Medium: 1 (GAP-SONNY806-01 — engine refuses `$param` in CALL arguments, filed 2026-09-13)
+- High: 1 (GAP-SONNY806-04 — gRPC cannot page past the first 128-row page, filed 2026-09-14)
+- Medium: 2 (GAP-SONNY806-01 — engine refuses `$param` in CALL arguments, filed 2026-09-13;
+  GAP-SONNY806-03 — engine ignores the `--listen-grpc` bind address, filed 2026-09-14)
 - Low: 1 (BUG-0002 — downgraded 2026-06-17)
 - Info: 0
 
@@ -39,6 +40,81 @@ Top risks (remaining):
   connections ≤ `pool_size` (divelife `data-ingest` clamps to 16).
 
 ## Open Findings
+
+### GAP-SONNY806-04: gRPC results longer than one page cannot be paged
+
+- **Severity:** High (feature gap, fail-closed — no silent truncation)
+- **Component:** protocol asymmetry (geode ENGINE 0.8.15 gRPC surface) +
+  `grpc_transport.go`, `rows.go`
+- **Status:** **Open** (filed 2026-09-14, SONNY-806 / GEO-GO-UP-001 Task 14)
+- **Reproducer:** `integration_grpc_test.go` →
+  `TestIntegration_GRPCPagedResultRefusesRatherThanTruncates` (GREEN: it
+  asserts the refusal, not the capability)
+
+geode 0.8.15 serves `Execute` over gRPC as a SERVER-STREAMING RPC. The engine
+sends the schema/first response and then pushes every data page itself before
+ending the stream (`src/transport/grpc_server.zig:1008-1101`,
+`handleExecuteStreaming`), paging at `grpc_stream_page_size`
+(`grpc_server.zig:915` → `src/client/quic_query_runner.zig:5` = **128 rows**).
+There is no client-driven `PULL` on this surface and `GeodeService` declares no
+method that could carry one (`proto/geode.proto`, `GeodeService_ServiceDesc` in
+`proto/geode_grpc.pb.go`).
+
+The driver's `Rows` pages the QUIC way: `fetchNextPage` (`rows.go:294`) sends a
+`PullRequest` after every non-final page. `GRPCTransport.SendProto` has no
+`PULL` arm, so the second page is where a gRPC read stops.
+
+**What changed.** Before Task 14 that arm fell through to
+`fmt.Errorf("unknown message type")` — an untyped error on a result set that
+was silently 128 rows short. It now returns a `*TransportError` wrapping the
+new `ErrUnsupportedOnTransport` sentinel, which names the missing `PULL` and
+classifies `RetryNever`. A caller can tell "this transport cannot page" from
+"the query returned that many rows", and cannot mistake a truncated result for
+a complete one.
+
+**Impact.** Over gRPC, any statement whose result exceeds 128 rows fails. That
+includes `Pool.BatchExec`, which is why the gRPC parity tests seed row by row.
+Single-row and small reads — the shape `ServerInfo`, `EXPLAIN`, `PROFILE`,
+health probes and most seed queries use — are unaffected.
+
+**Fix (driver side, preferred).** Teach `Rows` to consume the engine's PUSHED
+pages on the gRPC transport instead of asking for them: the pages are already
+on the stream, `GRPCTransport.ReceiveProto` already returns them, and the only
+thing in the way is `fetchNextPage`'s unconditional `PULL`. A
+`Transport`-level "pages are pushed" predicate would keep the QUIC path
+untouched.
+
+**Workaround.** Use the QUIC transport for anything that pages.
+
+### GAP-SONNY806-03: `--listen-grpc <addr>:<port>` ignores the bind address
+
+- **Severity:** Medium (operability; silently unreachable listener)
+- **Component:** geode ENGINE 0.8.15 (`src/server/main.zig`) — not the Go driver
+- **Status:** **Open** (filed 2026-09-14, SONNY-806 / GEO-GO-UP-001 Task 14)
+
+`src/server/main.zig:2122-2152` splits `--listen-grpc` into `grpc_address` and
+`grpc_port`, then passes only the PORT to
+`grpc_transport.GeodeGrpcServer.init(gpa, grpc_port, cert_path, key_path,
+grpc_config)`. `grpc_address` is used solely in the "gRPC server started" log
+line. The vendored grpc-zig binds `GrpcServer.DEFAULT_BIND_ADDRESS =
+"127.0.0.1"` (grpc-zig v0.1.9 `src/server.zig:138`, loopback-by-default by
+design), so `serve --listen-grpc 0.0.0.0:50051` binds **127.0.0.1:50051** while
+logging `address=0.0.0.0`.
+
+Inside a container that means a published `-p …:50051/tcp` reaches nothing, and
+the operator's only signal is a connection refusal. Verified against the pinned
+image: `/proc/net/tcp` in the container shows `0100007F:C383` (127.0.0.1:50051)
+with `--listen-grpc 0.0.0.0:50051`, and `00000000:C383` once
+`GRPC_ZIG_BIND_ADDR=0.0.0.0` is set.
+
+**Workaround (in use).** `GRPC_ZIG_BIND_ADDR=0.0.0.0` — grpc-zig's documented
+opt-in (`src/server.zig:133-151`) — is set in the testcontainers harness
+(`integration_main_test.go`), the `docker-start` recipe (`Makefile`) and the
+`integration:geode` service (`.gitlab-ci.yml`).
+
+**Requested engine change.** Pass the parsed `grpc_address` into
+`GeodeGrpcServer.init` / `GrpcServer.initWithBind`, or refuse startup when the
+requested address is not the one that will be bound.
 
 ### GAP-SONNY806-02: engine does not enforce tenant isolation on the MATCH read path
 

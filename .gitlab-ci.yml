@@ -148,6 +148,14 @@ integration:geode:
     GEODE_ADMIN_PASSWORD: "Correct horse battery staple" # gitleaks:allow
     GEODE_STRICT_TENANCY: "1"
     GEODE_QUIC_ENABLE_STREAM_MULTIPLEXING: "1"
+    # Bind the service's gRPC listener on every interface. The command above
+    # already asks for --listen-grpc 0.0.0.0:50051, but geode 0.8.15 parses
+    # that address and discards it (src/server/main.zig:2122-2152) and the
+    # vendored grpc-zig binds 127.0.0.1 by default (v0.1.9 src/server.zig:138),
+    # so without this the service answers nothing on 50051 from the job
+    # container. Job variables reach service containers, which is why it lives
+    # here and not only in integration:geode:grpc.
+    GRPC_ZIG_BIND_ADDR: "0.0.0.0"
     # The integration service above runs with GEODE_STRICT_TENANCY=1, so this
     # manual-mode DSN must bind a concrete tenant: without it every data
     # statement is refused with GQLSTATE 42501 "Tenant scope required".
@@ -160,3 +168,29 @@ integration:geode:
   tags:
     - company
     - linux
+
+# =============================================================================
+# gRPC parity lane (SONNY-806 / GEO-GO-UP-001, Lane D Task 14).
+#
+# ENG-4658 requires the feature set to pass "QUIC/TLS 1.3 AND gRPC
+# integration/race tests". The gRPC transport shares Conn, Rows, the read-only
+# classifier, the parameter binder, the plan decoder and the Session layer with
+# QUIC, but NOT the transport and NOT the QUIC connection pool — so the QUIC
+# lane above proves nothing about this wire. integration_grpc_test.go mirrors
+# each property with a GRPC infix; this job runs those mirrors, under -race,
+# against the SAME pinned service image.
+#
+# The suite is NOT re-run wholesale over gRPC: GEODE_TEST_DSN stays QUIC and
+# GEODE_TEST_GRPC_DSN adds the gRPC endpoint. Both address the same engine.
+# Rationale — and the reason the DSN says insecure_tls_skip_verify=true rather
+# than tls=0 — is in the grpcDSN doc comment in integration_main_test.go.
+#
+# Go runs a package's tests sequentially unless they call t.Parallel (none of
+# these do), so -run '^TestIntegration_GRPC' executes them one at a time.
+# =============================================================================
+integration:geode:grpc:
+  extends: integration:geode
+  variables:
+    GEODE_TEST_GRPC_DSN: "grpc://geode:50051?insecure_tls_skip_verify=true&user=geode&pass=Correct%20horse%20battery%20staple&tenant=it-harness"
+  script:
+    - go test -race -v -tags=integration -timeout=20m -run '^TestIntegration_GRPC' ./...
