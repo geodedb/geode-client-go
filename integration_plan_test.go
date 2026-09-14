@@ -45,11 +45,16 @@ func seedPlanProbe(ctx context.Context, t *testing.T) *Pool {
 	return pool
 }
 
-// TestIntegration_ExplainShowsTheIndexBackedPlan is the assertion Task 33
-// builds on: a seed query whose predicate is covered by an index must report
-// an index access path, and the SAME query shape on an unindexed property
-// must not. The control arm is what makes the positive arm mean anything —
-// without it, an implementation that always answered "index" would pass.
+// TestIntegration_ExplainShowsTheIndexBackedPlan is the index assertion a
+// retrieval path builds on: a seed query whose predicate is covered by an
+// index must report an index access path, and the SAME query shape on an
+// unindexed property must not. The control arm is what makes the positive arm
+// mean anything — without it, an implementation that always answered "index"
+// would pass.
+//
+// EXPLAIN is the only side of the pair that can carry this weight at 0.8.15:
+// its has_index_seek comes from a real catalog lookup, while PROFILE's does
+// not (see TestIntegration_ProfileDoesNotClaimAnIndexItCannotProve).
 func TestIntegration_ExplainShowsTheIndexBackedPlan(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
@@ -108,10 +113,19 @@ func TestIntegration_ExplainBindsArgumentsRatherThanInliningThem(t *testing.T) {
 	}
 }
 
-// TestIntegration_ProfileReportsMeasuredTiming pins the PROFILE payload shape
-// against the pinned engine: real per-operator timing, a row count taken from
-// the final operator, and an operator count.
-func TestIntegration_ProfileReportsMeasuredTiming(t *testing.T) {
+// TestIntegration_ProfileTimingsAreSyntheticOnTheTenantBoundPath pins what
+// geode 0.8.15 actually answers a tenant-bound caller: profile_version 1, the
+// statement fallback, whose per-operator times are a deterministic model
+// (10ns × (index+1), src/server/profile_payload.zig buildProfilePayload) and
+// not a clock. The Lane D harness binds a concrete tenant, and so does every
+// strict-tenancy Sonny deployment, so this is the path Sonny gets.
+//
+// Measured() == false is ASSERTED here rather than logged. Logging it would
+// let the engine silently start or stop measuring without anyone noticing;
+// asserting it means a version that begins answering with the planned-runtime
+// trace fails this test and forces the doc on ProfileReport.TotalTimeNS — and
+// the gate on UsesIndex — to be revisited deliberately.
+func TestIntegration_ProfileTimingsAreSyntheticOnTheTenantBoundPath(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
@@ -124,14 +138,12 @@ func TestIntegration_ProfileReportsMeasuredTiming(t *testing.T) {
 	t.Logf("profile version=%d measured=%v rows=%d ops=%d total_time_ns=%d\n%s",
 		rep.ProfileVersion, rep.Measured(), rep.Rows, rep.Operators, rep.TotalTimeNS,
 		strings.Join(rep.Text, "\n"))
-	if !rep.Measured() {
-		// Expected against the pinned engine: the harness binds a concrete
-		// tenant, which demotes the read off the planned read runtime
-		// (GAP-0846/GAP-0509), so the timings are the engine's deterministic
-		// synthetic model rather than a clock. Recorded, not failed — the
-		// driver's job is to report which it got, and Measured() does.
-		t.Logf("profile timings are SYNTHETIC (profile_version %d): the "+
-			"tenant-bound session demoted the read off the planned runtime",
+	if rep.Measured() {
+		t.Errorf("Measured() = true (profile_version %d) — geode 0.8.15 demotes "+
+			"a tenant-bound read off the planned read runtime "+
+			"(GAP-0846/GAP-0509, planned_read_runtime.zig:246), so the pinned "+
+			"engine must answer version 1 with synthetic timings. If the engine "+
+			"now measures, revisit the TotalTimeNS doc and the UsesIndex gate",
 			rep.ProfileVersion)
 	}
 
@@ -139,7 +151,8 @@ func TestIntegration_ProfileReportsMeasuredTiming(t *testing.T) {
 		t.Fatalf("Operators = %d, want at least one executed operator", rep.Operators)
 	}
 	if rep.TotalTimeNS <= 0 {
-		t.Errorf("TotalTimeNS = %d, want a measured duration", rep.TotalTimeNS)
+		t.Errorf("TotalTimeNS = %d, want a positive (if modelled) duration",
+			rep.TotalTimeNS)
 	}
 	if rep.Rows < 1 {
 		t.Errorf("Rows = %d, want >= 1 for a seeded match", rep.Rows)
@@ -159,6 +172,91 @@ func TestIntegration_ProfileReportsMeasuredTiming(t *testing.T) {
 	if rep.Columns != 0 {
 		t.Errorf("Columns = %d — the 0.8.15 payload carries no column count; "+
 			"the engine changed", rep.Columns)
+	}
+}
+
+// TestIntegration_ProfileDoesNotClaimAnIndexItCannotProve is the control arm
+// the PROFILE path was missing, and it mirrors
+// TestIntegration_ExplainShowsTheIndexBackedPlan's.
+//
+// geode 0.8.15 appends a "NodeIndexScan" operator to the statement-fallback
+// profile for ANY equality predicate, with no catalog lookup at all
+// (src/server/profile_payload.zig:39), and names it "heuristic_index"
+// (:194-195). The catalog lookup that decides has_index_seek runs only for
+// EXPLAIN — it is gated on `analysis.kind == .explain`,
+// src/server/quic_connection_handler.zig:6526 — and every tenant-bound caller
+// is on the version-1 path. So PROFILE reports a "NodeIndexScan" on an
+// UNINDEXED property, and an ungated ProfileReport.UsesIndex() believed it.
+//
+// This is the proof that it no longer does: the same unindexed predicate that
+// EXPLAIN correctly calls a scan must answer UsesIndex() == false and
+// IndexNames() == nil under PROFILE too.
+func TestIntegration_ProfileDoesNotClaimAnIndexItCannotProve(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	pool := seedPlanProbe(ctx, t)
+
+	// `note` carries no index: seedPlanProbe indexes only PlanProbe(k).
+	//
+	// The predicate is spelled as an explicit WHERE rather than an inline
+	// property map on purpose: buildProfilePayload keys on
+	// `traits.has_where_eq or traits.has_filter_eq`, and only the WHERE form
+	// sets them. An inline `{note: ?}` never reaches the fabrication branch at
+	// all, which would make this control arm vacuous.
+	const unindexedWhere = "MATCH (n:PlanProbe) WHERE n.note = ? RETURN n.k"
+
+	rep, err := pool.Profile(ctx, unindexedWhere, "seed-a")
+	if err != nil {
+		t.Fatalf("Profile (unindexed): %v", err)
+	}
+	t.Logf("unindexed profile version=%d measured=%v ops=%d\n%s",
+		rep.ProfileVersion, rep.Measured(), rep.Operators, strings.Join(rep.Text, "\n"))
+
+	// The engine's raw operator names are what makes this test worth having:
+	// if 0.8.15 stops fabricating NodeIndexScan here the control arm becomes
+	// vacuous, so say so out loud rather than pass quietly.
+	var fabricated bool
+	for _, op := range rep.Ops {
+		t.Logf("  op %d %s index_name=%q", op.Index, op.Op, op.IndexName)
+		if isIndexAccessPath(op.Op) || op.IndexName != "" {
+			fabricated = true
+		}
+	}
+	if !fabricated {
+		t.Log("NOTE: the engine no longer reports an index operator for an " +
+			"unindexed predicate; this control arm is now vacuous and the " +
+			"UsesIndex gate should be re-evaluated")
+	}
+
+	if rep.UsesIndex() {
+		t.Errorf("UsesIndex() = true for an UNINDEXED property under PROFILE — "+
+			"the version-%d fallback fabricates the index operator and the "+
+			"gate failed open; ops = %+v", rep.ProfileVersion, rep.Ops)
+	}
+	if got := rep.IndexNames(); got != nil {
+		t.Errorf("IndexNames() = %v for an UNINDEXED property under PROFILE, want nil", got)
+	}
+
+	// Cross-check: EXPLAIN, which DOES consult the catalog, agrees.
+	scan, err := pool.Explain(ctx, unindexedWhere, "seed-a")
+	if err != nil {
+		t.Fatalf("Explain (unindexed): %v", err)
+	}
+	if scan.UsesIndex() {
+		t.Errorf("EXPLAIN reported an index for the unindexed property: %+v", scan.Ops)
+	}
+
+	// And the INDEXED predicate must not start reporting an index under
+	// PROFILE either: on the version-1 path the driver has no evidence to
+	// report, whichever way the truth happens to fall.
+	indexed, err := pool.Profile(ctx, "MATCH (n:PlanProbe) WHERE n.k = ? RETURN n.k", "a")
+	if err != nil {
+		t.Fatalf("Profile (indexed): %v", err)
+	}
+	if !indexed.Measured() && indexed.UsesIndex() {
+		t.Errorf("UsesIndex() = true on an unmeasured (version %d) profile; "+
+			"the answer is an accident even when it is right", indexed.ProfileVersion)
 	}
 }
 

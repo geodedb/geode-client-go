@@ -25,6 +25,20 @@ import (
 // never silently record nothing because the engine quietly declined to answer.
 var ErrCapabilityUnsupported = errors.New("geode: capability not advertised by the engine")
 
+// ErrPlanKindMismatch reports that the engine answered a plan request with the
+// OTHER payload kind — an ExplainPayload for a PROFILE, or a ProfilePayload
+// for an EXPLAIN.
+//
+// It exists because the two payloads arrive on the same ExecutionResponse
+// oneof, so a decoder that simply takes whichever one is present will hand a
+// caller a zero-valued report with a nil error: PROFILE would report no
+// operators, no timing and UsesIndex() == false, which reads exactly like a
+// brute-force scan. A wrong answer is worse than a refusal, so this refuses.
+//
+// It is a deterministic refusal (RetryNever): the engine that answered with
+// the wrong payload will answer identically to a second attempt.
+var ErrPlanKindMismatch = errors.New("geode: engine answered the plan request with the wrong payload kind")
+
 // Plan-decoding bounds. A plan is small by construction; these exist so a
 // hostile or desynchronised server cannot make a caller allocate without
 // bound while it waits for a payload that never arrives.
@@ -148,10 +162,15 @@ func (p *ExplainPlan) UsesIndex() bool {
 //     (src/server/explain_payload.zig plannedOpName / buildOps).
 //   - "indexscan"  — the PROFILE operator name "NodeIndexScan"
 //     (src/server/profile_payload.zig buildProfilePayload).
-//   - "vectorindex" / "ftsindex" — the retrieval access paths Task 33 asserts
-//     on; kept even though 0.8.15 does not yet emit them as op kinds, so a
-//     later engine that does is recognised rather than silently reported as a
-//     brute-force scan.
+//   - "vectorindex" / "ftsindex" — kept even though geode 0.8.15 emits neither
+//     as an operator kind, so a later engine that names a vector or FTS access
+//     path is recognised rather than silently reported as a brute-force scan.
+//
+// GAP: because 0.8.15 emits neither token, the VECTOR access path is unproven
+// against the pinned engine — no test here exercises it end to end. A consumer
+// that must assert "the KNN seed used the vector index" has to lean on the
+// IndexSeek the EXPLAIN catalog lookup produces, and must not read a PROFILE
+// answer as evidence (see ProfileReport.UsesIndex).
 //
 //nolint:gochecknoglobals // package-level lookup table; the tests walk it
 var indexAccessPathTokens = []string{
@@ -219,8 +238,9 @@ type ProfileReport struct {
 	// result's column count.
 	//
 	// Columns is 0 whenever the engine answered with the structured payload,
-	// which carries no column count — it is populated only by the text-row
-	// fallback form. See the deviation note in .superpowers/sdd/task-13-report.md.
+	// which carries no column count (src/proto/geode.proto:417-436) — it is
+	// populated only by the text-row fallback form. See the deviation note in
+	// .superpowers/sdd/task-13-report.md.
 	Rows    int64
 	Columns int64
 
@@ -229,7 +249,11 @@ type ProfileReport struct {
 	// It is a REAL measurement only when Measured reports true. geode 0.8.15
 	// demotes a data-touching read off the planned read runtime whenever the
 	// session resolves to a concrete TENANT scope (GAP-0846/GAP-0509,
-	// src/execution/planned_read_runtime.zig:219-247), and the statement
+	// src/execution/planned_read_runtime.zig:219-247). The guard there is a
+	// DISJUNCTION — `if (concrete or execution.wouldEvaluateRLS())` at
+	// src/execution/planned_read_runtime.zig:246 — so an RLS-evaluating
+	// session is demoted too, even without a concrete tenant: a caller cannot
+	// get measured timings back merely by dropping the tenant. The statement
 	// fallback that then answers builds its per-operator times from a
 	// deterministic synthetic model — 10ns × (index+1) — rather than from a
 	// clock (src/server/profile_payload.zig buildProfilePayload). A
@@ -270,15 +294,42 @@ func (r *ProfileReport) Measured() bool {
 	return r != nil && r.ProfileVersion >= profilePlannedVersion
 }
 
+// heuristicIndexName is the placeholder geode writes into
+// ProfileOp.index_name when NOTHING actually named an index:
+// src/server/profile_payload.zig:194-195 falls back to the literal
+// "heuristic_index" whenever neither the operator spec nor the request options
+// carry a real name. It is never the name of a catalog index, so the driver
+// refuses to report it as one — on either profile version.
+const heuristicIndexName = "heuristic_index"
+
 // UsesIndex reports whether any executed operator went through an index.
-// A nil or empty report reports false — it fails closed exactly as
-// ExplainPlan.UsesIndex does.
+//
+// It reports false unless Measured() is true, and that gate is the whole point
+// of the method. geode 0.8.15's statement-fallback profile (profile_version 1)
+// FABRICATES the index evidence: buildProfilePayload appends a "NodeIndexScan"
+// operator for ANY equality predicate with no catalog lookup whatsoever
+// (src/server/profile_payload.zig:39, .profile_version = 1 at :321) and fills
+// its index_name with the literal "heuristic_index" (:194-195). The real
+// catalog lookup runs only for EXPLAIN — it is gated on
+// `analysis.kind == .explain` at
+// src/server/quic_connection_handler.zig:6526 — and every tenant-bound caller
+// is demoted onto the version-1 path (see TotalTimeNS). Ungated, this method
+// therefore FAILED OPEN: an unindexed `WHERE n.note = ?` reported
+// UsesIndex() == true under PROFILE while EXPLAIN correctly reported false.
+//
+// So: version 1 is not evidence of anything and reports false, and even on the
+// planned-runtime profile (version 2) the "heuristic_index" sentinel is
+// rejected rather than read as an index identity. A nil or empty report also
+// reports false — it fails closed exactly as ExplainPlan.UsesIndex does.
+//
+// A caller that needs the access path of a statement it must not execute
+// should ask EXPLAIN, whose has_index_seek IS a catalog lookup.
 func (r *ProfileReport) UsesIndex() bool {
-	if r == nil {
+	if !r.Measured() {
 		return false
 	}
 	for _, op := range r.Ops {
-		if op.IndexName != "" || isIndexAccessPath(op.Op) {
+		if isNamedIndex(op.IndexName) || isIndexAccessPath(op.Op) {
 			return true
 		}
 	}
@@ -286,21 +337,36 @@ func (r *ProfileReport) UsesIndex() bool {
 }
 
 // IndexNames returns every distinct index name the executed plan reported, in
-// operator order. It is empty when no operator named one.
+// operator order. It is nil when no operator named one.
+//
+// It is available for consumers that need the index IDENTITY rather than the
+// yes/no answer UsesIndex gives — which index a seed query actually used, not
+// merely that it used one. Nothing in this repository depends on it today.
+//
+// It carries the same gate as UsesIndex for the same reason: on
+// profile_version 1 every name is the engine's "heuristic_index" placeholder
+// rather than a catalog name, so this returns nil; on version 2 that sentinel
+// is filtered out as well. A nil report returns nil.
 func (r *ProfileReport) IndexNames() []string {
-	if r == nil {
+	if !r.Measured() {
 		return nil
 	}
 	var out []string
 	seen := make(map[string]bool, len(r.Ops))
 	for _, op := range r.Ops {
-		if op.IndexName == "" || seen[op.IndexName] {
+		if !isNamedIndex(op.IndexName) || seen[op.IndexName] {
 			continue
 		}
 		seen[op.IndexName] = true
 		out = append(out, op.IndexName)
 	}
 	return out
+}
+
+// isNamedIndex reports whether name identifies a real catalog index, i.e. is
+// neither empty nor the engine's "heuristic_index" placeholder.
+func isNamedIndex(name string) bool {
+	return name != "" && name != heuristicIndexName
 }
 
 // explainPlanFromPayload decodes the engine's structured ExplainPayload.
@@ -425,23 +491,23 @@ func clampU64(v uint64) int64 {
 	return int64(v)
 }
 
-// explainClauseHeaders are the clause headers the engine's text-row EXPLAIN
-// form emits between operator rows. They are not operators.
+// explainClauseHeaders are the non-operator rows the engine's text-row EXPLAIN
+// forms emit. There is exactly ONE, and that is not an oversight.
 //
-// The list is deliberately SHORTER than the GQL clause vocabulary: every entry
-// here is a name the driver will discard, so a clause keyword that is ALSO a
-// plan operator name must not appear. CREATE, MERGE, DELETE, SET, REMOVE,
-// UNWIND, FILTER, LIMIT, CALL and UNION are all operator names in
-// src/server/explain_payload.zig plannedOpName and
-// src/execution/statement_handlers.zig plannedOpName, so listing them would
-// erase real operators from the planned text form — including the ones a
-// mutating plan consists of. None of the entries below is an operator name in
-// either engine vocabulary.
+// Neither text form emits clause headers: executeExplain
+// (src/execution/statement_handlers.zig:1343-1371) emits a bare "EXPLAIN"
+// banner, then one indented operator row per step, then "Total cost: N"; the
+// planned form (buildPlannedExplainResult :1584-1605) emits unindented
+// operator names only. Every entry in this table is a name the driver
+// DISCARDS, so a speculative entry is pure risk: MATCH, RETURN, WHERE, ORDER
+// BY, SKIP and WITH were listed here for a form that does not exist, and each
+// was one engine release away from erasing a real operator of the same name —
+// the way FILTER already would have (see parseExplainLine's regression test).
+// Keep this table at the rows an engine actually sends.
 //
 //nolint:gochecknoglobals // package-level lookup table
 var explainClauseHeaders = map[string]bool{
-	keywordExplain: true, "MATCH": true, "RETURN": true, "WHERE": true,
-	"ORDER": true, "ORDER BY": true, "SKIP": true, "WITH": true,
+	keywordExplain: true,
 }
 
 // explainTotalCostPrefix is the trailer row of the engine's legacy text-row
@@ -661,6 +727,16 @@ func (c *Conn) planStatement(
 	ctx context.Context, kind planKind, query string, args []any,
 ) (*planFrames, error) {
 	op := kind.opName()
+	// The connection-state check runs BEFORE the capability probe. The probe
+	// is itself a round trip on this connection, so on a cold Conn with rows
+	// still open an ordering the other way would put SHOW CAPABILITIES on the
+	// wire mid-result-set — and report whatever that failed as, rather than
+	// the ErrQueryInProgress the caller actually earned. planRoundTrip
+	// re-checks under the same lock it sends on; this one is about the answer
+	// the caller gets, not about the race.
+	if err := c.checkPlanConnState(); err != nil {
+		return nil, fmt.Errorf("geode: %s: %w", op, err)
+	}
 	if err := c.requirePlanCapability(ctx, kind); err != nil {
 		return nil, fmt.Errorf("geode: %s: %w", op, err)
 	}
@@ -673,6 +749,21 @@ func (c *Conn) planStatement(
 		return nil, fmt.Errorf("geode: %s: %w", op, err)
 	}
 	return frames, nil
+}
+
+// checkPlanConnState reports whether this connection can start a plan round
+// trip at all: closed connections and connections with an open result set
+// cannot. Callers must NOT hold c.mu.
+func (c *Conn) checkPlanConnState() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.state == StateClosed {
+		return driver.ErrBadConn
+	}
+	if c.activeRows != nil {
+		return ErrQueryInProgress
+	}
+	return nil
 }
 
 // planNamedValues converts the caller's ...any arguments the way database/sql
@@ -745,6 +836,12 @@ func (c *Conn) planRoundTrip(
 	// `PROFILE <stmt>` text, so `EXPLAIN MATCH …` passes on a read-only
 	// connection while `PROFILE MERGE …` — which would actually write — does
 	// not. That asymmetry is deliberate: PROFILE executes.
+	//
+	// Note the classifier reads the FULL text, not just the prefix, so
+	// `EXPLAIN MERGE …` is refused on a read-only connection too even though
+	// EXPLAIN does not execute. That is stricter than it needs to be and is
+	// left that way on purpose: a read-only connection that never emits a
+	// mutating verb is the simpler thing to reason about.
 	if err := c.guardReadOnly(bound); err != nil {
 		return nil, err
 	}
@@ -809,9 +906,15 @@ func (c *Conn) absorbPlanFrame(
 ) (bool, error) {
 	switch {
 	case execResp.GetExplain() != nil:
+		if kind != planExplain {
+			return false, planKindMismatch(kind, keywordExplain)
+		}
 		out.explain = execResp.GetExplain()
 		return true, nil
 	case execResp.GetProfile() != nil:
+		if kind != planProfile {
+			return false, planKindMismatch(kind, keywordProfile)
+		}
 		out.profile = execResp.GetProfile()
 		return true, nil
 	case execResp.GetSchema() != nil:
@@ -846,6 +949,14 @@ func (c *Conn) absorbPlanFrame(
 		c.markConnFailed()
 		return false, fmt.Errorf("geode: %s: unexpected empty execution response", kind.keyword())
 	}
+}
+
+// planKindMismatch names which request got which payload. The connection is
+// NOT marked failed: the engine sent one complete, well-formed response, so
+// the stream is still in sync — it simply answered the wrong question.
+func planKindMismatch(kind planKind, got string) error {
+	return fmt.Errorf("%w: %s asked for a %s plan and the engine sent a %s payload",
+		ErrPlanKindMismatch, kind.opName(), kind.keyword(), got)
 }
 
 // appendPlanRows stringifies one data page into the fallback text rows.

@@ -29,6 +29,11 @@ func FuzzPlanTextDecode(f *testing.F) {
 	f.Add("IndexSeek\nFilter\nProject")
 	f.Add("profile\tplanned_query_profile\nrows\t42\ntime_ns\t184213")
 	f.Add("time_ms\t9223372036854775807")
+	// The M1 false positive: parseProfileMetrics takes the LAST timing row it
+	// sees, so a time_ns row after a time_ms row legitimately zeroes
+	// TotalTimeNS. The invariant is about the multiply wrapping, not about
+	// which row won.
+	f.Add("time_ms\t5\ntime_ns\t0")
 	f.Add("rows\t-1\ncolumns\t-1\noperators\t-1")
 	f.Add("")
 	f.Add("\n\n   \n\t\n")
@@ -75,21 +80,33 @@ func checkProfileMetricInvariants(t *testing.T, lines []string) {
 	if len(rep.Text) != len(pairs) {
 		t.Fatalf("len(Text) = %d, want %d", len(rep.Text), len(pairs))
 	}
-	for _, kv := range pairs {
-		if kv[0] != "time_ms" {
-			continue
-		}
-		ms, err := strconv.ParseInt(strings.TrimSpace(kv[1]), 10, 64)
-		if err != nil || ms <= 0 {
-			continue
-		}
-		if rep.TotalTimeNS <= 0 {
-			t.Fatalf("time_ms=%d produced TotalTimeNS=%d — the ms→ns "+
-				"multiply wrapped", ms, rep.TotalTimeNS)
-		}
+	// parseProfileMetrics takes the LAST timing row it parses, so the
+	// invariant is checked against the row that actually produced
+	// TotalTimeNS. A later time_ns row is allowed to zero it; a time_ms row
+	// that WON is not allowed to make it negative or zero.
+	if ms, won := lastParsedTiming(pairs); won && ms > 0 && rep.TotalTimeNS <= 0 {
+		t.Fatalf("time_ms=%d produced TotalTimeNS=%d — the ms→ns multiply wrapped",
+			ms, rep.TotalTimeNS)
 	}
 	_ = rep.UsesIndex()
 	_ = rep.IndexNames()
+}
+
+// lastParsedTiming returns the value of the final parseable time_ms/time_ns
+// pair and whether that pair was a time_ms one — i.e. whether the millisecond
+// conversion is what set TotalTimeNS.
+func lastParsedTiming(pairs [][2]string) (value int64, wasMillis bool) {
+	for _, kv := range pairs {
+		if kv[0] != "time_ms" && kv[0] != "time_ns" {
+			continue
+		}
+		n, err := strconv.ParseInt(strings.TrimSpace(kv[1]), 10, 64)
+		if err != nil {
+			continue
+		}
+		value, wasMillis = n, kv[0] == "time_ms"
+	}
+	return value, wasMillis
 }
 
 // metricPairsFromLines splits fuzz text into metric/value pairs the way the

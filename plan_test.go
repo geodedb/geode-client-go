@@ -496,11 +496,12 @@ func TestConn_ExplainTextRowFallback(t *testing.T) {
 	c := newTestConn(mt)
 	withFakeCapabilities(c, Capabilities{CapExplain: true})
 	mt.push(mockSchemaMsg([]string{"plan"}))
+	// Exactly the rows src/execution/statement_handlers.zig:1343-1371 builds:
+	// an "EXPLAIN" banner, one indented row per plan step, a "Total cost: N"
+	// trailer. It emits no clause headers, so neither does this corpus.
 	mt.push(mockPageMsg([][]string{
 		{"EXPLAIN"},
-		{"MATCH"},
 		{"  IndexSeek (cost: 120)"},
-		{"RETURN"},
 		{"  Project (cost: 8)"},
 		{"Total cost: 128"},
 	}))
@@ -509,8 +510,8 @@ func TestConn_ExplainTextRowFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Explain: %v", err)
 	}
-	if len(plan.Text) != 6 {
-		t.Errorf("len(Text) = %d, want the 6 rows verbatim", len(plan.Text))
+	if len(plan.Text) != 4 {
+		t.Errorf("len(Text) = %d, want the 4 rows verbatim", len(plan.Text))
 	}
 	if len(plan.Ops) != 2 {
 		t.Fatalf("Ops = %+v, want IndexSeek and Project only", plan.Ops)
@@ -629,15 +630,78 @@ func TestConn_PlanReadOnlyGate(t *testing.T) {
 	}
 }
 
+// TestConn_PlanRefusedWhileRowsAreOpen pins the refusal on a COLD connection —
+// no withFakeCapabilities, so the capability cache is empty and the gate would
+// have to probe. The probe is a round trip, and putting SHOW CAPABILITIES on
+// the wire in the middle of somebody else's result set is exactly what the
+// ordering in planStatement exists to prevent: the caller must get
+// ErrQueryInProgress, and nothing must reach the transport.
 func TestConn_PlanRefusedWhileRowsAreOpen(t *testing.T) {
 	mt := newMockTransport()
 	c := newTestConn(mt)
-	withFakeCapabilities(c, Capabilities{CapExplain: true})
 	c.activeRows = &Rows{}
 
 	if _, err := c.Explain(t.Context(), "MATCH (n) RETURN n"); !errors.Is(err, ErrQueryInProgress) {
-		t.Fatalf("err = %v, want ErrQueryInProgress", err)
+		t.Fatalf("Explain err = %v, want ErrQueryInProgress", err)
 	}
+	if _, err := c.Profile(t.Context(), "MATCH (n) RETURN n"); !errors.Is(err, ErrQueryInProgress) {
+		t.Fatalf("Profile err = %v, want ErrQueryInProgress", err)
+	}
+	mt.mu.Lock()
+	sent := len(mt.sent)
+	mt.mu.Unlock()
+	if sent != 0 {
+		t.Errorf("%d messages reached the wire; the refusal must precede the "+
+			"capability probe", sent)
+	}
+}
+
+// TestConn_PlanPayloadKindMismatchIsRefused covers BOTH directions of the I1
+// defect: the two payloads share one ExecutionResponse oneof, so a decoder
+// that takes whichever is present hands a PROFILE caller a zero-valued
+// ProfileReport with a nil error — no operators, no timing, UsesIndex() false.
+// That reads exactly like a brute-force scan, which is the wrong answer rather
+// than an absent one.
+func TestConn_PlanPayloadKindMismatchIsRefused(t *testing.T) {
+	t.Run("explain payload answering PROFILE", func(t *testing.T) {
+		mt := newMockTransport()
+		c := newTestConn(mt)
+		withFakeCapabilities(c, Capabilities{CapProfile: true})
+		mt.push(mockExplainMsg(plannedExplainPayload()))
+
+		rep, err := c.Profile(t.Context(), "MATCH (n) RETURN n")
+		if !errors.Is(err, ErrPlanKindMismatch) {
+			t.Fatalf("err = %v, want ErrPlanKindMismatch", err)
+		}
+		if rep != nil {
+			t.Errorf("report = %+v, want nil on a refusal", rep)
+		}
+		if Classify(err) != RetryNever {
+			t.Errorf("Classify = %v, want RetryNever", Classify(err))
+		}
+		if c.IsValid() != true {
+			t.Error("the connection was marked failed; the stream is still in sync")
+		}
+	})
+
+	t.Run("profile payload answering EXPLAIN", func(t *testing.T) {
+		mt := newMockTransport()
+		c := newTestConn(mt)
+		withFakeCapabilities(c, Capabilities{CapExplain: true})
+		mt.push(mockProfileMsg(&proto.ProfilePayload{
+			ProfileVersion: 2,
+			Ops:            []*proto.ProfileOp{{Op: "LabelScan", Rows: 5, TimeNs: 700}},
+			TotalTimeNs:    700,
+		}))
+
+		plan, err := c.Explain(t.Context(), "MATCH (n) RETURN n")
+		if !errors.Is(err, ErrPlanKindMismatch) {
+			t.Fatalf("err = %v, want ErrPlanKindMismatch", err)
+		}
+		if plan != nil {
+			t.Errorf("plan = %+v, want nil on a refusal", plan)
+		}
+	})
 }
 
 func TestPool_PlanEntryPointsGuardNilPool(t *testing.T) {
@@ -657,6 +721,54 @@ func TestSession_PlanEntryPointsGuardClosedSession(t *testing.T) {
 	}
 	if _, err := (&Session{}).Profile(t.Context(), "MATCH (n) RETURN n"); !errors.Is(err, ErrSessionClosed) {
 		t.Errorf("Session.Profile on a zero-value session = %v", err)
+	}
+}
+
+// TestProfileReport_IndexEvidenceIsGatedOnMeasured is the unit half of the
+// fail-open defect. geode 0.8.15's statement-fallback profile appends a
+// "NodeIndexScan" operator for ANY equality predicate without consulting the
+// catalog (src/server/profile_payload.zig:39, version stamped at :321) and
+// names it "heuristic_index" (:194-195). Neither is evidence of an index, so
+// neither may be reported as one.
+func TestProfileReport_IndexEvidenceIsGatedOnMeasured(t *testing.T) {
+	fabricated := &ProfileReport{
+		ProfileVersion: 1,
+		Ops: []ProfileOpStat{
+			{Op: "NodeIndexScan", Phase: "SCAN", IndexName: "heuristic_index"},
+			{Op: "Project", Phase: "PROJECT"},
+		},
+	}
+	if fabricated.UsesIndex() {
+		t.Error("UsesIndex() = true on profile_version 1 — the engine fabricates " +
+			"NodeIndexScan there with no catalog lookup; this must fail closed")
+	}
+	if got := fabricated.IndexNames(); got != nil {
+		t.Errorf("IndexNames() = %v on profile_version 1, want nil", got)
+	}
+
+	// Even the measured profile must not read the placeholder as an identity.
+	sentinelOnV2 := &ProfileReport{
+		ProfileVersion: 2,
+		Ops:            []ProfileOpStat{{Op: "NodeScan", IndexName: "heuristic_index"}},
+	}
+	if got := sentinelOnV2.IndexNames(); got != nil {
+		t.Errorf("IndexNames() = %v, want nil — \"heuristic_index\" is the "+
+			"engine's placeholder, not a catalog index", got)
+	}
+	if sentinelOnV2.UsesIndex() {
+		t.Error("UsesIndex() = true from the heuristic_index placeholder alone")
+	}
+
+	// A real name on the measured profile still answers.
+	catalogNamed := &ProfileReport{
+		ProfileVersion: 2,
+		Ops:            []ProfileOpStat{{Op: "NodeIndexScan", IndexName: "idx_planprobe_k"}},
+	}
+	if !catalogNamed.UsesIndex() {
+		t.Error("UsesIndex() = false for a measured profile naming a catalog index")
+	}
+	if got := catalogNamed.IndexNames(); len(got) != 1 || got[0] != "idx_planprobe_k" {
+		t.Errorf("IndexNames() = %v", got)
 	}
 }
 

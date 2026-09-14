@@ -38,18 +38,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transports never reach. Both shapes are decoded, so the driver keeps working
   against an engine that answers either way.
 
-  Two engine facts the typed values surface rather than hide:
+  Three engine facts the typed values surface rather than hide:
 
   - `ProfileReport.Columns` is 0 whenever the engine answered with the
     structured payload — no column count is on the wire in either payload
-    variant. Only the text-row form carries one.
+    variant (`src/proto/geode.proto:417-436`). Only the text-row form carries
+    one.
   - `ProfileReport.Measured()` reports whether the timings are real. A
     concrete TENANT scope demotes a data-touching read off geode 0.8.15's
     planned read runtime (GAP-0846/GAP-0509), and the statement fallback that
     then answers builds per-operator times from a deterministic synthetic
     model rather than a clock. A tenant-bound connection therefore gets
     `profile_version` 1 and synthetic timings; `Measured()` returns false and
-    the numbers must be read as plan shape, not latency.
+    the numbers must be read as plan shape, not latency. The guard is a
+    disjunction (`src/execution/planned_read_runtime.zig:246`): an
+    RLS-evaluating session is demoted too, so dropping the tenant does not buy
+    measured timings back.
+  - `ProfileReport.UsesIndex()` and `IndexNames()` report index evidence ONLY
+    from a measured profile, and never from the engine's `heuristic_index`
+    placeholder. geode 0.8.15's statement fallback appends a `NodeIndexScan`
+    operator for any equality predicate with NO catalog lookup
+    (`src/server/profile_payload.zig:39`) and names it `heuristic_index`
+    (`:194-195`); the catalog lookup runs only for EXPLAIN
+    (`src/server/quic_connection_handler.zig:6526`). Ungated, PROFILE claimed
+    an index for an unindexed `WHERE n.note = ?`. Ask EXPLAIN for the access
+    path; PROFILE's answer on `profile_version` 1 is not evidence.
+
+  `ErrPlanKindMismatch` (`RetryNever`) refuses a plan response whose payload
+  does not match the request: the two payloads share one response oneof, so
+  taking whichever arrived handed a `PROFILE` caller a zero-valued report with
+  a nil error — indistinguishable from a brute-force scan.
 
 
 - Retry classes. `Classify(err)` maps any error to a `RetryClass` —
