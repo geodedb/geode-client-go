@@ -9,6 +9,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Retry classes. `Classify(err)` maps any error to a `RetryClass` —
+  `RetryNever`, `RetrySameConn`, `RetryNewConn` or `RetryBackoff` — so a bulk
+  ingest caller can tell "re-run this on the same connection" from "re-acquire
+  first", "wait first" and "stop". `RetryClass.String()` returns a stable
+  lowercase name (`never`, `same_conn`, `new_conn`, `backoff`) suitable as a
+  metric label. Classification FAILS CLOSED: an error the driver does not
+  recognise is `RetryNever`, so a worker never loops on a permanent failure it
+  cannot read.
+
+  The table, with the engine source each server-side entry is pinned to
+  (geode 0.8.15 `src/server/proto_util.zig`):
+
+  - `RetryNever` — context cancellation and deadlines; `ErrReadOnly`,
+    `ErrTenantRequired`, `ErrTenantScopeRequired` and the other deterministic
+    client-side refusals; `ErrPoolDraining`; GQLSTATE classes 00/01/02, 0A, 22,
+    23, 28, 42 (including 42501 permission denied), 53 (executor budget
+    exceeded — the working set does not shrink on a retry) and 57 (query
+    cancelled by the stall watchdog); `08006`, the clustered-write timeout whose
+    outcome is UNKNOWN and which the engine documents as retryable ONLY with an
+    idempotency key; `08P01` password-reset-required; and anything unclassified.
+  - `RetrySameConn` — GQLSTATE class 40 (40001 serialization failure, 40502
+    deadlock). Nothing applied and the connection is fine.
+  - `RetryNewConn` — `ErrBadConn`, `driver.ErrBadConn`, `ErrSessionRetired`,
+    `ErrClosed`, `ErrInvalidState`, `ErrTxDone`, any `*TransportError`, GQLSTATE
+    class 08 and class 25 — and the engine's `ClusterNotLeader` /
+    `ClusterWriteNotReplicable` refusals, which arrive as 40001 but say "retry
+    against the current leader", so retrying on the same connection would ask
+    the same follower forever.
+  - `RetryBackoff` — `ErrPoolExhausted` and GQLSTATE class 58 (system error,
+    also the engine's catch-all for an unmapped error).
+
+  `RetryPolicy.Classes map[RetryClass]bool` narrows which classes `Retry`
+  retries; nil means every class except `RetryNever`. `Retry` honours the class:
+  a `RetryBackoff` wait is JITTERED (drawn from the upper half of the policy's
+  exponential delay) so a herd refused by one shared resource does not return in
+  lockstep, while the per-connection classes keep the exact policy delay. An
+  error `Retry` declines to retry is returned wrapped with the class that
+  stopped it; `errors.Is`, `errors.As`, `IsDriverError` and `Classify` all still
+  work through the wrapper.
+
+  `Pool.RetrySession(ctx, policy, fn)` is the class-aware form for a caller that
+  needs one connection across an attempt: it owns the `Session`, so on a
+  `RetryNewConn` failure it closes the pinned connection and pins a fresh one
+  before the next attempt — which plain `Retry` cannot do, having no handle on
+  the connection. It also absorbs the SONNY-1227 pin-after-retirement case,
+  whose first write fails with a `driver.ErrBadConn`-matching error.
+
+  `IsRetryableError` is now exactly `Classify(err) != RetryNever` and is
+  DEPRECATED in favour of `Classify`. It answers `true` for strictly more errors
+  than before — a bare `ErrBadConn` or `ErrPoolExhausted` used to report `false`
+  because neither implements the `Error` interface — and for no fewer.
+
 - Pool health probing and graceful drain. `Pool.Health(ctx)` returns a
   `HealthStatus` (`Healthy`, `PooledConns`, `LiveConns`, `InFlightStreams`,
   `LastProbeErr`, `LastProbeAt`) whose zero value is unhealthy — health fails
@@ -89,6 +141,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `ServerInfo.HelloCapabilities`, alongside `(*Conn).BoundGraph()` and
   `(*Conn).SessionID()`. HELLO capabilities and `SHOW CAPABILITIES` are
   different vocabularies; neither is derived from the other (SONNY-806).
+
+### Fixed
+
+- A failed liveness probe could leak one server-side probe stream per failure.
+  The bound on abandoned probe streams was evaluated only in
+  `recordProbeFailure`, which the probe round skips whenever the round's context
+  ended — so a connection that failed legitimately and was then outlasted by a
+  slower connection in the same round kept its stream, took no strike, and
+  stayed pooled. The bound is now enforced where the list grows
+  (`abandonProbe`), so it holds on every path, and an eviction the bound
+  condemned happens even on the cancelled path. What it protects is the peer's
+  QUIC stream credit: an abandoned stream is never closed or FINished, so the
+  server keeps its state and its `MAX_STREAMS` credit charged against the
+  connection.
+
+- `(*DriverError).Unwrap`, `(*TransportError).Unwrap`, `(*SecurityError).Unwrap`
+  and `(*DriverError).Is` no longer panic on a nil receiver. `errors.Is` and
+  `errors.As` call these on whatever they are handed, so a typed-nil error that
+  escaped a caller would take down every error-inspection path it reached.
 
 ### Security
 

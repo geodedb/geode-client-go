@@ -102,7 +102,15 @@ func (e *DriverError) Error() string {
 }
 
 // Unwrap returns the underlying cause.
+//
+// A nil receiver unwraps to nil rather than panicking: errors.Is and errors.As
+// call Unwrap on whatever they are handed, so a typed-nil *DriverError that
+// escaped a caller would otherwise take down every error-inspection path it
+// reached — Classify included.
 func (e *DriverError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
 	return e.cause
 }
 
@@ -146,7 +154,15 @@ func (e *DriverError) isTenantScopeRefusal() bool {
 }
 
 // Is provides errors.Is support.
+//
+// A nil receiver matches nothing rather than panicking. errors.Is calls this
+// on whatever it is handed, and a typed-nil *DriverError reaches it from any
+// caller that returned one by mistake — including Classify, which walks every
+// sentinel past every error it is given.
 func (e *DriverError) Is(target error) bool {
+	if e == nil {
+		return false
+	}
 	if target == ErrTenantScopeRequired {
 		return e.isTenantScopeRefusal()
 	}
@@ -182,8 +198,12 @@ func (e *TransportError) Error() string {
 	return fmt.Sprintf("geode: transport %s: %v", e.Op, e.cause)
 }
 
-// Unwrap returns the underlying cause.
+// Unwrap returns the underlying cause. A nil receiver unwraps to nil; see
+// (*DriverError).Unwrap.
 func (e *TransportError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
 	return e.cause
 }
 
@@ -242,8 +262,12 @@ func (e *SecurityError) Error() string {
 	return fmt.Sprintf("geode: security %s: %s", e.Type, e.Message)
 }
 
-// Unwrap returns the underlying cause.
+// Unwrap returns the underlying cause. A nil receiver unwraps to nil; see
+// (*DriverError).Unwrap.
 func (e *SecurityError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
 	return e.cause
 }
 
@@ -324,13 +348,20 @@ func IsDriverError(err error) (*DriverError, bool) {
 	return nil, false
 }
 
-// IsRetryableError checks if an error is retryable.
+// IsRetryableError reports whether an error is retryable at all. It is exactly
+// Classify(err) != RetryNever, so the two can never disagree about whether to
+// retry — only about how.
+//
+// It answers for strictly more errors than it used to: the old form consulted
+// only the Error interface, so a bare sentinel such as ErrBadConn or
+// ErrPoolExhausted reported false even though retrying is precisely the right
+// answer for both. Every error that was retryable before is retryable still.
+//
+// Deprecated: use Classify, which distinguishes retry strategies. A bool
+// cannot tell "retry this connection" from "retry a different one" or "wait
+// first", and a bulk caller needs all three.
 func IsRetryableError(err error) bool {
-	var e Error
-	if errors.As(err, &e) {
-		return e.IsRetryable()
-	}
-	return false
+	return Classify(err) != RetryNever
 }
 
 // IsAuthError reports whether err is a Geode authentication or
