@@ -70,12 +70,16 @@ func (r *Rows) Columns() []string {
 // protocol's QuicClientMessage oneof carries only hello, execute, pull, ping,
 // cdc_diag, cdc_ctrl, begin, commit, rollback, savepoint, rollback_to, backup,
 // restore and upload_backup (geode src/proto/geode.proto:36-53) — no DISCARD,
-// no reset. Two engine-side mechanisms bound the abandoned work instead: the
-// protocol is pull-driven (the server produces a page only in answer to a
-// PULL, so no longer pulling already stops it), and closing the stream/
-// connection trips the per-stream cancel source the handler binds to running
-// scans (geode src/server/quic_connection_handler.zig:5730-5742), with the
-// wall-clock deadline as the backstop for a per-stream reset.
+// no reset. The protocol is not pull-driven at 0.8.15: after EXECUTE the
+// server pushes every remaining page inline as further EXECUTE responses,
+// and still answers any PULL the driver sends in addition to those pushed
+// pages (geode src/server/quic_connection_handler.zig:7726-7743, node-scan
+// path :7565-7599) — so no longer pulling does not by itself stop the
+// server. What bounds the abandoned work instead: closing the stream trips
+// the per-stream cancel source the handler binds to running scans
+// (geode src/server/quic_connection_handler.zig:5729-5742), and the
+// wall-clock deadline (deadline_mono_ns) is the backstop for a per-stream
+// reset that does not close the whole connection (:5743-5744).
 //
 // Callers must hold the Conn mutex, which markConnFailed requires: QueryContext
 // transfers that lock to the Rows and releaseRows returns it.
@@ -99,6 +103,10 @@ func (r *Rows) Close() error {
 		return nil
 	}
 	r.closed = true
+	// final is read inside the same critical section that sets closed:
+	// fetchNextPage writes r.final without holding r.mu, so reading it
+	// after unlocking would race with an in-flight page fetch.
+	final := r.final
 	r.mu.Unlock()
 
 	// A Rows abandoned before its final page under a cancelled context leaves
@@ -106,7 +114,7 @@ func (r *Rows) Close() error {
 	// desynchronised stream to the pool. Rows that reached their final page
 	// are clean and stay poolable even if the context has since been
 	// cancelled.
-	if !r.final && r.ctx != nil && r.ctx.Err() != nil {
+	if !final && r.ctx != nil && r.ctx.Err() != nil {
 		r.conn.markConnFailed()
 	}
 

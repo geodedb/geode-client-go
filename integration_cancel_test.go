@@ -35,6 +35,16 @@ import (
 // explicitly so this can never silently regress.
 const cancelProbeRows = 2500
 
+// cancelFirstPageSize is the engine's inline_results_max_rows default (0.8.15,
+// geode src/server/quic_connection_handler.zig:7547) — the size of the single
+// inline first page a MATCH result of this size arrives in before any PULL is
+// issued. TestIntegration_CancelMidStream bounds its post-cancel read count
+// against this, not a looser fraction of cancelProbeRows: draining the whole
+// buffered first page (a regression to "stop issuing PULLs but still hand out
+// what's already buffered") must fail the test just as surely as draining the
+// whole result would.
+const cancelFirstPageSize = 1000
+
 // cancelTenant is the tenant every session in this file binds. The harness
 // runs the engine with GEODE_STRICT_TENANCY=1, under which a session with no
 // concrete tenant scope is refused GQLSTATE 42501 on its first tenant-scoped
@@ -107,7 +117,7 @@ func settledGoroutines(budget time.Duration) int {
 		runtime.Gosched()
 		time.Sleep(25 * time.Millisecond)
 		n := runtime.NumGoroutine()
-		if n >= last {
+		if n == last {
 			stable++
 			if stable >= 4 {
 				return n
@@ -165,9 +175,10 @@ func TestIntegration_CancelMidStream(t *testing.T) {
 	if abortLatency > 5*time.Second {
 		t.Fatalf("cancellation took %v to abort the stream, want prompt", abortLatency)
 	}
-	if read > cancelProbeRows/2 {
-		t.Fatalf("read %d of %d rows after cancelling at row 5; cancel did not abort paging",
-			read, cancelProbeRows)
+	if read >= cancelFirstPageSize {
+		t.Fatalf("read %d rows after cancelling at row 5 (first-page size is %d); "+
+			"cancel did not abort paging — it only stopped draining the buffered "+
+			"first page", read, cancelFirstPageSize)
 	}
 
 	// The pool must still be usable: a cancelled stream may not wedge it.

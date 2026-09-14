@@ -53,6 +53,28 @@ func openMidStreamRows(ctx context.Context, t *testing.T, first []string) (*Conn
 	return c, rows, m
 }
 
+// recvErrTransport wraps a mockTransport so ReceiveProto can be made to
+// return a *TransportError instead of a queued frame. It models the race
+// fetchNextPage's ReceiveProto error handling exists for: a transport read
+// failure that lands after the query context has just been cancelled. cancel
+// is invoked from inside ReceiveProto, immediately before the error is
+// returned, so the race is deterministic instead of timing-dependent — by
+// the time fetchNextPage's post-ReceiveProto abortOnCancel() runs, ctx.Err()
+// is guaranteed non-nil.
+type recvErrTransport struct {
+	*mockTransport
+	recvErr error
+	cancel  context.CancelFunc
+}
+
+func (t *recvErrTransport) ReceiveProto(ctx context.Context) (*proto.QuicServerMessage, error) {
+	if t.recvErr != nil {
+		t.cancel()
+		return nil, t.recvErr
+	}
+	return t.mockTransport.ReceiveProto(ctx)
+}
+
 // assertCancelError checks the driver reported the context error, wrapped in a
 // geode-prefixed message rather than replaced by a transport error.
 func assertCancelError(t *testing.T, err error, want error) {
@@ -155,6 +177,62 @@ func TestRows_Next_CancelledWhileBlockedOnPage(t *testing.T) {
 	}
 	if c.IsValid() {
 		t.Fatal("IsValid() is true after cancelling a blocked page read")
+	}
+}
+
+// TestRows_FetchNextPage_RecvErrRacesCancelConvertsToContextError pins the
+// conversion in fetchNextPage's ReceiveProto error path (rows.go): when a
+// *TransportError surfaces from ReceiveProto at the exact moment the query
+// context goes Done, the driver must report the context error — not the raw
+// TransportError — and still retire the connection. Without this check,
+// database/sql would see a transport failure instead of a cancellation and
+// the caller's errors.Is(err, context.Canceled) would fail.
+func TestRows_FetchNextPage_RecvErrRacesCancelConvertsToContextError(t *testing.T) {
+	fastDrainTimeout(t)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	base := newMockTransport()
+	base.push(mockSchemaMsg([]string{"i"}))
+	base.push(mockPageMsgFinal([]string{"a"}, false))
+	// recvErr starts nil so QueryContext's own HELLO/schema/first-page reads
+	// (which also go through ReceiveProto) are unaffected; it is armed below,
+	// only for the PULL that fetches the second page.
+	rt := &recvErrTransport{mockTransport: base, cancel: cancel}
+
+	c := newConn(&Config{PageSize: 100}, rt)
+	rows, err := c.QueryContext(ctx, "MATCH (n:X) RETURN n.i", nil)
+	if err != nil {
+		t.Fatalf("QueryContext: %v", err)
+	}
+
+	dest := make([]driver.Value, 1)
+	if err := rows.Next(dest); err != nil {
+		t.Fatalf("Next on buffered row: %v", err)
+	}
+
+	// Arm the injected failure now that the buffered row is drained: the
+	// context is still live here, so the next Next() call issues the PULL,
+	// then recvErrTransport.ReceiveProto cancels ctx and returns recvErr —
+	// modeling the read-failure-races-cancellation case, not the ctx-aware
+	// error ReceiveProto reports when it notices its own deadline. The error
+	// asserted below must be sourced from ctx.Err(), not this cause.
+	rt.recvErr = &TransportError{
+		Op:    constOpRead,
+		Addr:  base.Addr(),
+		cause: errors.New("mock: simulated read failure racing cancellation"),
+	}
+
+	err = rows.Next(dest)
+	assertCancelError(t, err, context.Canceled)
+
+	if n := countPullMessages(base); n != 1 {
+		t.Fatalf("%d PULL(s) sent, want exactly 1", n)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if c.IsValid() {
+		t.Fatal("IsValid() is true after a recvErr raced the context cancellation")
 	}
 }
 
