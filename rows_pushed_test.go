@@ -16,6 +16,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,9 +29,27 @@ import (
 // escapes the page loop is still recorded and still countable.
 type pushTransport struct {
 	*mockTransport
+
+	cancelMu sync.Mutex
+	cancels  int
 }
 
 func (t *pushTransport) PagesArePushed() bool { return true }
+
+// CancelActiveStream makes pushTransport a streamCanceller, the way
+// GRPCTransport is, and counts the calls. On the real transport this tears
+// down the server-streaming Execute RPC; here it only has to be observable.
+func (t *pushTransport) CancelActiveStream() {
+	t.cancelMu.Lock()
+	t.cancels++
+	t.cancelMu.Unlock()
+}
+
+func (t *pushTransport) cancelCount() int {
+	t.cancelMu.Lock()
+	defer t.cancelMu.Unlock()
+	return t.cancels
+}
 
 // mockErrorMsg builds an ExecutionResponse carrying an engine error, the frame
 // a mid-stream failure arrives as on either wire.
@@ -136,6 +155,84 @@ func TestRows_PushedPages_FinalFlagStopsTheRead(t *testing.T) {
 	}
 	if err := rows.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
+	}
+	// The ghost frame must still be sitting on the wire. Close runs
+	// Conn.releaseRows, whose blocking drain would have swallowed it on a
+	// PULL-driven transport; on a pushed-page transport that drain is skipped
+	// precisely because anything it read would be a page of somebody's result
+	// set, not a stray trailing frame (Conn.drainTrailingFrames).
+	if n := len(pt.recv); n != 1 {
+		t.Fatalf("%d frame(s) left queued after Close, want 1: the trailing-frame "+
+			"drain consumed a pushed page", n)
+	}
+	if !c.IsValid() {
+		t.Fatal("IsValid() is false after a fully-read pushed result")
+	}
+}
+
+// TestRows_PushedPages_EarlyCloseCancelsTheStream is the unit half of the
+// wedge fix. A caller that stops reading a large pushed result before its
+// final page — `rows.Close()` after one page, with a perfectly live context —
+// leaves the engine's server-streaming Execute pushing pages nobody will read.
+// Rows.Close must cancel that RPC.
+//
+// The connection must nonetheless stay valid: early Close is ordinary caller
+// behaviour and the cancel already makes the connection safe to reuse, so
+// retiring it would cost an eviction and a re-dial for nothing.
+func TestRows_PushedPages_EarlyCloseCancelsTheStream(t *testing.T) {
+	fastDrainTimeout(t)
+	ctx := context.Background()
+
+	c, rows, pt := openPushedRows(ctx, t, []string{"a", "b"})
+	// Pages the engine is still pushing and that nobody will now read.
+	pt.push(mockPageMsgFinal([]string{"c"}, false))
+	pt.push(mockPageMsgFinal([]string{"d"}, true))
+
+	// Read one row only, then abandon the result.
+	dest := make([]driver.Value, 1)
+	if err := rows.Next(dest); err != nil {
+		t.Fatalf("Next on the first buffered row: %v", err)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if n := pt.cancelCount(); n != 1 {
+		t.Fatalf("CancelActiveStream called %d time(s) on a non-final Close, want 1: "+
+			"the abandoned Execute keeps pushing and parks the engine's push loop on "+
+			"the session mutex (grpc_server.zig:1065-1090), wedging the next Execute", n)
+	}
+	if !c.IsValid() {
+		t.Fatal("IsValid() is false after an early Close on a live context: cancelling " +
+			"the RPC makes the connection reusable, so it must not be retired")
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+	if n := pt.cancelCount(); n != 1 {
+		t.Fatalf("CancelActiveStream called %d time(s) after a second Close, want 1", n)
+	}
+}
+
+// TestRows_PushedPages_FullReadDoesNotCancel is the other half: a result read
+// to its final page owes nothing, so Close must NOT cancel. Cancelling there
+// would be harmless on the wire but would hide a real regression — a reader
+// that stopped early while believing it had finished.
+func TestRows_PushedPages_FullReadDoesNotCancel(t *testing.T) {
+	fastDrainTimeout(t)
+	ctx := context.Background()
+
+	c, rows, pt := openPushedRows(ctx, t, []string{"a"})
+	pt.push(mockPageMsgFinal([]string{"b"}, true))
+
+	if got := strings.Join(drainStrings(t, rows), ","); got != "a,b" {
+		t.Fatalf("rows = %q, want \"a,b\"", got)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if n := pt.cancelCount(); n != 0 {
+		t.Fatalf("CancelActiveStream called %d time(s) after a fully-read result, want 0", n)
 	}
 	if !c.IsValid() {
 		t.Fatal("IsValid() is false after a fully-read pushed result")

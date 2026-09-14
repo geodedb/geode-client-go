@@ -25,6 +25,28 @@ type GRPCTransport struct {
 	execStream   proto.GeodeService_ExecuteClient
 	lastResponse *proto.QuicServerMessage
 
+	// execCancel cancels the context the CURRENT Execute RPC was created
+	// from. It is the only way to tell geode to stop pushing pages: the
+	// service is server-streaming and the QuicClientMessage oneof carries no
+	// cancel/discard message (src/proto/geode.proto:36-53), so abandoning a
+	// result without cancelling leaves the server writing pages nobody reads.
+	//
+	// Why that wedges the session rather than merely wasting bandwidth: the
+	// engine's push loop holds the session mutex for the whole send
+	// (src/transport/grpc_server.zig:1065-1090, entry.mutex.lockUncancelable)
+	// and handleExecute (:1935) takes that same mutex. Once an abandoned
+	// result fills the HTTP/2 flow-control window the push loop parks INSIDE
+	// the critical section, and the next Execute on that session blocks behind
+	// it until the abandoned reader's context finally dies. Cancelling the RPC
+	// closes the stream, unblocks the parked write and releases the mutex.
+	//
+	// Fired in exactly three places: the next Execute (which would otherwise
+	// overwrite execStream and orphan the old RPC) — BEFORE that Execute is
+	// issued, see the ordering note at the call site — Close, and a non-final
+	// Rows.Close (CancelActiveStream, via the streamCanceller assertion in
+	// rows.go).
+	execCancel context.CancelFunc
+
 	mu     sync.Mutex
 	closed bool
 	addr   string
@@ -158,8 +180,37 @@ func (t *GRPCTransport) SendProto(ctx context.Context, msg *proto.QuicClientMess
 		req := m.Execute
 		req.SessionId = t.sessionID
 
-		stream, err := t.client.Execute(ctx, req)
+		// Whatever RPC this transport was on is now unreachable: execStream
+		// is about to be replaced and nothing can ever Recv from the old one
+		// again. Tear it down rather than orphan it, or its unread pages park
+		// the engine's push loop on the session mutex and the Execute below
+		// waits behind it.
+		//
+		// BEFORE issuing the new Execute, never after. Measured against
+		// engine 0.8.15: cancelling the superseded RPC while the next Execute
+		// is already in flight on the same session poisons the session — a
+		// 647-statement Pool.BatchExec fails around statement 29 with
+		// driver.ErrBadConn (TestIntegration_GRPCBatchExecPastOnePage).
+		// Ordering the RST_STREAM ahead of the new request keeps the engine's
+		// view of the session single-threaded and the batch green. It is the
+		// same grpc-zig weakness GAP-SONNY806-07 asks the engine to fix.
+		t.mu.Lock()
+		prev := t.execCancel
+		t.execCancel = nil
+		t.execStream = nil
+		t.mu.Unlock()
+		if prev != nil {
+			prev()
+		}
+
+		// Give this Execute its own cancellable child of the caller's context
+		// so the RPC can be torn down independently of that context — the
+		// caller's may well stay live long after the driver has stopped
+		// reading (an early rows.Close on a still-valid query context).
+		streamCtx, cancel := context.WithCancel(ctx)
+		stream, err := t.client.Execute(streamCtx, req)
 		if err != nil {
+			cancel()
 			return &TransportError{
 				Op:    constOpExecute,
 				Addr:  t.addr,
@@ -168,6 +219,7 @@ func (t *GRPCTransport) SendProto(ctx context.Context, msg *proto.QuicClientMess
 		}
 		t.mu.Lock()
 		t.execStream = stream
+		t.execCancel = cancel
 		t.lastResponse = nil
 		t.mu.Unlock()
 		return nil
@@ -321,12 +373,22 @@ func (t *GRPCTransport) PagesArePushed() bool { return true }
 // transport error the cancellation manifests as on the wire — so callers keep
 // matching errors.Is(err, context.Canceled).
 //
-// No deadline watcher is needed to unblock the read. The Execute stream is
-// created from the same context in SendProto (t.client.Execute(ctx, req)), so
-// grpc-go tears the RPC down the moment that context is cancelled or its
-// deadline expires and the parked Recv returns immediately with a Canceled or
-// DeadlineExceeded status. The checks below convert that into ctx.Err();
-// Rows.fetchNextPage then wraps it and retires the connection.
+// No deadline watcher is needed to unblock the read — but ONLY for the context
+// the stream was created from. PRECONDITION: ctx must be the context passed to
+// the SendProto that opened this Execute (or a child of it). grpc-go binds a
+// server-streaming RPC to the context it was created with, and nothing else:
+// SendProto derives streamCtx from that context and t.client.Execute rides it,
+// so cancelling it (or letting its deadline expire) tears the RPC down and the
+// parked Recv returns at once with Canceled or DeadlineExceeded. The checks
+// below convert that into ctx.Err(); Rows.fetchNextPage then wraps it and
+// retires the connection.
+//
+// An UNRELATED ctx — a fresh context.WithTimeout over context.Background(),
+// say — does not bind the stream at all. Its expiry is invisible to Recv,
+// which stays parked on the wire until the server sends something, so a caller
+// that passes one can block for far longer than the timeout it asked for.
+// That is why Conn.drainTrailingFrames, whose drain context is exactly such a
+// background context, does not run on a pushed-page transport.
 func (t *GRPCTransport) ReceiveProto(ctx context.Context) (*proto.QuicServerMessage, error) {
 	t.mu.Lock()
 	if t.closed {
@@ -369,6 +431,31 @@ func (t *GRPCTransport) ReceiveProto(ctx context.Context) (*proto.QuicServerMess
 	return nil, fmt.Errorf("no response available")
 }
 
+// CancelActiveStream tears down the Execute RPC this transport is currently
+// reading, if any, and forgets it. It is idempotent and safe to call on a
+// transport that never issued an Execute.
+//
+// The driver calls it when a caller abandons a result set before its final
+// page (Rows.Close on a pushed-page transport). Cancelling — rather than
+// marking the connection failed — is deliberate: the RPC is per-Execute, so
+// killing it leaves the gRPC ClientConn and the engine session perfectly
+// usable, and the connection goes back to the pool instead of being evicted
+// and re-dialled. Only a desynchronised connection (a cancelled query context,
+// a transport error) is worth retiring.
+func (t *GRPCTransport) CancelActiveStream() {
+	t.mu.Lock()
+	cancel := t.execCancel
+	t.execCancel = nil
+	// The stream is dead once cancel runs; drop it so a later ReceiveProto
+	// reports "no response available" instead of reading a torn-down RPC.
+	t.execStream = nil
+	t.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+}
+
 // TryReceiveProtoBuffered attempts to read a buffered message without blocking.
 func (t *GRPCTransport) TryReceiveProtoBuffered() (*proto.QuicServerMessage, bool, error) {
 	t.mu.Lock()
@@ -399,12 +486,21 @@ func (t *GRPCTransport) Close() error {
 	}
 	t.closed = true
 
-	// Close any active stream
+	// Close any active stream. CloseSend only half-closes the client side of a
+	// server-streaming RPC — it does not stop the server pushing — so cancel
+	// the RPC's context as well, or a result abandoned at Close keeps the
+	// engine's push loop on the session mutex.
 	if t.execStream != nil {
 		_ = t.execStream.CloseSend()
 		t.execStream = nil
 	}
+	cancel := t.execCancel
+	t.execCancel = nil
 	t.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
 
 	return t.conn.Close()
 }

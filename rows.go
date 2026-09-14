@@ -118,6 +118,27 @@ func (r *Rows) Close() error {
 		r.conn.markConnFailed()
 	}
 
+	// An early Close on a pushed-page transport (gRPC) abandons a
+	// server-streaming RPC the engine is still feeding. Unlike the cancelled
+	// case above, the context may well be perfectly live — `rows.Close()`
+	// after one page of a large result is ordinary caller behaviour — so the
+	// connection itself is fine and must stay poolable. What is NOT fine is
+	// leaving the RPC running: geode's push loop holds the session mutex
+	// across the send (src/transport/grpc_server.zig:1065-1090) and
+	// handleExecute (:1935) takes the same mutex, so once the unread pages
+	// fill the HTTP/2 window the loop parks inside the critical section and
+	// the NEXT statement on this session wedges behind it.
+	//
+	// Cancelling the RPC — not markConnFailed — is therefore the fix: it
+	// releases the engine's mutex and keeps a healthy connection in the pool.
+	// markConnFailed would trade a wedge for a needless eviction and re-dial
+	// on every early Close.
+	if !final && r.conn.transport.PagesArePushed() {
+		if sc, ok := r.conn.transport.(streamCanceller); ok {
+			sc.CancelActiveStream()
+		}
+	}
+
 	// Release the connection lock
 	r.conn.releaseRows(r)
 	return nil

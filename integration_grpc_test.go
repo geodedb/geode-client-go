@@ -33,6 +33,8 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"fmt"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -49,6 +51,7 @@ const (
 	grpcROGraph     = "grpcrotest"
 	grpcCancelGraph = "grpccanceltest"
 	grpcPagedGraph  = "grpcpagedtest"
+	grpcWedgeGraph  = "grpcwedgetest"
 	grpcBatchGraph  = "grpcbatchtest"
 	grpcPlanGraph   = "grpcplantest"
 	grpcPinGraph    = "grpcpintest"
@@ -1028,6 +1031,326 @@ func seedGRPCPagedRows(ctx context.Context, t *testing.T, db *sql.DB, n int) {
 			"MERGE (n:GRPCPageProbe {i: ?})", int64(i)); err != nil {
 			t.Fatalf("seed row %d over gRPC: %v", i, err)
 		}
+	}
+}
+
+// grpcPushedRowCeiling is how much a single gRPC Execute can actually deliver
+// against engine 0.8.15, measured: roughly 64 KiB of pushed payload, after
+// which the stream stalls until a ~30 s engine-side timeout. See
+// GAP-SONNY806-07 — it is an ENGINE/grpc-zig flow-control defect (the peer
+// never acts on the client's HTTP/2 WINDOW_UPDATEs), not a driver gap, and the
+// same query over QUIC returns 50 000 rows in ~1.5 s.
+//
+// The number matters to the tests below: a probe meant to span pushed pages
+// must stay well UNDER it, or it is measuring the engine's ceiling instead of
+// the driver's page loop.
+const grpcPushedRowCeiling = 5632 // 44 pages of narrow integer rows
+
+// grpcMultiPageQuery returns 1000 narrow rows — eight pushed pages, ~11 KiB,
+// comfortably inside the ceiling — without seeding anything. `FOR ... IN
+// range(...)` is the generator geode 0.8.15 accepts; `UNWIND range(...)` is a
+// parse error at this version.
+const grpcMultiPageQuery = "FOR i IN range(0, 999) RETURN i"
+
+// TestIntegration_GRPCEarlyCloseDoesNotWedgeTheSession is the Task 14c
+// regression test: abandoning a pushed result before its final page must leave
+// the connection immediately reusable.
+//
+// Why it matters. geode serves Execute as a server-streaming RPC and pushes
+// every page unasked. A driver that stops reading without cancelling leaves
+// the engine pushing into a window nobody drains, and the push loop holds the
+// session mutex across the send (src/transport/grpc_server.zig:1065-1090,
+// entry.mutex.lockUncancelable) while handleExecute (:1935) takes the same
+// mutex — so unread pages are the next statement's problem. The driver now
+// cancels the abandoned RPC in Rows.Close, and skips the trailing-frame drain
+// that would otherwise have eaten a page of the caller's result on this wire.
+//
+// The test drives the driver Conn directly: one connection is one engine
+// session, with no database/sql retry to paper over a stall and no ErrBadConn
+// translation to hide the cause.
+//
+// HONEST STATUS: this test does NOT fail against engine 0.8.15 without the
+// fix, and it is recorded as a guard rather than a reproducer. Two measured
+// engine facts explain why, and both are worth knowing before anyone "tightens
+// it up" until it goes red:
+//
+//   - Before the fix the trailing-frame drain masked the wedge. On a
+//     non-final release Conn.drainTrailingFrames loops over ReceiveProto with a
+//     1 ms BACKGROUND deadline that does not bind a gRPC stream, so instead of
+//     expiring it read pushed pages until the result ran out — slurping the
+//     abandoned result synchronously under the connection lock. For a result
+//     this size that is merely wasteful (the follow-up statement measured
+//     2.3 ms without the cancel against 0.65 ms with it), so the assertion
+//     below passes either way.
+//   - Making the result big enough to fill the HTTP/2 window — which is what
+//     would park the engine's push loop inside the session mutex and turn
+//     waste into a wedge — is not possible at 0.8.15: the engine stalls at
+//     roughly 64 KiB of pushed payload whatever the client does
+//     (GAP-SONNY806-07), and then ignores the client's RST_STREAM too. Past
+//     that ceiling the follow-up statement is slow with the fix and slower
+//     without it (30 s to driver.ErrBadConn versus 34 s), which measures the
+//     engine's stall, not the driver's cancellation.
+//
+// The failing-before-the-fix evidence for the cancel therefore lives in the
+// unit lane, where the stream is a fake and the engine's ceiling is not in the
+// way: TestRows_PushedPages_EarlyCloseCancelsTheStream and
+// TestGRPCTransport_NextExecuteCancelsThePreviousStream. What this test adds is
+// the end-to-end property on the real wire — an early Close leaves the session
+// usable and the connection poolable — and it will start earning its keep as a
+// reproducer the moment GAP-SONNY806-07 is fixed and grpcPushedRowCeiling can
+// be raised.
+func TestIntegration_GRPCEarlyCloseDoesNotWedgeTheSession(t *testing.T) {
+	base, cancelBase := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancelBase()
+
+	conn := grpcDriverConn(t, base, grpcWedgeGraph)
+
+	// Control arm: the probe really does span several pushed pages, so the
+	// early Close below abandons a result rather than ending a finished one.
+	full, err := conn.QueryContext(base, grpcMultiPageQuery, nil)
+	if err != nil {
+		t.Fatalf("control QueryContext over gRPC: %v", err)
+	}
+	total := drainDriverRows(t, full)
+	if err := full.Close(); err != nil {
+		t.Fatalf("control Close: %v", err)
+	}
+	if total <= grpcStreamPageSize {
+		t.Fatalf("the probe returned %d rows, which fits in one %d-row pushed page: "+
+			"an early Close would abandon nothing", total, grpcStreamPageSize)
+	}
+
+	rows, err := conn.QueryContext(base, grpcMultiPageQuery, nil)
+	if err != nil {
+		t.Fatalf("QueryContext over gRPC: %v", err)
+	}
+	dest := make([]driver.Value, len(rows.Columns()))
+	if err := rows.Next(dest); err != nil {
+		t.Fatalf("Next on the first row: %v", err)
+	}
+	// Abandon the remaining pages with the query context still LIVE.
+	if err := rows.Close(); err != nil {
+		t.Fatalf("early Close: %v", err)
+	}
+
+	if !conn.IsValid() {
+		t.Fatal("Conn.IsValid() is false after an early Close on a live context: " +
+			"cancelling the abandoned RPC leaves the connection reusable, so it must " +
+			"not be retired — retiring would cost an eviction and a re-dial every " +
+			"time a caller stopped reading early")
+	}
+
+	// The next statement on this session must not be waiting on anything the
+	// abandoned result left behind.
+	next, cancelNext := context.WithTimeout(base, 15*time.Second)
+	defer cancelNext()
+
+	start := time.Now()
+	after, err := conn.QueryContext(next, "RETURN 1", nil)
+	if err != nil {
+		t.Fatalf("statement after an early Close = %v (%v elapsed): the abandoned "+
+			"server-streaming Execute is still owed pages and holds the session "+
+			"mutex (grpc_server.zig:1065-1090); this Execute (:1935) waits behind it",
+			err, time.Since(start))
+	}
+	oneDest := make([]driver.Value, len(after.Columns()))
+	if err := after.Next(oneDest); err != nil {
+		_ = after.Close()
+		t.Fatalf("reading the row after an early Close: %v", err)
+	}
+	elapsed := time.Since(start)
+	if err := after.Close(); err != nil {
+		t.Fatalf("Close of the follow-up rows: %v", err)
+	}
+	t.Logf("statement after abandoning %d of %d pushed rows completed in %v",
+		total-1, total, elapsed)
+
+	// And the session is not merely usable once: a third statement proves the
+	// cancel did not leave the connection in a one-shot state.
+	third, err := conn.QueryContext(next, "RETURN 2", nil)
+	if err != nil {
+		t.Fatalf("second statement after an early Close: %v", err)
+	}
+	if err := third.Next(make([]driver.Value, len(third.Columns()))); err != nil {
+		_ = third.Close()
+		t.Fatalf("reading the second follow-up row: %v", err)
+	}
+	if err := third.Close(); err != nil {
+		t.Fatalf("Close of the second follow-up rows: %v", err)
+	}
+}
+
+// TestIntegration_GRPCLargePushedResultFailsLoudly pins the property that
+// survives GAP-SONNY806-07 either way: a gRPC result the engine cannot finish
+// pushing must reach the caller as an ERROR, never as a short result set that
+// looks complete.
+//
+// At engine 0.8.15 a single Execute stalls after roughly 64 KiB of pushed
+// payload (grpc-zig never acts on the client's WINDOW_UPDATEs), so this query
+// stops early and the caller sees the context error. If the engine is fixed,
+// the same test passes by returning every row. What it forbids — silent
+// truncation — is the failure mode this lane exists to prevent, and it is the
+// exact shape GAP-SONNY806-04 wore before Task 14b.
+func TestIntegration_GRPCLargePushedResultFailsLoudly(t *testing.T) {
+	base, cancelBase := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancelBase()
+
+	const want = 20000 // ~235 KiB of narrow rows: far past the measured ceiling
+
+	conn := grpcDriverConn(t, base, grpcWedgeGraph)
+
+	ctx, cancel := context.WithTimeout(base, 20*time.Second)
+	defer cancel()
+
+	started := time.Now()
+	rows, err := conn.QueryContext(ctx,
+		fmt.Sprintf("FOR i IN range(0, %d) RETURN i", want-1), nil)
+	if err != nil {
+		t.Fatalf("QueryContext over gRPC: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	dest := make([]driver.Value, len(rows.Columns()))
+	read := 0
+	var stop error
+	for {
+		if stop = rows.Next(dest); stop != nil {
+			break
+		}
+		read++
+	}
+
+	switch {
+	case errors.Is(stop, io.EOF) && read >= want-1:
+		t.Logf("engine delivered all %d rows: GAP-SONNY806-07 appears fixed — "+
+			"revisit grpcPushedRowCeiling and the gRPC caveats in README/CHANGELOG",
+			read)
+	case errors.Is(stop, io.EOF):
+		t.Fatalf("SILENT TRUNCATION: %d of %d rows, reported as a clean EOF. A short "+
+			"result set must never reach the caller as a complete one", read, want)
+	case errors.Is(stop, context.DeadlineExceeded):
+		t.Logf("engine stalled after %d of %d pushed rows and the driver surfaced the "+
+			"context error (GAP-SONNY806-07, ~64 KiB ceiling)", read, want)
+		if read > grpcPushedRowCeiling*2 {
+			t.Logf("note: %d rows is well past the recorded ceiling of %d; the "+
+				"measurement may need refreshing", read, grpcPushedRowCeiling)
+		}
+	default:
+		t.Fatalf("after %d of %d rows the read stopped with %v; want either every row "+
+			"or a surfaced error", read, want, stop)
+	}
+
+	_ = rows.Close()
+	waitForGRPCEngineToRecover(base, t, started)
+}
+
+// waitForGRPCEngineToRecover blocks until the engine can once more do the kind
+// of work the tests after this one do, and reports how long that took.
+//
+// It exists because GAP-SONNY806-07's blast radius is not confined to the
+// caller that triggers it. When the engine stalls mid-push it stays parked
+// with the client's RST_STREAM unread, and while it is parked a NEW session's
+// multi-statement transaction is refused mid-way —
+// TestIntegration_GRPCBatchExecPastOnePage, which runs immediately after this
+// one, fails around statement 29 with driver.ErrBadConn, yet passes when run
+// alone. That is worth measuring rather than dodging by reordering the file:
+// the same thing will happen to a real caller that issues an oversized query
+// and then keeps working.
+//
+// The probe is deliberately transaction-shaped rather than a bare RETURN 1. A
+// single unary round trip answers within milliseconds while the engine is
+// still poisoned for batched work, so a trivial probe reports a recovery that
+// has not happened.
+func waitForGRPCEngineToRecover(ctx context.Context, t *testing.T, stalledAt time.Time) {
+	t.Helper()
+
+	const (
+		budget    = 120 * time.Second
+		probeSize = 64 // past the ~29 statements at which the poisoned session fails
+		// The engine's own timeout on a parked push fires around 30 s after
+		// the send began. Until it does, the engine is still holding the
+		// stalled result's session state, and a probe that succeeds before
+		// then proves nothing: a trivial RETURN 1 answers in ~45 ms and a
+		// 64-statement transaction in ~285 ms while the 647-statement batch
+		// in the next test still dies at statement 29. Measured against
+		// engine 0.8.15; both numbers are from this lane.
+		engineStallTimeout = 35 * time.Second
+	)
+
+	stmts := make([]Statement, 0, probeSize)
+	for i := range probeSize {
+		stmts = append(stmts, Statement{
+			Query: "MERGE (n:GRPCRecoveryProbe {i: ?})",
+			Args:  []any{int64(i)},
+		})
+	}
+
+	start := time.Now()
+	deadline := start.Add(budget)
+
+	var last error
+	for attempt := 1; time.Now().Before(deadline); attempt++ {
+		if since := time.Since(stalledAt); since < engineStallTimeout {
+			time.Sleep(engineStallTimeout - since)
+		}
+		probeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		pool := grpcPool(t, "&graph="+grpcWedgeGraph)
+		last = pool.BatchExec(probeCtx, stmts)
+		cancel()
+		if last == nil {
+			t.Logf("engine ran a %d-statement transaction again %v after the stalled "+
+				"result, on attempt %d (GAP-SONNY806-07 blast radius)",
+				probeSize, time.Since(start), attempt)
+			return
+		}
+		time.Sleep(2 * time.Second)
+	}
+	t.Fatalf("engine could not run a %d-statement transaction within %v of the "+
+		"stalled result; last error %v. GAP-SONNY806-07 has got worse: the stall "+
+		"used to clear on its own", probeSize, budget, last)
+}
+
+// grpcDriverConn dials the gRPC endpoint and returns the driver Conn itself.
+// One driver Conn is one engine session, which is what the session-level
+// assertions above need; database/sql would be free to hand the follow-up
+// statement a different connection and prove nothing.
+func grpcDriverConn(t *testing.T, ctx context.Context, graph string) *Conn {
+	t.Helper()
+	cfg, err := ParseDSN(requireGRPCDSN(t) + "&graph=" + graph)
+	if err != nil {
+		t.Fatalf("ParseDSN: %v", err)
+	}
+	connector, err := NewConnector(cfg)
+	if err != nil {
+		t.Fatalf("NewConnector: %v", err)
+	}
+	dc, err := connector.Connect(ctx)
+	if err != nil {
+		t.Fatalf("Connect over gRPC: %v", err)
+	}
+	t.Cleanup(func() { _ = dc.Close() })
+
+	conn, ok := dc.(*Conn)
+	if !ok {
+		t.Fatalf("Connect returned %T, want *geode.Conn", dc)
+	}
+	return conn
+}
+
+// drainDriverRows reads a driver.Rows to EOF and returns the row count.
+func drainDriverRows(t *testing.T, rows driver.Rows) int {
+	t.Helper()
+	dest := make([]driver.Value, len(rows.Columns()))
+	n := 0
+	for {
+		err := rows.Next(dest)
+		if errors.Is(err, io.EOF) {
+			return n
+		}
+		if err != nil {
+			t.Fatalf("Next at row %d: %v", n, err)
+		}
+		n++
 	}
 }
 

@@ -248,8 +248,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `ServerInfo.HelloCapabilities`, alongside `(*Conn).BoundGraph()` and
   `(*Conn).SessionID()`. HELLO capabilities and `SHOW CAPABILITIES` are
   different vocabularies; neither is derived from the other (SONNY-806).
+- Typed vectors. `geode.Vector` (a `[]float32`) binds an embedding as a typed
+  vector parameter, so a query vector never reaches the parser as text; the
+  call shape is `knn('property', ?, k, 'metric')`, with the property name and
+  the metric as literals. Dimensions are capped at 65535 and an oversize vector
+  is refused before the wire. Engine facts at 0.8.15, each asserted rather than
+  assumed: a dimension mismatch answers GQLSTATE `22000` and a metric mismatch
+  `42704`, only `vectorf32($v)` storage arms the vector index (SONNY-1224), and
+  `knn` silently downgrades to a scan when another graph shares the property
+  name (SONNY-1223) (SONNY-806).
+- Session tenancy and role binding. `?tenant=` (alias `tenant_id`) and `?role=`
+  bind the session at HELLO, so every statement on that connection inherits
+  them; `?strict_tenancy=true` refuses a config with no concrete tenant at
+  parse time with `ErrTenantRequired`, and the engine's own refusal (GQLSTATE
+  `42501`) surfaces as the typed `ErrTenantScopeRequired` so callers gate
+  startup on `errors.Is` instead of matching engine prose. **Tenant binding is
+  not an isolation boundary at 0.8.15** — see SONNY-1229 and its known-RED
+  reproducer above (SONNY-806).
+- The protobuf bindings were regenerated from the pinned engine's
+  `src/proto/geode.proto`, which is what makes the typed parameter, vector,
+  read-only, plan and gRPC-service surfaces above reachable at all; `make
+  proto-check` fails when the generated code drifts from the schema
+  (SONNY-806).
 
 ### Fixed
+
+- **An abandoned gRPC result no longer wedges the next statement on the same
+  session** (SONNY-806). Closing a `Rows` before its final page — with a
+  perfectly live context, which is ordinary caller behaviour — left geode's
+  server-streaming `Execute` pushing pages nobody would read. The engine's push
+  loop holds the session mutex across the send
+  (`src/transport/grpc_server.zig:1065-1090`,
+  `entry.mutex.lockUncancelable`) and `handleExecute` (`:1935`) takes that same
+  mutex, so once the unread pages filled the HTTP/2 flow-control window the
+  loop parked INSIDE the critical section and the next `Execute` on that
+  session blocked behind it until its own context expired. Nothing had failed,
+  so the connection was still `IsValid` and `database/sql` handed it straight
+  to the next statement.
+
+  `GRPCTransport` now keeps the cancel function of the context each `Execute`
+  rides and fires it in three places: the next `Execute` (which would otherwise
+  overwrite the stream and orphan the old RPC), `Close`, and a non-final
+  `Rows.Close` on a pushed-page transport. On the first of those it fires
+  **before** the new `Execute` is issued, not after: cancelling the superseded
+  RPC while the next one is already in flight on the same session poisons the
+  session at engine 0.8.15 — a 647-statement `Pool.BatchExec` then fails around
+  statement 29 with `driver.ErrBadConn`. Same grpc-zig weakness as
+  GAP-SONNY806-07; ordering the `RST_STREAM` ahead of the new request keeps the
+  engine's view of the session single-threaded. Cancelling — rather than marking the
+  connection failed — is deliberate: the RPC is per-`Execute`, so tearing it
+  down leaves the session and the gRPC `ClientConn` usable and the connection
+  stays in the pool. Only a desynchronised connection (a cancelled query
+  context, a transport error) is still retired.
+
+  Regression coverage: `TestIntegration_GRPCEarlyCloseDoesNotWedgeTheSession`
+  (bounded follow-up statement on the same driver `Conn`) and
+  `TestRows_PushedPages_EarlyCloseCancelsTheStream` /
+  `TestGRPCTransport_NextExecuteCancelsThePreviousStream`.
+
+- **The trailing-frame drain no longer runs on a pushed-page transport**
+  (SONNY-806). `Conn.drainTrailingFrames` hands `ReceiveProto` a fresh
+  background context with a 1 ms timeout. Only the context an `Execute` stream
+  was created from binds that stream, so on gRPC that deadline could not
+  unblock `Recv` at all: the drain could park on the wire while holding the
+  connection mutex. Worse, on a non-final release there IS something to read,
+  and reading it would have discarded a page of the caller's result rather than
+  a stray trailing frame. The drain is now skipped when
+  `Transport.PagesArePushed()`; the cancel above ends the stream outright, so
+  there is nothing left to drain. `ReceiveProto`'s doc states the precondition.
 
 - **gRPC results are no longer capped at the engine's first 128-row page**
   (GAP-SONNY806-04, SONNY-806). Any statement returning more than 128 rows over
@@ -318,3 +384,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `BatchExec` and the `graph` pipelines now retry pool exhaustion with backoff
   (previously failed fast), a consequence of `ErrPoolExhausted` classifying
   `RetryBackoff` under the new retry classes (SONNY-806).
+- **BREAKING (v0.2.0) — the `Transport` interface gained
+  `PagesArePushed() bool`.** Anything implementing `Transport` outside this
+  package must add it; the safe answer for a PULL-driven wire is `false`. It is
+  a hard interface method rather than an optional type assertion on purpose:
+  every transport must answer it, and the two failure modes of a missing answer
+  are silent — a PULL-driven default on a pushed wire truncates results at the
+  engine's first page, and a pushed default on QUIC stalls the reader waiting
+  for a page nobody will send. A compile error at the one place the question is
+  asked is cheaper than either. By contrast the tear-down capability added
+  alongside it (`CancelActiveStream`) IS an optional assertion: only a
+  stream-oriented transport has anything to cancel, and a transport with
+  nothing to tear down should not have to implement a no-op.
+- `Conn.hello` returns `*proto.HelloResponse` (internal; noted for forks).
+- A cancelled `Rows` reports `context.Canceled` from `rows.Err()` where it
+  previously surfaced a transport error, and marks the connection unusable so
+  `database/sql` discards it.

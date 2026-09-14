@@ -83,6 +83,27 @@ type Transport interface {
 	Addr() string
 }
 
+// streamCanceller is implemented by transports whose result pages ride a
+// server-driven stream that must be torn down when the driver abandons a
+// result before its final page. GRPCTransport is the only implementation:
+// its Execute is a server-streaming RPC that keeps pushing pages until the
+// RPC's context dies (see GRPCTransport.execCancel for why an orphaned one
+// wedges the next Execute on that session).
+//
+// Deliberately NOT a Transport method, unlike PagesArePushed. PagesArePushed
+// is a question every transport must answer — a wrong or missing answer
+// silently truncates or stalls results, so it is worth a compile-time break.
+// Cancellation is a capability only stream-oriented transports have: QUIC
+// bounds an abandoned result by closing the stream (Rows.abortOnCancel), and a
+// transport with nothing to cancel should not have to implement a no-op. The
+// driver therefore asks with a type assertion and does nothing when the answer
+// is no.
+type streamCanceller interface {
+	// CancelActiveStream tears down the in-flight result stream, if any. It
+	// must be idempotent and safe to call when no stream is open.
+	CancelActiveStream()
+}
+
 // QUICTransport implements Transport over QUIC with TLS using length-prefixed protobuf.
 //
 // QUICTransport operates in one of two modes:

@@ -3,22 +3,26 @@
 Last updated: 2026-09-14
 Reviewed by: Adversarial Security Review Agent (2026-03-21); divelife bulk-seed investigation (2026-06-17); Lane D tenancy/role binding (SONNY-806 / GEO-GO-UP-001, 2026-09-13)
 Repository: devnw/codepros/geode/geode-client-go
-Commit: b27e102 → acf49a2 → 5f9a4b0 (see git log)
-Review type: Comprehensive adversarial security review (Round 6 - no new findings); BUG-0001 closed 2026-03-21; BUG-0002 filed 2026-06-17 (high-concurrency connection-establishment stall); GAP-SONNY806-01 and GAP-SONNY806-02 filed 2026-09-13 against engine 0.8.15; GAP-ENG4658-02 (pooled connections never verified with network I/O) closed 2026-09-13; GAP-SONNY806-04 filed and closed 2026-09-14 (gRPC paging — a DRIVER defect, Lane D Task 14/14b)
+Branch: `eng-4622/geode-go`. Each finding below names the commit that filed or
+closed it; `git log` is the authority, not a SHA copied into this header.
+Review type: Comprehensive adversarial security review (Round 6 - no new findings); BUG-0001 closed 2026-03-21; BUG-0002 filed 2026-06-17 (high-concurrency connection-establishment stall); GAP-SONNY806-01 and GAP-SONNY806-02 filed 2026-09-13 against engine 0.8.15; GAP-ENG4658-02 (pooled connections never verified with network I/O) closed 2026-09-13; GAP-SONNY806-04 filed and closed 2026-09-14 (gRPC paging — a DRIVER defect, Lane D Task 14/14b); GAP-SONNY806-05 and GAP-SONNY806-06 filed and closed 2026-09-14 (abandoned gRPC stream and the trailing-frame drain — both DRIVER defects, Lane D Task 14c); GAP-SONNY806-07 filed 2026-09-14 (ENGINE: a gRPC result stalls past ~64 KiB of pushed payload)
 
 ## Summary
 
 Open findings by severity:
 
 - Critical: 1 (GAP-SONNY806-02 — engine cross-tenant read leak, filed 2026-09-13)
-- High: 0
+- High: 1 (GAP-SONNY806-07 — engine stalls a gRPC result past ~64 KiB, filed 2026-09-14)
 - Medium: 2 (GAP-SONNY806-01 — engine refuses `$param` in CALL arguments, filed 2026-09-13;
   GAP-SONNY806-03 — engine ignores the `--listen-grpc` bind address, filed 2026-09-14)
 - Low: 1 (BUG-0002 — downgraded 2026-06-17)
 - Info: 0
 
-Closed findings: 30 (Issues #1-#23, #25-#28; BUG-0001; GAP-ENG4658-02;
-GAP-SONNY806-04 — gRPC paging, driver defect, closed 2026-09-14)
+Closed findings: 32 (Issues #1-#23, #25-#28; BUG-0001; GAP-ENG4658-02;
+GAP-SONNY806-04 — gRPC paging, driver defect, closed 2026-09-14;
+GAP-SONNY806-05 — abandoned gRPC stream wedges the session, driver defect,
+closed 2026-09-14; GAP-SONNY806-06 — trailing-frame drain on a pushed-page
+transport, driver defect, closed 2026-09-14)
 Won't Do findings: 1 (Issue #24)
 
 Top risks (remaining):
@@ -29,6 +33,12 @@ Top risks (remaining):
   `GEODE_STRICT_TENANCY=1`. This is an ENGINE defect, not a driver defect; the
   driver cannot work around it. Reproducer:
   `TestIntegration_CrossTenantReadIsDenied` (currently RED by design).
+
+- **GAP-SONNY806-07 (High)** — geode 0.8.15 cannot finish pushing a gRPC result
+  larger than roughly 64 KiB. The stream stalls and stays stalled until a ~30 s
+  engine-side timeout, whatever the client does; the same query over QUIC
+  returns 50 000 rows in ~1.5 s. gRPC is therefore usable for SMALL results
+  only at this engine version, and QUIC remains the release transport.
 
 - **BUG-0002 (Low, downgraded)** — when a single `*sql.DB` opens MORE concurrent
   connections than the QUIC `pool_size` (default 16), multiple streams multiplex
@@ -41,6 +51,58 @@ Top risks (remaining):
   connections ≤ `pool_size` (divelife `data-ingest` clamps to 16).
 
 ## Open Findings
+
+### GAP-SONNY806-07: a gRPC result stalls after roughly 64 KiB of pushed payload
+
+- **Severity:** High (functional cap on an entire transport; a caller sees a
+  hang, then a context error, instead of its rows)
+- **Component:** geode ENGINE 0.8.15 gRPC path / the vendored grpc-zig — **not
+  the Go driver**. The driver is reading; grpc-go emits HTTP/2
+  `WINDOW_UPDATE`s as the application consumes each page.
+- **Status:** **Open** (filed 2026-09-14, SONNY-806 / GEO-GO-UP-001 Lane D
+  Task 14c)
+- **Reproducer:** `TestIntegration_GRPCLargePushedResultFailsLoudly` logs the
+  stall point; any oversized result reproduces it, e.g.
+  `FOR i IN range(0, 19999) RETURN i` over gRPC.
+
+**Observed.** A single server-streaming `Execute` delivers roughly 64 KiB of
+pushed payload and then sends nothing further. The driver blocks until its
+context expires (or ~30 s, when an engine-side timeout eventually fires). The
+stall point moves with ROW WIDTH, not row count, which is what identifies it as
+flow control rather than a row limit. Measured against the pinned image
+(`geodedb/geode:0.8.15`), each row a plain integer plus an optional string
+literal:
+
+| Query | Rows delivered | Approx. payload | Outcome |
+|-------|----------------|-----------------|---------|
+| `FOR i IN range(0, 999) RETURN i` | 999 / 999 | ~11 KiB | completes in 23 ms |
+| `FOR i IN range(0, 999) RETURN i, '<64 B>'` | 768 / 999 | ~58 KiB | stalls |
+| `FOR i IN range(0, 999) RETURN i, '<256 B>'` | 128 / 999 | ~35 KiB | stalls |
+| `FOR i IN range(0, 49999) RETURN i` | 5632 / 49999 | ~66 KiB | stalls |
+| the same 50 000-row query over **QUIC** | 49999 / 49999 | — | completes in 1.5 s |
+
+**Assessment.** ~64 KiB is exactly HTTP/2's default initial stream window. The
+engine appears to send until that window is exhausted and never to act on the
+`WINDOW_UPDATE` frames that replenish it, so the stream cannot make progress
+again. The driver has no lever: it already consumes every page as it arrives,
+which is what makes grpc-go issue the updates in the first place.
+
+**Consequences.**
+
+- gRPC is usable for small results only at 0.8.15. Anything past ~64 KiB —
+  which is a few thousand narrow rows, or a few hundred wide ones — hangs.
+  QUIC is the release transport; `docs`/`README` say so.
+- It sets the ceiling for the Task 14b paging fix. Pushed-page consumption is
+  correct and proven (`TestIntegration_GRPCPagedResultIsConsumedAcrossPushedPages`,
+  647 rows across five page boundaries), but it cannot deliver what the engine
+  will not send.
+- It is also why cancelling an abandoned RPC (GAP-SONNY806-05) cannot make an
+  oversized abandoned result cheap: the engine is parked inside its push loop
+  and does not act on the client's `RST_STREAM` either.
+
+**Requested engine change.** Process HTTP/2 `WINDOW_UPDATE` on the server side
+so a stream's flow-control window is replenished as the client consumes, and
+honour `RST_STREAM` while a send is parked.
 
 ### GAP-SONNY806-03: `--listen-grpc <addr>:<port>` ignores the bind address
 
@@ -289,6 +351,93 @@ for `.Param`. Plus documented `CALL` syntax for `algo.bfs`/`dfs`/`dijkstra`.
     surfacing, and it is why the lane is not yet reliably green at 0 failures.
 
 ## Closed Findings
+
+### GAP-SONNY806-05: an abandoned gRPC result wedged the next statement on the same session
+
+- **Severity:** High (availability; a live, `IsValid` connection stalls the
+  next statement until its context expires)
+- **Component:** **Go DRIVER** — `grpc_transport.go` (`SendProto` Execute arm,
+  `Close`), `rows.go` (`Rows.Close`). The engine behaviour it collides with is
+  by design.
+- **Status:** **Closed** (filed 2026-09-14, fixed 2026-09-14, SONNY-806 /
+  GEO-GO-UP-001 Lane D Task 14c)
+- **Reproducer:** `TestIntegration_GRPCEarlyCloseDoesNotWedgeTheSession`;
+  unit coverage in `rows_pushed_test.go`
+  (`TestRows_PushedPages_EarlyCloseCancelsTheStream`) and
+  `grpc_transport_cancel_test.go`.
+
+**Observed (while open).** A caller that stopped reading a large gRPC result
+before its final page — `rows.Close()` after one page, with a live context —
+left the connection valid and pooled, and the NEXT statement on that connection
+blocked until its own context expired.
+
+**Root cause — driver.** geode serves `Execute` as a server-streaming RPC and
+pushes every page unasked. The driver stopped reading but never cancelled the
+RPC, so the engine went on pushing into a flow-control window nobody drained.
+The engine's push loop holds the session mutex across the send
+(`src/transport/grpc_server.zig:1065-1090`, `entry.mutex.lockUncancelable`) and
+`handleExecute` (`:1935`) takes that same mutex, so a filled window parked the
+loop INSIDE the critical section. The next `Execute` on that session waited
+behind it. Nothing failed, so `Conn.IsValid()` stayed true and `database/sql`
+handed the connection straight on. A second `Execute` made it worse rather than
+better: it overwrote `execStream` and orphaned the first RPC with its context
+still live.
+
+**Fix.** `GRPCTransport` keeps the cancel of the context each `Execute` rides
+and fires it on the next `Execute`, on `Close`, and on a non-final `Rows.Close`
+when `Transport.PagesArePushed()` (through the optional `streamCanceller`
+assertion). The first of those fires BEFORE the new `Execute` goes out.
+Ordering is not cosmetic and was measured: cancelling the superseded RPC after
+the next one is already in flight on the same session poisons that session at
+0.8.15, and `TestIntegration_GRPCBatchExecPastOnePage` (647 statements in one
+transaction) then fails around statement 29 with `driver.ErrBadConn`. The
+engine appears to mishandle a `RST_STREAM` that arrives while it is taking up
+new work on the session — the same grpc-zig weakness GAP-SONNY806-07 asks to
+have fixed. Cancelling rather than `markConnFailed` is deliberate: the RPC is
+per-`Execute`, so tearing it down leaves the session and the `ClientConn`
+usable and the connection stays poolable. Retiring it would trade a wedge for
+an eviction and a re-dial on every early `Close`.
+
+**Measured, and the limit of the fix.** With a result the engine can finish
+pushing, an early `Close` now leaves the session usable immediately: the next
+statement on the same driver `Conn` answered in **0.65 ms** with the cancel
+versus 2.3 ms without. With a result past the GAP-SONNY806-07 ceiling neither
+behaviour is usable — the engine is parked inside its push loop and ignores the
+client's `RST_STREAM`, so the next statement took **34 s** without the cancel
+and failed with `driver.ErrBadConn` after **30 s** with it. That is the
+engine's stall surfacing as a connection error rather than a 34-second wait,
+and `database/sql` evicts and retries on a fresh connection; it is not a
+regression the cancel introduced, and it cannot be fixed driver-side. The
+cancel is kept because orphaning an RPC is wrong on its own terms: the stream
+stays open for as long as the caller's context lives, holding client and server
+state nobody will ever read.
+
+### GAP-SONNY806-06: the trailing-frame drain could park on the wire and eat a pushed page
+
+- **Severity:** Medium (availability + silent truncation, on the gRPC wire only)
+- **Component:** **Go DRIVER** — `conn.go` (`drainTrailingFrames`),
+  `grpc_transport.go` (`ReceiveProto` precondition)
+- **Status:** **Closed** (filed 2026-09-14, fixed 2026-09-14, SONNY-806 /
+  GEO-GO-UP-001 Lane D Task 14c)
+- **Reproducer:** `TestRows_PushedPages_FinalFlagStopsTheRead` asserts the
+  frame queued behind the final page is still unread after `Close`.
+
+**Observed (while open).** `Conn.releaseRows` ran a 1 ms blocking drain built
+for QUIC's trailing metrics/heartbeat frames. It passed `ReceiveProto` a fresh
+`context.Background()` deadline.
+
+**Root cause — driver.** Only the context an `Execute` stream was created from
+binds that stream: grpc-go ties the RPC to it and to nothing else. A background
+1 ms deadline therefore does not unblock `Recv`, so the drain could park on the
+wire while holding `c.mu` — the lock every other operation on that connection
+needs. And on a non-final release there IS something to read on a pushed-page
+wire, so a drain that succeeded would discard a page of the caller's result
+rather than a stray trailing frame.
+
+**Fix.** `drainTrailingFrames` returns immediately when
+`Transport.PagesArePushed()`. The GAP-SONNY806-05 cancel ends the abandoned
+stream outright, so nothing is left to drain. `GRPCTransport.ReceiveProto`'s
+doc now states the precondition explicitly.
 
 ### GAP-SONNY806-04: gRPC results stopped at the engine's first pushed page
 

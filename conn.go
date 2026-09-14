@@ -1168,7 +1168,26 @@ func (c *Conn) drainBufferedFrames() {
 // frames still in the QUIC socket. The timeout was reduced from 50ms to 1ms
 // since Geode's server does not send trailing metrics/heartbeat frames after
 // the final data page in normal operation.
+//
+// It runs on PULL-driven transports only. On a pushed-page transport (gRPC)
+// it is both unsafe and unnecessary:
+//
+//   - Unsafe. The drain context is a fresh background context, and only the
+//     context an Execute stream was created from binds that stream
+//     (GRPCTransport.ReceiveProto's precondition). A 1 ms background deadline
+//     therefore does not unblock Recv at all: the drain would park on the wire
+//     holding c.mu — the lock every other operation on this connection needs —
+//     until the server happened to send something.
+//   - Unnecessary, and lossy. The engine pushes pages unasked, so on a
+//     non-final release there IS something to read, and reading it would
+//     discard a page of the caller's result set rather than a stray trailing
+//     frame. Rows.Close cancels the abandoned RPC instead, which ends the
+//     stream outright and leaves nothing to drain.
 func (c *Conn) drainTrailingFrames() {
+	if c.transport.PagesArePushed() {
+		return
+	}
+
 	drainCtx, drainCancel := context.WithTimeout(context.Background(), trailingFrameDrainTimeout)
 	defer drainCancel()
 	for {
