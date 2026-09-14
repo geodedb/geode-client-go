@@ -70,6 +70,8 @@ func (t *initRecordingTransport) IsClosed() bool {
 	return t.closed
 }
 
+func (t *initRecordingTransport) PagesArePushed() bool { return false }
+
 func (t *initRecordingTransport) RemoteClosed() bool { return false }
 
 func (t *initRecordingTransport) Addr() string { return "recording" }

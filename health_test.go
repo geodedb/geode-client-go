@@ -596,8 +596,9 @@ func (f *fakeProbeStream) IsClosed() bool {
 	return f.closed
 }
 
-func (f *fakeProbeStream) RemoteClosed() bool { return false }
-func (f *fakeProbeStream) Addr() string       { return "fake://probe" }
+func (f *fakeProbeStream) PagesArePushed() bool { return false }
+func (f *fakeProbeStream) RemoteClosed() bool   { return false }
+func (f *fakeProbeStream) Addr() string         { return "fake://probe" }
 
 // fail makes the next round trip on this stream fail the way a probe that lost
 // its race with the server does: the send goes nowhere.

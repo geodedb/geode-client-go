@@ -169,6 +169,11 @@ func (m *mockTransport) RemoteClosed() bool {
 	return m.closed || m.remoteClosed
 }
 
+// PagesArePushed models the QUIC wire by default: paging is PULL-driven, so
+// every existing test keeps asserting the PULL it always did. pushTransport
+// (rows_pushed_test.go) is the server-pushed (gRPC-shaped) counterpart.
+func (m *mockTransport) PagesArePushed() bool { return false }
+
 func (m *mockTransport) Addr() string { return m.addr }
 
 // ─────────────────────────────────────────────────────────────────────────────

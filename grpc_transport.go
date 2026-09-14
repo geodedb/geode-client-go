@@ -262,28 +262,38 @@ func (t *GRPCTransport) SendProto(ctx context.Context, msg *proto.QuicClientMess
 		return nil
 
 	case *proto.QuicClientMessage_Pull:
-		// PULL has no gRPC counterpart. geode 0.8.15 serves Execute as a
-		// server-streaming RPC and pushes every page itself
-		// (src/transport/grpc_server.zig:1008-1101 handleExecuteStreaming),
-		// and GeodeService declares no Pull method at all
-		// (proto/geode_grpc.pb.go GeodeService_ServiceDesc). The driver's Rows
-		// pages with PULL, so a result larger than the engine's gRPC stream
-		// page size (128 rows) ends here.
+		// Unreachable from the driver's own page loop, and kept as an
+		// assertion rather than deleted.
 		//
-		// This is reported as a typed, documented refusal rather than an
-		// opaque "unknown message type": a caller that gets a short result set
-		// must be able to tell "the transport cannot page" from "the engine
-		// errored", and Classify must answer RetryNever rather than churning
-		// connections over a capability that no retry restores.
+		// PULL is the QUIC protocol's client-driven paging request and has no
+		// gRPC counterpart: geode 0.8.15 serves Execute as a SERVER-STREAMING
+		// RPC that pushes every page itself and then ends the stream
+		// (src/transport/grpc_server.zig:1009-1101 handleExecuteStreaming), and
+		// GeodeService declares no Pull method (proto/geode_grpc.pb.go
+		// GeodeService_ServiceDesc). Since Task 14b the driver consumes those
+		// pushed pages instead of asking for them — Rows.fetchNextPage branches
+		// on Transport.PagesArePushed, which is true here — so nothing in the
+		// driver sends a PULL over gRPC any more.
+		//
+		// A PULL arriving here therefore means a caller reached past the page
+		// loop. Failing loudly and typed is the right answer: a blind write
+		// would be unanswerable and the following read would block until the
+		// context expired.
 		return &TransportError{
 			Op:   "pull",
 			Addr: t.addr,
 			cause: fmt.Errorf("%w: gRPC Execute is server-streaming and carries no PULL; "+
-				"results longer than one gRPC page cannot be paged over this transport",
+				"pages arrive unasked (Transport.PagesArePushed)",
 				ErrUnsupportedOnTransport),
 		}
 
 	default:
+		// The QuicClientMessage oneof carries five message types this gRPC
+		// surface genuinely cannot express — savepoint, rollback_to, backup,
+		// restore and upload_backup — because GeodeService declares no method
+		// for any of them (proto/geode_grpc.pb.go GeodeService_ServiceDesc).
+		// This is the sentinel's live, unfixable cause: no retry and no other
+		// connection grows the method, so Classify answers RetryNever.
 		return &TransportError{
 			Op:    "send",
 			Addr:  t.addr,
@@ -292,8 +302,32 @@ func (t *GRPCTransport) SendProto(ctx context.Context, msg *proto.QuicClientMess
 	}
 }
 
+// PagesArePushed reports true: the gRPC surface is server-pushed.
+//
+// geode 0.8.15 serves Execute as a server-streaming RPC. handleExecuteStreaming
+// (src/transport/grpc_server.zig:1009-1101) sends the schema/first response and
+// then loops buildStreamDataPageLocked -> sendStreamResponse until the page it
+// built is final, paging at grpc_stream_page_size (:915 ->
+// src/client/quic_query_runner.zig:5 = 128 rows), and ends the stream. Every
+// page is therefore already on the wire; Rows.fetchNextPage reads the next one
+// off this stream instead of sending a PullRequest the service cannot answer.
+func (t *GRPCTransport) PagesArePushed() bool { return true }
+
 // ReceiveProto reads a protobuf message from the gRPC stream.
-func (t *GRPCTransport) ReceiveProto(_ context.Context) (*proto.QuicServerMessage, error) {
+//
+// Cancellation semantics match QUICTransport.ReceiveProto (Task 9): a context
+// that is already done is reported before the read, and a read that fails while
+// the context is done is reported as the CONTEXT error rather than as the
+// transport error the cancellation manifests as on the wire — so callers keep
+// matching errors.Is(err, context.Canceled).
+//
+// No deadline watcher is needed to unblock the read. The Execute stream is
+// created from the same context in SendProto (t.client.Execute(ctx, req)), so
+// grpc-go tears the RPC down the moment that context is cancelled or its
+// deadline expires and the parked Recv returns immediately with a Canceled or
+// DeadlineExceeded status. The checks below convert that into ctx.Err();
+// Rows.fetchNextPage then wraps it and retires the connection.
+func (t *GRPCTransport) ReceiveProto(ctx context.Context) (*proto.QuicServerMessage, error) {
 	t.mu.Lock()
 	if t.closed {
 		t.mu.Unlock()
@@ -313,8 +347,14 @@ func (t *GRPCTransport) ReceiveProto(_ context.Context) (*proto.QuicServerMessag
 	t.mu.Unlock()
 
 	if stream != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		resp, err := stream.Recv()
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
 			return nil, &TransportError{
 				Op:    "recv",
 				Addr:  t.addr,

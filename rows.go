@@ -293,32 +293,50 @@ func convertProtoValue(v *proto.Value) driver.Value {
 	}
 }
 
-// fetchNextPage fetches the next page of results from the server via PULL.
+// fetchNextPage fetches the next page of results from the server.
+//
+// Who moves the page depends on the transport (Transport.PagesArePushed):
+//
+//   - PULL-driven (QUIC): the driver asks with a PullRequest and reads the
+//     answer.
+//   - server-pushed (gRPC): the page is already in flight — geode 0.8.15
+//     serves Execute as a server-streaming RPC and pushes every page until one
+//     is final (src/transport/grpc_server.zig:1009-1101 handleExecuteStreaming)
+//     — so the driver only reads. Sending a PULL here is what used to cap gRPC
+//     results at one page: GeodeService has no Pull method, so the write itself
+//     failed (GAP-SONNY806-04, fixed in Task 14b).
+//
+// Both arms share the same reader below, so the cancellation contract (Task 9)
+// and the final/error/empty handling are identical on either wire.
 func (r *Rows) fetchNextPage() error {
-	// Never put another PULL on the wire for a query the caller abandoned.
+	// Never put another PULL on the wire — nor block on another page — for a
+	// query the caller abandoned.
 	if err := r.abortOnCancel(); err != nil {
 		return err
 	}
 
-	// Send a PullRequest to get the next page
-	r.requestID++
-	pullMsg := proto.NewPullMessage(&proto.PullRequest{
-		RequestId: r.requestID,
-		PageSize:  uint32(r.pageSize), //nolint:gosec // G115: page size fits uint32
-	})
-	if err := r.conn.transport.SendProto(r.ctx, pullMsg); err != nil {
-		// A cancellation racing the write surfaces here as whatever the
-		// transport noticed first; report it as the context error.
-		if cancelled := r.abortOnCancel(); cancelled != nil {
-			return cancelled
+	if !r.conn.transport.PagesArePushed() {
+		// Send a PullRequest to get the next page
+		r.requestID++
+		pullMsg := proto.NewPullMessage(&proto.PullRequest{
+			RequestId: r.requestID,
+			PageSize:  uint32(r.pageSize), //nolint:gosec // G115: page size fits uint32
+		})
+		if err := r.conn.transport.SendProto(r.ctx, pullMsg); err != nil {
+			// A cancellation racing the write surfaces here as whatever the
+			// transport noticed first; report it as the context error.
+			if cancelled := r.abortOnCancel(); cancelled != nil {
+				return cancelled
+			}
+			return err
 		}
-		return err
 	}
 
-	// This read blocks until the page arrives. ReceiveProto watches r.ctx and
-	// forces a read deadline the instant it is done, so a cancellation while
-	// parked here unblocks promptly — and is reported as the context error,
-	// not as the transport read_length/read error it manifests as.
+	// This read blocks until the page arrives. Both transports honour r.ctx
+	// while parked here — QUIC forces a read deadline the instant it is done,
+	// gRPC rides the Execute RPC's own cancellation — so a cancellation
+	// unblocks promptly and is reported as the context error, not as the
+	// transport read_length/read/recv error it manifests as.
 	resp, err := r.conn.transport.ReceiveProto(r.ctx)
 	if err != nil {
 		if cancelled := r.abortOnCancel(); cancelled != nil {

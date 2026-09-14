@@ -57,6 +57,21 @@ type Transport interface {
 	// IsClosed returns true if the transport is closed.
 	IsClosed() bool
 
+	// PagesArePushed reports how a multi-page result set is delivered on this
+	// wire, and therefore who drives paging.
+	//
+	// false — PULL-driven (QUIC). The driver asks for each page after the
+	// first with a PullRequest and reads the answer.
+	//
+	// true — server-pushed (gRPC). The server sends every page of its own
+	// accord and the driver's only job is to keep reading until a page is
+	// marked final; sending a PULL would be both unanswerable and unnecessary.
+	//
+	// Rows.fetchNextPage branches on this instead of hard-coding the QUIC
+	// protocol's PULL, so a transport whose engine pushes pages reads them
+	// instead of stalling after the first one.
+	PagesArePushed() bool
+
 	// RemoteClosed returns true if the underlying connection has been closed
 	// or lost — by the server, an idle timeout, or a transport error —
 	// independent of whether this transport's own Close() has run. It lets the
@@ -479,6 +494,16 @@ func (t *QUICTransport) IsClosed() bool {
 	defer t.mu.Unlock()
 	return t.closed
 }
+
+// PagesArePushed reports false: the QUIC surface is PULL-driven.
+//
+// geode 0.8.15 answers EXECUTE over QUIC with a schema frame and the first
+// data page, and then waits. Every further page is fetched by a PullRequest
+// the driver sends (geode src/server/quic_connection_handler.zig:7726-7743).
+// The server does also push remaining pages inline on some paths and still
+// answers a PULL on top of them (see Rows.abortOnCancel), so the PULL-driven
+// reading below remains the correct and the only supported QUIC behaviour.
+func (t *QUICTransport) PagesArePushed() bool { return false }
 
 // RemoteClosed reports whether the underlying QUIC connection can no longer
 // carry streams. quic-go cancels the connection's context when the connection

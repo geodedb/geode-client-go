@@ -933,6 +933,16 @@ func (c *Conn) absorbPlanFrame(
 			c.drainBufferedFrames()
 			return true, nil
 		}
+		if c.transport.PagesArePushed() {
+			// Server-pushed paging (gRPC): the next page is already on the
+			// stream, so asking for it is both unnecessary and unanswerable.
+			// Mirrors Rows.fetchNextPage. Reachable only via the text-row
+			// fallback — 0.8.15 answers EXPLAIN/PROFILE over gRPC with a
+			// payload and no pages at all (grpc_server.zig:1026-1041 skips the
+			// page loop for explain/profile/error) — but the two page loops
+			// must not disagree about who drives paging.
+			return false, nil
+		}
 		*pullID++
 		pull := proto.NewPullMessage(&proto.PullRequest{
 			RequestId: *pullID,
