@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ErrUnsupportedOnTransport`, a typed refusal for a protocol message the
+  selected transport cannot carry. It classifies `RetryNever`: the same request
+  over the same transport fails identically, and no new connection changes
+  that.
+
+  It has one reachable cause today, and it is load-bearing. geode 0.8.15 serves
+  `Execute` over gRPC as a SERVER-STREAMING RPC — the engine pushes the schema
+  and then every data page itself — so there is no client-driven `PULL` and
+  `GeodeService` declares no method that could carry one. The driver's `Rows`
+  pages with `PULL`, so **a gRPC result longer than the engine's gRPC page
+  (128 rows) cannot be paged**. It now stops with this error instead of the
+  previous opaque `unknown message type`, so a short result set can never be
+  mistaken for a complete one. Callers that must page large results use the
+  QUIC transport.
+
 - Query-plan metadata. `Pool.Explain` / `Pool.Profile` (and the same pair on
   `Session` and on the driver `Conn`) return typed `*ExplainPlan` and
   `*ProfileReport` values, so a retrieval path can RECORD which access path a

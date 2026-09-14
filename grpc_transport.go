@@ -261,8 +261,34 @@ func (t *GRPCTransport) SendProto(ctx context.Context, msg *proto.QuicClientMess
 		t.mu.Unlock()
 		return nil
 
+	case *proto.QuicClientMessage_Pull:
+		// PULL has no gRPC counterpart. geode 0.8.15 serves Execute as a
+		// server-streaming RPC and pushes every page itself
+		// (src/transport/grpc_server.zig:1008-1101 handleExecuteStreaming),
+		// and GeodeService declares no Pull method at all
+		// (proto/geode_grpc.pb.go GeodeService_ServiceDesc). The driver's Rows
+		// pages with PULL, so a result larger than the engine's gRPC stream
+		// page size (128 rows) ends here.
+		//
+		// This is reported as a typed, documented refusal rather than an
+		// opaque "unknown message type": a caller that gets a short result set
+		// must be able to tell "the transport cannot page" from "the engine
+		// errored", and Classify must answer RetryNever rather than churning
+		// connections over a capability that no retry restores.
+		return &TransportError{
+			Op:   "pull",
+			Addr: t.addr,
+			cause: fmt.Errorf("%w: gRPC Execute is server-streaming and carries no PULL; "+
+				"results longer than one gRPC page cannot be paged over this transport",
+				ErrUnsupportedOnTransport),
+		}
+
 	default:
-		return fmt.Errorf("unknown message type")
+		return &TransportError{
+			Op:    "send",
+			Addr:  t.addr,
+			cause: fmt.Errorf("%w: %T", ErrUnsupportedOnTransport, msg.GetMsg()),
+		}
 	}
 }
 

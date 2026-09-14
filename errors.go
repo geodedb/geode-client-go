@@ -73,6 +73,27 @@ var (
 	// startup on errors.Is(err, ErrTenantScopeRequired) rather than matching
 	// the engine's prose.
 	ErrTenantScopeRequired = errors.New("geode: strict tenancy requires a concrete tenant scope")
+
+	// ErrUnsupportedOnTransport reports a protocol message the selected
+	// transport cannot carry. It is a TRANSPORT capability gap, not a server
+	// refusal and not a connection failure: the same request over the same
+	// transport fails identically, so it classifies RetryNever.
+	//
+	// At present it has exactly one reachable cause, and it is load-bearing:
+	// the gRPC transport cannot send a PULL. geode 0.8.15 serves Execute over
+	// gRPC as a SERVER-STREAMING RPC — the engine pushes the schema and then
+	// every data page itself and ends the stream
+	// (src/transport/grpc_server.zig:1008-1101 handleExecuteStreaming) — so
+	// the QUIC protocol's client-driven PULL has no gRPC counterpart and
+	// GeodeService has no method to carry one (proto/geode.proto). The driver's
+	// Rows pages with PULL (rows.go fetchNextPage), so a gRPC result larger
+	// than the engine's gRPC stream page size (128 rows,
+	// src/client/quic_query_runner.zig:5 via grpc_server.zig:915) stops at the
+	// first page and reports this error rather than silently returning a
+	// truncated result set.
+	//
+	// Callers that must page large results today use the QUIC transport.
+	ErrUnsupportedOnTransport = errors.New("geode: message type is not supported by this transport")
 )
 
 // Error is the interface for all Geode errors.

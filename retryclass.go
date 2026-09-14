@@ -205,6 +205,7 @@ func isDeterministicRefusal(err error) bool {
 		errors.Is(err, ErrVectorNotFinite),
 		errors.Is(err, ErrInvalidIdent),
 		errors.Is(err, ErrInvalidString),
+		errors.Is(err, ErrUnsupportedOnTransport),
 		errors.Is(err, ErrSessionClosed),
 		errors.Is(err, ErrSessionBusy),
 		errors.Is(err, ErrNilTxFunc),
