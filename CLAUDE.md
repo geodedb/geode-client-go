@@ -145,7 +145,7 @@ grpc://[2001:db8::1]:50051
 | `ca` | Path to CA certificate | |
 | `cert` | Path to client certificate (mTLS) | |
 | `key` | Path to client key (mTLS) | |
-| `insecure_tls_skip_verify` | Skip TLS verification (testing only) | false |
+| `insecure_tls_skip_verify` | Skip TLS verification (testing only; aliases: `insecure`, `skip_verify`) | false |
 | `tls` | Enable/disable TLS (`0` or `false` to disable) | enabled |
 | `user`/`username` | Authentication username | |
 | `pass`/`password` | Authentication password | |
@@ -158,6 +158,7 @@ grpc://[2001:db8::1]:50051
 | `max_streams` | Max concurrent streams across the pool | 64 |
 | `max_streams_per_conn` | Max streams per pooled connection | 8 |
 | `health_probe_ms` | Probe interval in ms; `0` disables | 1000 |
+| `connect_timeout` | Max seconds to wait for a connection; `0` = no timeout | 0 |
 
 A repeated key resolves to its LAST occurrence, so a base DSN can be extended
 by appending overrides.

@@ -112,7 +112,7 @@ grpc://[2001:db8::1]:50051
 | `ca` | Path to CA certificate (must exist; no fallback) | |
 | `cert` | Path to client certificate (mTLS) | |
 | `key` | Path to client key (mTLS) | |
-| `insecure_tls_skip_verify` | Skip TLS verification (testing only) | false |
+| `insecure_tls_skip_verify` | Skip TLS verification (testing only; aliases: `insecure`, `skip_verify`) | false |
 | `tls` | Enable/disable TLS (`0` or `false` to disable) | enabled |
 | `user`/`username` | Authentication username | |
 | `pass`/`password` | Authentication password | |
@@ -125,6 +125,7 @@ grpc://[2001:db8::1]:50051
 | `max_streams` | Max concurrent streams across the pool (QUIC only) | 64 |
 | `max_streams_per_conn` | Max streams multiplexed on one pooled connection (QUIC only) | 8 |
 | `health_probe_ms` | Pooled-connection liveness probe interval, ms; `0` disables (QUIC only) | 1000 |
+| `connect_timeout` | Max seconds to wait for a connection; `0` = no timeout | 0 |
 
 A repeated DSN key resolves to its **last** occurrence, so appending an option
 to a DSN that already sets it overrides it.
@@ -241,10 +242,16 @@ tenant is a property of the connection, not of a statement, so every statement
 on that connection inherits it.
 
 `?strict_tenancy=true` asserts the client intends to run tenant-scoped. A
-config with no concrete tenant (empty or `default`) is refused at parse time
-with `ErrTenantRequired`, and the engine's own refusal (GQLSTATE `42501`,
-"Tenant scope required") is surfaced as the typed `ErrTenantScopeRequired`, so
-callers gate startup on `errors.Is` instead of matching engine prose.
+config with no concrete tenant (empty or `default`) is refused by
+`(*Config).Validate()` with `ErrTenantRequired` — **not** by `ParseDSN`, which
+never validates and always returns a `*Config` for any DSN that merely parses.
+`Validate` runs automatically on the first connection attempt
+(`connect`/`connectPooled`) and inside `NewConnector`, so `sql.Open` plus a
+query eventually reaches it — but a caller that wants to fail at startup,
+before opening a connection, must call `cfg.Validate()` itself. The engine's
+own refusal (GQLSTATE `42501`, "Tenant scope required") is surfaced as the
+typed `ErrTenantScopeRequired`, so callers gate on `errors.Is` in both cases
+instead of matching engine prose.
 
 > **Known engine defect (SONNY-1229, GAP-SONNY806-02, Critical).** geode 0.8.15
 > does **not** apply the session tenant filter on the `MATCH` read path. Two
@@ -286,8 +293,17 @@ Ask the server what it supports before using a feature; unknown features are
 **unsupported**, never assumed:
 
 ```go
-cfg, _ := geode.ParseDSN("quic://localhost:3141")
-connector, _ := geode.NewConnector(cfg)
+cfg, err := geode.ParseDSN("quic://localhost:3141")
+if err != nil { return err } // malformed DSN only — ParseDSN never validates
+
+// A caller that wants to fail at startup, before opening a connection, calls
+// Validate explicitly: it is what catches a bad strict_tenancy config
+// (ErrTenantRequired) and everything else NewConnector would otherwise only
+// surface once a connection is attempted.
+if err := cfg.Validate(); err != nil { return err }
+
+connector, err := geode.NewConnector(cfg)
+if err != nil { return err }
 
 info, err := connector.ServerInfo(ctx)          // SHOW VERSION + SHOW CAPABILITIES
 if err != nil { return err }
@@ -342,9 +358,16 @@ the obvious reading of the GQLSTATE:
 - `40001` with the engine's `ClusterNotLeader` / `ClusterWriteNotReplicable`
   message prefixes → `RetryNewConn` (another node can serve it), not
   `RetrySameConn`.
-- `08006` → `RetryNever`. It is a generic connection-timeout code whose outcome
-  is **unknown**; a blind retry can duplicate a row.
-- `53200` (out of memory) → `RetryNever`.
+- `08006` → `RetryNever`, deliberately exempt from the rest of class `08`'s
+  `RetryNewConn` answer. It is a generic engine TIMEOUT (`error.Timeout`, not
+  something specific to clustered writes or the connection itself) reachable
+  from any request path, so its outcome is **unknown** — the operation may
+  have committed — and a blind retry can duplicate a row. Retryable only with
+  an idempotency key, which is the caller's decision, not the driver's.
+- `53200` (executor budget exceeded — read/write working-set limit, **not**
+  out of memory) → `RetryNever`. Deterministic for the same statement: the
+  working set does not shrink on a second attempt, so the fix is a narrower
+  query or a larger budget.
 
 > **`Pool.RetrySession` is not idempotent for you.** It re-runs your function.
 > Only pass work that is safe to run twice (`MERGE`, not `CREATE`).
@@ -410,16 +433,29 @@ asserted against a real listener (`TestIntegration_GRPC*`, run by
 `make test-integration-docker-grpc-race`). One engine limit and four
 deliberate differences separate the two wires.
 
-> **gRPC is for SMALL results at engine 0.8.15 (GAP-SONNY806-07, High).** A
-> single `Execute` delivers roughly **64 KiB** of pushed payload — a few
-> thousand narrow rows, or a few hundred wide ones — and then stalls until an
-> engine-side timeout, whatever the client does. It is HTTP/2 flow control:
-> the engine does not act on the `WINDOW_UPDATE` frames grpc-go emits as the
-> driver consumes each page, and the driver has no lever. The same query over
-> QUIC returns 50 000 rows in ~1.5 s. **QUIC is the release transport**; use
-> gRPC where the wire is mandated and the results are small. A stalled result
-> surfaces as an error, never as a short result set that looks complete
-> (`TestIntegration_GRPCLargePushedResultFailsLoudly`).
+> **gRPC is for SMALL results at engine 0.8.15 (GAP-SONNY806-07, High, engine
+> ticket SONNY-1560).** A single `Execute` delivers roughly **64 KiB** of
+> pushed payload — a few thousand narrow rows, or a few hundred wide ones —
+> and then stalls until an engine-side timeout, whatever the client does. It
+> is HTTP/2 flow control: the engine does not act on the `WINDOW_UPDATE`
+> frames grpc-go emits as the driver consumes each page, and the driver has no
+> lever. The same query over QUIC returns 50 000 rows in ~1.5 s. **QUIC is the
+> release transport**; use gRPC where the wire is mandated and the results are
+> small. A stalled result surfaces as an error, never as a short result set
+> that looks complete (`TestIntegration_GRPCLargePushedResultFailsLoudly`).
+>
+> **The stall's blast radius crosses sessions.** The engine parks — not just
+> the stalled stream — for roughly 30 s while it holds the flow-control
+> window open and ignores the client's `RST_STREAM`. While parked, a
+> **different session's** multi-statement transaction against the same engine
+> process can fail mid-way with `driver.ErrBadConn`, not only the session that
+> triggered the stall: `TestIntegration_GRPCBatchExecPastOnePage` (a fresh
+> pool, a different connection) fails around statement 29 of 647 when it runs
+> immediately after an oversized-result test, and passes cleanly on its own.
+> A caller that triggers one oversized gRPC result should expect unrelated
+> work on OTHER connections against the same engine to fail for roughly 30 s,
+> not just the query that overflowed. See `docs/GAP_ANALYSIS.md` for the full
+> measurement.
 
 The four deliberate differences:
 

@@ -85,10 +85,21 @@ func ensureCancelTenant(ctx context.Context, t *testing.T) {
 // re-MERGEing 2500 nodes per test would cost seconds for nothing.
 var cancelSeedOnce sync.Once
 
-func seedCancelRows(ctx context.Context, t *testing.T, db *sql.DB, n int) {
+// seedCancelRowsTimeout bounds the one-time cancel-probe seed. It is
+// deliberately its own timeout rather than a parameter drawn from whichever
+// test happens to run the seed first: cancelSeedOnce.Do means exactly one
+// caller's context would otherwise govern a batch write every test in this
+// file depends on, tying an unrelated test's own cancel/deadline semantics —
+// the 120 s `base` each test's cancellation ASSERTIONS run under — to setup
+// work that is not part of what that test is asserting.
+const seedCancelRowsTimeout = 60 * time.Second
+
+func seedCancelRows(t *testing.T, db *sql.DB, n int) {
 	t.Helper()
 	var seedErr error
 	cancelSeedOnce.Do(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), seedCancelRowsTimeout)
+		defer cancel()
 		stmts := make([]Statement, 0, n)
 		for i := 0; i < n; i++ {
 			stmts = append(stmts, Statement{
@@ -145,7 +156,7 @@ func TestIntegration_CancelMidStream(t *testing.T) {
 	db.SetMaxOpenConns(4)
 
 	ensureCancelTenant(base, t)
-	seedCancelRows(base, t, db, cancelProbeRows)
+	seedCancelRows(t, db, cancelProbeRows)
 
 	ctx, cancel := context.WithCancel(base)
 	defer cancel()
@@ -206,7 +217,7 @@ func TestIntegration_CancelRetiresConn(t *testing.T) {
 	}
 	defer seedDB.Close()
 	ensureCancelTenant(base, t)
-	seedCancelRows(base, t, seedDB, cancelProbeRows)
+	seedCancelRows(t, seedDB, cancelProbeRows)
 
 	cfg, err := ParseDSN(cancelDSN("&page_size=10"))
 	if err != nil {
@@ -309,7 +320,7 @@ func TestIntegration_CancelLeaksNoGoroutines(t *testing.T) {
 	db.SetMaxOpenConns(2)
 
 	ensureCancelTenant(base, t)
-	seedCancelRows(base, t, db, cancelProbeRows)
+	seedCancelRows(t, db, cancelProbeRows)
 
 	cancelOnce := func() {
 		ctx, cancel := context.WithCancel(base)
@@ -389,7 +400,7 @@ func TestIntegration_CancelUnderConcurrency(t *testing.T) {
 	defer seedDB.Close()
 
 	ensureCancelTenant(base, t)
-	seedCancelRows(base, t, seedDB, cancelProbeRows)
+	seedCancelRows(t, seedDB, cancelProbeRows)
 
 	type outcome struct {
 		read     int

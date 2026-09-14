@@ -1221,7 +1221,7 @@ func TestIntegration_GRPCLargePushedResultFailsLoudly(t *testing.T) {
 	}
 
 	switch {
-	case errors.Is(stop, io.EOF) && read >= want-1:
+	case errors.Is(stop, io.EOF) && read == want:
 		t.Logf("engine delivered all %d rows: GAP-SONNY806-07 appears fixed — "+
 			"revisit grpcPushedRowCeiling and the gRPC caveats in README/CHANGELOG",
 			read)

@@ -40,7 +40,7 @@ func TestIntegration_CancelledRetrievalClassifiesNewConnAndRecovers(t *testing.T
 	}
 	defer seedDB.Close()
 	ensureCancelTenant(base, t)
-	seedCancelRows(base, t, seedDB, cancelProbeRows)
+	seedCancelRows(t, seedDB, cancelProbeRows)
 
 	pool, err := NewPool(cancelDSN("&page_size=10&pool_size=4"),
 		WithMaxOpenConns(4), WithMaxIdleConns(4))

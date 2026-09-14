@@ -211,6 +211,15 @@ func (t *GRPCTransport) SendProto(ctx context.Context, msg *proto.QuicClientMess
 		stream, err := t.client.Execute(streamCtx, req)
 		if err != nil {
 			cancel()
+			// A stale lastResponse (e.g. a prior Hello/Ping response) must not
+			// survive a failed Execute: ReceiveProto checks lastResponse
+			// before it checks execStream, so leaving one set would hand the
+			// caller of this failed Execute somebody else's cached response
+			// instead of the "no response available" / stream-nil state a
+			// failed Execute should leave behind.
+			t.mu.Lock()
+			t.lastResponse = nil
+			t.mu.Unlock()
 			return &TransportError{
 				Op:    constOpExecute,
 				Addr:  t.addr,

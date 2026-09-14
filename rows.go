@@ -118,22 +118,40 @@ func (r *Rows) Close() error {
 		r.conn.markConnFailed()
 	}
 
-	// An early Close on a pushed-page transport (gRPC) abandons a
-	// server-streaming RPC the engine is still feeding. Unlike the cancelled
+	// A Close on a pushed-page transport (gRPC) cancels the per-Execute
+	// context — for EVERY Close, not only an early one. Unlike the cancelled
 	// case above, the context may well be perfectly live — `rows.Close()`
 	// after one page of a large result is ordinary caller behaviour — so the
 	// connection itself is fine and must stay poolable. What is NOT fine is
-	// leaving the RPC running: geode's push loop holds the session mutex
-	// across the send (src/transport/grpc_server.zig:1065-1090) and
-	// handleExecute (:1935) takes the same mutex, so once the unread pages
-	// fill the HTTP/2 window the loop parks inside the critical section and
-	// the NEXT statement on this session wedges behind it.
+	// leaving the RPC's context alive: geode's push loop holds the session
+	// mutex across the send (src/transport/grpc_server.zig:1065-1090) and
+	// handleExecute (:1935) takes the same mutex, so an early Close that left
+	// the RPC running would wedge the NEXT statement on this session behind
+	// the engine's push loop.
+	//
+	// A FULLY-READ Rows (final == true) needs the same call for a different
+	// reason: correctness, not the wedge. Before this fix, the only things
+	// that ever cancelled a finished RPC's context were the next Execute on
+	// the SAME connection (SendProto's ordering fire, which runs while this
+	// connection is exclusively held again) and the transport's own Close.
+	// Between this Close returning the connection to the pool and either of
+	// those firing, the context sits alive with nothing watching it — a
+	// child of the caller's ctx, whose own cancellation (deadline, an
+	// unrelated cancel further up the call tree) fires whenever THAT context
+	// decides to, unordered against this connection's next borrower. Racing
+	// an unrelated cancellation against a different session's Execute on the
+	// same connection is exactly the shape that produced driver.ErrBadConn
+	// mid-batch (GAP-SONNY806-07, SONNY-1560). Cancelling here, while the
+	// conn is still exclusively held and before it goes back to the pool,
+	// retires the context deterministically instead of leaving its fate to
+	// whichever caller happens to hold the parent.
 	//
 	// Cancelling the RPC — not markConnFailed — is therefore the fix: it
-	// releases the engine's mutex and keeps a healthy connection in the pool.
-	// markConnFailed would trade a wedge for a needless eviction and re-dial
-	// on every early Close.
-	if !final && r.conn.transport.PagesArePushed() {
+	// releases the engine's mutex (or, for the final case, simply retires an
+	// already-finished RPC's context) and keeps a healthy connection in the
+	// pool. markConnFailed would trade a wedge for a needless eviction and
+	// re-dial on every Close.
+	if r.conn.transport.PagesArePushed() {
 		if sc, ok := r.conn.transport.(streamCanceller); ok {
 			sc.CancelActiveStream()
 		}

@@ -214,11 +214,27 @@ func TestRows_PushedPages_EarlyCloseCancelsTheStream(t *testing.T) {
 	}
 }
 
-// TestRows_PushedPages_FullReadDoesNotCancel is the other half: a result read
-// to its final page owes nothing, so Close must NOT cancel. Cancelling there
-// would be harmless on the wire but would hide a real regression — a reader
-// that stopped early while believing it had finished.
-func TestRows_PushedPages_FullReadDoesNotCancel(t *testing.T) {
+// TestRows_PushedPages_FullReadAlsoCancels is the other half: a result read
+// to its final page still gets its Execute context cancelled on Close, same
+// as an early one.
+//
+// This looks redundant on the wire — the RPC already finished sending — but
+// it is not redundant in the driver's own bookkeeping. Before this fix, a
+// final Close left GRPCTransport.execCancel/execStream referencing a spent
+// RPC's context with nothing scheduled to retire it: the only remaining
+// triggers were the next Execute on THIS SAME connection (which cancels the
+// previous stream before issuing its own, still holding the connection
+// exclusively) and the transport's own Close. Between this Close returning
+// the connection to database/sql's pool and either of those firing, that
+// child context sits alive, its fate tied to whatever unrelated deadline or
+// cancellation its parent (the caller's query context) eventually hits —
+// unordered against whichever statement next borrows this connection. That
+// race is what measured as driver.ErrBadConn on a later, unrelated
+// transaction (GAP-SONNY806-07, SONNY-1560). Cancelling on every Close, while
+// the connection is still exclusively held, retires the context
+// deterministically instead of leaving it to outlive the connection's return
+// to the pool.
+func TestRows_PushedPages_FullReadAlsoCancels(t *testing.T) {
 	fastDrainTimeout(t)
 	ctx := context.Background()
 
@@ -231,8 +247,10 @@ func TestRows_PushedPages_FullReadDoesNotCancel(t *testing.T) {
 	if err := rows.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if n := pt.cancelCount(); n != 0 {
-		t.Fatalf("CancelActiveStream called %d time(s) after a fully-read result, want 0", n)
+	if n := pt.cancelCount(); n != 1 {
+		t.Fatalf("CancelActiveStream called %d time(s) after a fully-read result, want 1: "+
+			"the finished Execute's context must be retired on Close, not left to outlive "+
+			"the connection's return to the pool (GAP-SONNY806-07, SONNY-1560)", n)
 	}
 	if !c.IsValid() {
 		t.Fatal("IsValid() is false after a fully-read pushed result")

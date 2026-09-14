@@ -32,10 +32,18 @@ gate on tagging v0.2.0:
   and fails on a loaded host; a measurement bound, not a correctness defect.
 
 Known engine limit on the gRPC wire: **a single `Execute` stalls past roughly
-64 KiB of pushed payload** (GAP-SONNY806-07, High — engine/grpc-zig does not
-act on HTTP/2 `WINDOW_UPDATE`). gRPC is usable for small results only at
-0.8.15 and **QUIC remains the release transport**; a stalled result surfaces
-as an error, never as a short result set that looks complete.
+64 KiB of pushed payload** (GAP-SONNY806-07 / SONNY-1560, High —
+engine/grpc-zig does not act on HTTP/2 `WINDOW_UPDATE`). gRPC is usable for
+small results only at 0.8.15 and **QUIC remains the release transport**; a
+stalled result surfaces as an error, never as a short result set that looks
+complete. The stall's blast radius is not confined to the caller that
+triggers it: the engine parks for ~30 s while it holds the flow-control
+window open, and a **different session's** multi-statement transaction issued
+against the same engine process during that window can fail mid-way with
+`driver.ErrBadConn` (measured: `TestIntegration_GRPCBatchExecPastOnePage`
+fails around statement 29 of 647 when run immediately after the stall
+reproducer, and passes alone). See `docs/GAP_ANALYSIS.md` for the full
+measurement.
 
 ### Added
 
@@ -318,22 +326,34 @@ as an error, never as a short result set that looks complete.
 
   `GRPCTransport` now keeps the cancel function of the context each `Execute`
   rides and fires it in three places: the next `Execute` (which would otherwise
-  overwrite the stream and orphan the old RPC), `Close`, and a non-final
-  `Rows.Close` on a pushed-page transport. On the first of those it fires
-  **before** the new `Execute` is issued, not after: cancelling the superseded
-  RPC while the next one is already in flight on the same session poisons the
-  session at engine 0.8.15 — a 647-statement `Pool.BatchExec` then fails around
-  statement 29 with `driver.ErrBadConn`. Same grpc-zig weakness as
-  GAP-SONNY806-07; ordering the `RST_STREAM` ahead of the new request keeps the
-  engine's view of the session single-threaded. Cancelling — rather than marking the
-  connection failed — is deliberate: the RPC is per-`Execute`, so tearing it
-  down leaves the session and the gRPC `ClientConn` usable and the connection
-  stays in the pool. Only a desynchronised connection (a cancelled query
-  context, a transport error) is still retired.
+  overwrite the stream and orphan the old RPC), `Close`, and every
+  `Rows.Close` on a pushed-page transport — final page or not. On the first of
+  those it fires **before** the new `Execute` is issued, not after: cancelling
+  the superseded RPC while the next one is already in flight on the same
+  session poisons the session at engine 0.8.15 — a 647-statement
+  `Pool.BatchExec` then fails around statement 29 with `driver.ErrBadConn`.
+  Same grpc-zig weakness as GAP-SONNY806-07 / SONNY-1560; ordering the
+  `RST_STREAM` ahead of the new request keeps the engine's view of the
+  session single-threaded. Cancelling — rather than marking the connection
+  failed — is deliberate: the RPC is per-`Execute`, so tearing it down leaves
+  the session and the gRPC `ClientConn` usable and the connection stays in
+  the pool. Only a desynchronised connection (a cancelled query context, a
+  transport error) is still retired.
+
+  `Rows.Close` on a FULLY-READ result now cancels too, not only an early one.
+  Before, the only things that ever retired a finished RPC's context were the
+  next `Execute` on the SAME connection or the transport's own `Close`; between
+  this `Close` returning the connection to `database/sql`'s pool and either of
+  those firing, the context sat alive as a child of the caller's own context,
+  torn down whenever THAT context's unrelated deadline or cancellation
+  happened to fire — unordered against whichever statement next borrowed the
+  connection. That race is the same `driver.ErrBadConn` shape measured above,
+  now closed for the final-page case as well as the early one.
 
   Regression coverage: `TestIntegration_GRPCEarlyCloseDoesNotWedgeTheSession`
-  (bounded follow-up statement on the same driver `Conn`) and
+  (bounded follow-up statement on the same driver `Conn`),
   `TestRows_PushedPages_EarlyCloseCancelsTheStream` /
+  `TestRows_PushedPages_FullReadAlsoCancels` /
   `TestGRPCTransport_NextExecuteCancelsThePreviousStream`.
 
 - **The trailing-frame drain no longer runs on a pushed-page transport**

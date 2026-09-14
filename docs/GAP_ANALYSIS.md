@@ -5,14 +5,14 @@ Reviewed by: Adversarial Security Review Agent (2026-03-21); divelife bulk-seed 
 Repository: devnw/codepros/geode/geode-client-go
 Branch: `eng-4622/geode-go`. Each finding below names the commit that filed or
 closed it; `git log` is the authority, not a SHA copied into this header.
-Review type: Comprehensive adversarial security review (Round 6 - no new findings); BUG-0001 closed 2026-03-21; BUG-0002 filed 2026-06-17 (high-concurrency connection-establishment stall); GAP-SONNY806-01 and GAP-SONNY806-02 filed 2026-09-13 against engine 0.8.15; GAP-ENG4658-02 (pooled connections never verified with network I/O) closed 2026-09-13; GAP-SONNY806-04 filed and closed 2026-09-14 (gRPC paging — a DRIVER defect, Lane D Task 14/14b); GAP-SONNY806-05 and GAP-SONNY806-06 filed and closed 2026-09-14 (abandoned gRPC stream and the trailing-frame drain — both DRIVER defects, Lane D Task 14c); GAP-SONNY806-07 filed 2026-09-14 (ENGINE: a gRPC result stalls past ~64 KiB of pushed payload)
+Review type: Comprehensive adversarial security review (Round 6 - no new findings); BUG-0001 closed 2026-03-21; BUG-0002 filed 2026-06-17 (high-concurrency connection-establishment stall); GAP-SONNY806-01 and GAP-SONNY806-02 filed 2026-09-13 against engine 0.8.15; GAP-ENG4658-02 (pooled connections never verified with network I/O) closed 2026-09-13; GAP-SONNY806-04 filed and closed 2026-09-14 (gRPC paging — a DRIVER defect, Lane D Task 14/14b); GAP-SONNY806-05 and GAP-SONNY806-06 filed and closed 2026-09-14 (abandoned gRPC stream and the trailing-frame drain — both DRIVER defects, Lane D Task 14c); GAP-SONNY806-07 / SONNY-1560 filed 2026-09-14 (ENGINE: a gRPC result stalls past ~64 KiB of pushed payload)
 
 ## Summary
 
 Open findings by severity:
 
 - Critical: 1 (GAP-SONNY806-02 — engine cross-tenant read leak, filed 2026-09-13)
-- High: 1 (GAP-SONNY806-07 — engine stalls a gRPC result past ~64 KiB, filed 2026-09-14)
+- High: 1 (GAP-SONNY806-07 / SONNY-1560 — engine stalls a gRPC result past ~64 KiB, filed 2026-09-14)
 - Medium: 2 (GAP-SONNY806-01 — engine refuses `$param` in CALL arguments, filed 2026-09-13;
   GAP-SONNY806-03 — engine ignores the `--listen-grpc` bind address, filed 2026-09-14)
 - Low: 1 (BUG-0002 — downgraded 2026-06-17)
@@ -34,11 +34,12 @@ Top risks (remaining):
   driver cannot work around it. Reproducer:
   `TestIntegration_CrossTenantReadIsDenied` (currently RED by design).
 
-- **GAP-SONNY806-07 (High)** — geode 0.8.15 cannot finish pushing a gRPC result
-  larger than roughly 64 KiB. The stream stalls and stays stalled until a ~30 s
-  engine-side timeout, whatever the client does; the same query over QUIC
-  returns 50 000 rows in ~1.5 s. gRPC is therefore usable for SMALL results
-  only at this engine version, and QUIC remains the release transport.
+- **GAP-SONNY806-07 (High, engine ticket SONNY-1560)** — geode 0.8.15 cannot
+  finish pushing a gRPC result larger than roughly 64 KiB. The stream stalls
+  and stays stalled until a ~30 s engine-side timeout, whatever the client
+  does; the same query over QUIC returns 50 000 rows in ~1.5 s. gRPC is
+  therefore usable for SMALL results only at this engine version, and QUIC
+  remains the release transport.
 
 - **BUG-0002 (Low, downgraded)** — when a single `*sql.DB` opens MORE concurrent
   connections than the QUIC `pool_size` (default 16), multiple streams multiplex
@@ -52,10 +53,11 @@ Top risks (remaining):
 
 ## Open Findings
 
-### GAP-SONNY806-07: a gRPC result stalls after roughly 64 KiB of pushed payload
+### GAP-SONNY806-07 (SONNY-1560): a gRPC result stalls after roughly 64 KiB of pushed payload
 
 - **Severity:** High (functional cap on an entire transport; a caller sees a
   hang, then a context error, instead of its rows)
+- **Engine ticket:** SONNY-1560
 - **Component:** geode ENGINE 0.8.15 gRPC path / the vendored grpc-zig — **not
   the Go driver**. The driver is reading; grpc-go emits HTTP/2
   `WINDOW_UPDATE`s as the application consumes each page.
@@ -99,6 +101,24 @@ which is what makes grpc-go issue the updates in the first place.
 - It is also why cancelling an abandoned RPC (GAP-SONNY806-05) cannot make an
   oversized abandoned result cheap: the engine is parked inside its push loop
   and does not act on the client's `RST_STREAM` either.
+- **The blast radius crosses sessions, not just callers (SONNY-1560).** An
+  oversized result parks the ENGINE — not just the client's stream — inside
+  its push loop for the ~30 s engine-side timeout, and that park is scoped to
+  the engine's session handling, not to the one stalled RPC. While it is
+  parked, a **different session's** multi-statement transaction on the same
+  engine process can fail mid-way with `driver.ErrBadConn`, not just the
+  session that triggered the stall. Measured directly:
+  `TestIntegration_GRPCBatchExecPastOnePage` (647 statements, a different
+  session/connection than the stall) fails around statement 29 with
+  `driver.ErrBadConn` when it runs immediately after
+  `TestIntegration_GRPCLargePushedResultFailsLoudly`, and passes cleanly when
+  run alone; `waitForGRPCEngineToRecover`
+  (`integration_grpc_test.go`) exists solely to wait out the ~30-35 s the
+  engine needs before a NEW session's batched work is reliable again. A caller
+  that triggers one oversized gRPC result and then keeps issuing unrelated
+  work on other connections/sessions against the same engine should expect
+  that other work to fail for roughly 30 s, not just the query that
+  overflowed.
 
 **Requested engine change.** Process HTTP/2 `WINDOW_UPDATE` on the server side
 so a stream's flow-control window is replenished as the client consumes, and
@@ -392,7 +412,7 @@ the next one is already in flight on the same session poisons that session at
 0.8.15, and `TestIntegration_GRPCBatchExecPastOnePage` (647 statements in one
 transaction) then fails around statement 29 with `driver.ErrBadConn`. The
 engine appears to mishandle a `RST_STREAM` that arrives while it is taking up
-new work on the session — the same grpc-zig weakness GAP-SONNY806-07 asks to
+new work on the session — the same grpc-zig weakness GAP-SONNY806-07 (SONNY-1560) asks to
 have fixed. Cancelling rather than `markConnFailed` is deliberate: the RPC is
 per-`Execute`, so tearing it down leaves the session and the `ClientConn`
 usable and the connection stays poolable. Retiring it would trade a wedge for
@@ -401,7 +421,7 @@ an eviction and a re-dial on every early `Close`.
 **Measured, and the limit of the fix.** With a result the engine can finish
 pushing, an early `Close` now leaves the session usable immediately: the next
 statement on the same driver `Conn` answered in **0.65 ms** with the cancel
-versus 2.3 ms without. With a result past the GAP-SONNY806-07 ceiling neither
+versus 2.3 ms without. With a result past the GAP-SONNY806-07 (SONNY-1560) ceiling neither
 behaviour is usable — the engine is parked inside its push loop and ignores the
 client's `RST_STREAM`, so the next statement took **34 s** without the cancel
 and failed with `driver.ErrBadConn` after **30 s** with it. That is the
@@ -525,8 +545,13 @@ recovers in ~37 ms. The defect is specifically the ungraceful death — which is
 the one that happens in production.
 
 **Downstream impact.** `mentats/internal/geodegraph` carries a ~100-line
-watchdog (`geodegraph.go:36-81`) whose entire job is to work around this from
-outside the driver. It can now be deleted.
+watchdog, `poolWatchdog` (`geodegraph.go:36-81`), whose entire job is to work
+around this from outside the driver. It can now be retired once mentats picks
+up this driver's probing fix — gated on `>= v0.2.0`, the first tagged release
+that carries `(*QUICPool).Probe` — and not before: pinning an unreleased
+commit would tie mentats' dependency to a moving target. Owner: `@maintainers`
+(this driver's default CODEOWNERS entry) tracks the mentats-side removal
+alongside the v0.2.0 release.
 
 **Fix.** The pool verifies its connections with a real round trip and evicts
 what does not answer:

@@ -50,12 +50,29 @@ var errFakeUnused = errors.New("fakeGeodeClient: method not used by this test")
 // caller's context per Execute, keep its cancel, and fire it when the RPC is
 // superseded or abandoned.
 type fakeGeodeClient struct {
+	t        *testing.T
 	execCtxs []context.Context //nolint:containedctx // captured for assertion, never used to call
 }
 
+// Execute asserts the ordering guarantee at the point that matters: the
+// moment the NEXT Execute is dispatched, not merely by the time SendProto
+// eventually returns. SendProto fires the previous stream's cancel BEFORE
+// issuing this one (the "RST_STREAM ahead of the new request" ordering that
+// keeps engine 0.8.15's view of the session single-threaded,
+// GAP-SONNY806-07), so by the time this method runs, any earlier Execute's
+// context must already report done.
 func (c *fakeGeodeClient) Execute(
 	ctx context.Context, _ *proto.ExecuteRequest, _ ...grpc.CallOption,
 ) (grpc.ServerStreamingClient[proto.ExecutionResponse], error) {
+	if len(c.execCtxs) > 0 {
+		if prev := c.execCtxs[len(c.execCtxs)-1]; prev.Err() == nil {
+			c.t.Fatalf("Execute called for a new stream while the previous Execute's " +
+				"context is still live: the previous RPC must be cancelled BEFORE the " +
+				"next Execute is issued, or the engine keeps pushing pages into a window " +
+				"nobody drains and parks the push loop on the session mutex the new " +
+				"Execute needs (GAP-SONNY806-07)")
+		}
+	}
 	c.execCtxs = append(c.execCtxs, ctx)
 	return &fakeExecStream{}, nil
 }
@@ -105,8 +122,8 @@ func (*fakeGeodeClient) ControlCdc(
 // newFakeGRPCTransport returns a GRPCTransport wired to a fake client. conn is
 // left nil, so only Close (which dereferences it) is off limits; the Close
 // test builds a real lazy transport instead.
-func newFakeGRPCTransport() (*GRPCTransport, *fakeGeodeClient) {
-	fc := &fakeGeodeClient{}
+func newFakeGRPCTransport(t *testing.T) (*GRPCTransport, *fakeGeodeClient) {
+	fc := &fakeGeodeClient{t: t}
 	return &GRPCTransport{client: fc, addr: "fake://grpc"}, fc
 }
 
@@ -122,7 +139,7 @@ func execMsg() *proto.QuicClientMessage {
 // on pushing pages into a window nobody drained, holding the session mutex the
 // new Execute needed.
 func TestGRPCTransport_NextExecuteCancelsThePreviousStream(t *testing.T) {
-	tr, fc := newFakeGRPCTransport()
+	tr, fc := newFakeGRPCTransport(t)
 	ctx := context.Background()
 
 	if err := tr.SendProto(ctx, execMsg()); err != nil {
@@ -155,7 +172,7 @@ func TestGRPCTransport_NextExecuteCancelsThePreviousStream(t *testing.T) {
 // makes on a non-final close, including the repeat calls a double Close or a
 // Close-after-Close-on-a-fresh-transport produces.
 func TestGRPCTransport_CancelActiveStreamIsIdempotent(t *testing.T) {
-	tr, fc := newFakeGRPCTransport()
+	tr, fc := newFakeGRPCTransport(t)
 
 	// Safe before any Execute.
 	tr.CancelActiveStream()
@@ -194,7 +211,7 @@ func TestGRPCTransport_CloseCancelsTheActiveStream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewGRPCTransport: %v", err)
 	}
-	fc := &fakeGeodeClient{}
+	fc := &fakeGeodeClient{t: t}
 	tr.client = fc
 
 	if err := tr.SendProto(context.Background(), execMsg()); err != nil {
@@ -215,7 +232,7 @@ func TestGRPCTransport_CloseCancelsTheActiveStream(t *testing.T) {
 // errors.Is(err, context.Canceled) for every caller — the Task 9 contract that
 // Rows.abortOnCancel and rows.Err() depend on.
 func TestGRPCTransport_ReceiveProtoRejectsADoneContextBeforeReading(t *testing.T) {
-	tr, _ := newFakeGRPCTransport()
+	tr, _ := newFakeGRPCTransport(t)
 
 	recvCalls := 0
 	tr.execStream = &fakeExecStream{recv: func() (*proto.ExecutionResponse, error) {
