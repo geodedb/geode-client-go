@@ -193,7 +193,8 @@ type pooledConn struct {
 	// against maxStreams (HealthStatus.InFlightStreams) nor against
 	// maxStreamsPerConn (see DefaultMaxStreamsPerConn). A pooled connection
 	// therefore carries up to maxStreamsPerConn request streams PLUS one probe
-	// stream, plus at most probeStrikes abandoned ones.
+	// stream, plus at most probeStrikes abandoned streams (see abandoned: the
+	// connection is condemned the moment the list reaches that many).
 	probe Transport
 
 	// abandoned holds probe streams a failed probe walked away from.
@@ -206,11 +207,25 @@ type pooledConn struct {
 	// the next probe opens a fresh one, and every abandoned stream is closed
 	// together with the connection itself in discard / QUICPool.Close.
 	//
-	// The list is bounded by probeStrikes: a connection that has abandoned
-	// that many streams is condemned (recordProbeFailure), so at most
-	// probeStrikes of them can exist before the connection — and with it all
-	// of them — is closed. With probeStrikes=2 at most one abandoned stream
-	// exists before eviction. Guarded by mu.
+	// The list is bounded by probeStrikes, and the bound is enforced WHERE THE
+	// LIST GROWS: abandonProbe condemns the connection the moment appending
+	// reaches probeStrikes, so the list never holds more than probeStrikes
+	// streams and every one of them is closed with the connection itself.
+	//
+	// The bound is enforced here rather than only in recordProbeFailure
+	// because recordProbeFailure is not reached on every path that abandons:
+	// probeAll skips it when the ROUND's context ended after a legitimate
+	// failure had already abandoned a stream (probeCallerCancelled), and a
+	// success between failures clears the strike count. Either way the strike
+	// count can stay below the threshold while the list keeps growing.
+	//
+	// What the bound protects is the PEER's stream credit, not local memory.
+	// An abandoned stream is never closed and never FINished, so the server
+	// keeps its per-stream state and — under QUIC's MAX_STREAMS flow control —
+	// keeps the credit it issued for it charged against this connection. A
+	// connection that leaked one such stream per failure would eventually be
+	// unable to open the request streams it exists to carry, and the probe
+	// would have caused the outage it exists to detect. Guarded by mu.
 	abandoned []Transport
 
 	// probeOpener, when set, replaces the "open a stream on this connection"
@@ -585,6 +600,9 @@ func (p *QUICPool) pruneDeadLocked() {
 // behind that cannot be closed while the connection is still serving traffic
 // (see pooledConn.abandoned), so without this bound a connection that failed
 // and recovered over and over would leak one server-side stream per failure.
+// This is the SECOND place that bound is applied, not the only one: it is
+// enforced authoritatively in abandonProbe, where the list grows, because this
+// function is not reached on every path that abandons a stream.
 //
 // A probe that failed because the CALLER's context ended is not counted at
 // all: see probeAll.
@@ -823,6 +841,16 @@ func (p *QUICPool) probeAll(ctx context.Context, conns []*pooledConn) (HealthSta
 		// Pool.Health would otherwise condemn every connection in the pool in
 		// two calls, and take their probe streams with it.
 		if probeCallerCancelled(ctx, errs[i]) {
+			// Not a strike — but a connection this round already condemned
+			// still has to leave. A legitimate failure early in the round
+			// abandons a stream, and if some OTHER connection then burns the
+			// round's budget, this branch is where that failure lands. The
+			// abandoned-stream bound was applied where the list grew
+			// (abandonProbe); honouring it here is what turns "condemned" into
+			// "gone", so the streams it capped are actually closed.
+			if pc.isDead() {
+				dead = append(dead, pc)
+			}
 			continue
 		}
 		if pc.recordProbeFailure() {
@@ -980,7 +1008,11 @@ func (pc *pooledConn) probeStreamFailed(parent context.Context, err error) error
 	if parent.Err() != nil {
 		return err
 	}
-	pc.abandonProbe()
+	// The bound on the list this moves to is enforced inside abandonProbe, so
+	// it holds even when the caller of this probe never reaches
+	// recordProbeFailure. Whether this call condemned the connection is read
+	// back off pc.isDead by probeAll, which owns the eviction.
+	_ = pc.abandonProbe()
 	return err
 }
 
@@ -1058,16 +1090,39 @@ func (pc *pooledConn) probeTransport(ctx context.Context) (t Transport, fresh bo
 }
 
 // abandonProbe drops the probe stream WITHOUT closing it, so the next probe
-// opens a fresh one. See pooledConn.abandoned for why it is not closed, and
-// recordProbeFailure for what bounds the list it moves to.
-func (pc *pooledConn) abandonProbe() {
+// opens a fresh one, and condemns the connection if that reaches the
+// abandoned-stream bound. It reports whether this call condemned it.
+//
+// The bound is enforced HERE, where the list grows, and not only in
+// recordProbeFailure. recordProbeFailure is reached from one path — probeAll's
+// result loop — and that path skips it whenever the round's context ended
+// (probeCallerCancelled), which happens after a legitimate failure has already
+// abandoned a stream whenever some OTHER connection in the same round burns
+// the round's budget. A success between failures clears the strike count as
+// well. Either way the strike count stays below the threshold while the list
+// keeps growing, and the bound that makes "never close a live connection's
+// probe stream" affordable is silently not a bound at all.
+//
+// Condemning is the whole action taken here: the connection is marked dead, so
+// acquire's pruneDeadLocked and the next probe round both drop and discard it,
+// which closes every stream on this list. Removing it from the pool needs the
+// POOL's lock, which a pooledConn has no handle on — see QUICPool.probeAll and
+// QUICPool.evict.
+//
+// See pooledConn.abandoned for why an abandoned stream is not closed and what
+// the bound protects.
+func (pc *pooledConn) abandonProbe() bool {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 	if pc.probe == nil {
-		return
+		return false
 	}
 	pc.abandoned = append(pc.abandoned, pc.probe)
 	pc.probe = nil
+	if len(pc.abandoned) < probeStrikes {
+		return false
+	}
+	return pc.dead.CompareAndSwap(false, true)
 }
 
 // abandonedProbes reports how many probe streams this connection has walked

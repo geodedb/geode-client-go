@@ -622,13 +622,25 @@ func (f *fakeProbeStream) lastBudget(t *testing.T) time.Duration {
 type probeStreamFactory struct {
 	mu     sync.Mutex
 	opened []*fakeProbeStream
+
+	// sendErr, when set, is pre-loaded onto every stream this factory opens,
+	// so a replacement stream fails without the test having to reach in
+	// between two probes. Zero value: streams answer normally.
+	sendErr error
+
+	// wrap, when set, decorates each opened stream. A test uses it to gate a
+	// round trip on something it controls.
+	wrap func(*fakeProbeStream) Transport
 }
 
 func (pf *probeStreamFactory) open(context.Context) (Transport, error) {
 	pf.mu.Lock()
 	defer pf.mu.Unlock()
-	f := &fakeProbeStream{}
+	f := &fakeProbeStream{sendErr: pf.sendErr}
 	pf.opened = append(pf.opened, f)
+	if pf.wrap != nil {
+		return pf.wrap(f), nil
+	}
 	return f, nil
 }
 
@@ -987,5 +999,113 @@ func TestQUICPool_UnauthedConnsAreNotCountedLive(t *testing.T) {
 	h = qp.lastHealth()
 	if h.PooledConns != 2 || h.LiveConns != 1 {
 		t.Errorf("status = %+v, want 2 pooled and 1 live connection", h)
+	}
+}
+
+// gatedProbeStream is a fakeProbeStream whose send waits for something the
+// test controls before it goes through.
+type gatedProbeStream struct {
+	*fakeProbeStream
+	gate func()
+}
+
+func (g *gatedProbeStream) SendProto(ctx context.Context, m *proto.QuicClientMessage) error {
+	g.gate()
+	return g.fakeProbeStream.SendProto(ctx, m)
+}
+
+// TestQUICPool_AbandonedBoundHoldsWhenTheRoundIsCancelledAfterAFailure is the
+// Task 11 re-review finding: the abandoned-stream bound was evaluated only in
+// recordProbeFailure, which probeAll SKIPS whenever the round's context ended.
+//
+// A probe round covers every pooled connection at once. Connection A can fail
+// legitimately at t1 — abandoning a stream, as it must, because closing one on
+// a pooled connection is SONNY-1227 — and connection B can then burn the rest
+// of the round's budget, ending the round's context. A's failure now lands in
+// probeAll's caller-cancelled branch: no strike, no bound check, and A stays
+// pooled holding one more abandoned stream than before. Repeat, and the bound
+// that makes "never close a live connection's probe stream" affordable is not
+// a bound at all: A leaks one stream — and the peer's credit for it — per
+// failure, for the life of the connection.
+//
+// The bound therefore lives where the list GROWS (abandonProbe), so it holds
+// on every path that abandons. This test drives exactly that path and asserts
+// A is condemned at the bound rather than accumulating past it.
+func TestQUICPool_AbandonedBoundHoldsWhenTheRoundIsCancelledAfterAFailure(t *testing.T) {
+	qp := NewQUICPool(&Config{Host: constLocalhost, Port: "3141"}, 4)
+	t.Cleanup(func() { _ = qp.Close() })
+
+	// A fails every probe, and so abandons a stream every round.
+	failing := &probeStreamFactory{sendErr: errors.New("peer stopped answering")}
+	connA := &pooledConn{addr: "fake://a", probeOpener: failing.open}
+	connA.markAuthed("")
+
+	// B ends the ROUND's context, but only after A has already failed and
+	// abandoned — which is the ordering that produces the defect. cancelRound
+	// is rebound per round.
+	var cancelRound context.CancelFunc
+	var abandonedBefore int
+	slow := &probeStreamFactory{}
+	slow.wrap = func(f *fakeProbeStream) Transport {
+		return &gatedProbeStream{fakeProbeStream: f, gate: func() {
+			for connA.abandonedProbes() <= abandonedBefore {
+				time.Sleep(time.Millisecond)
+			}
+			cancelRound()
+		}}
+	}
+	connB := &pooledConn{addr: "fake://b", probeOpener: slow.open}
+	connB.markAuthed("")
+
+	qp.mu.Lock()
+	qp.conns = append(qp.conns, connA, connB)
+	qp.mu.Unlock()
+
+	// More rounds than the bound, so an unbounded list would grow past it.
+	for round := range probeStrikes * 3 {
+		if connA.isDead() {
+			break
+		}
+		abandonedBefore = connA.abandonedProbes()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancelRound = cancel
+		if err := qp.Probe(ctx); err == nil {
+			t.Fatalf("round %d: a failing connection produced no probe error", round)
+		}
+		cancel()
+
+		// The strike count is what the cancelled round declines to touch: the
+		// caller's cancellation is not evidence about A. Pinning it at zero is
+		// what proves the bound below is enforced by abandonProbe and not
+		// smuggled in by recordProbeFailure.
+		if got := connA.strikes.Load(); got != 0 {
+			t.Fatalf("round %d: cancelled round recorded %d strike(s) against A", round, got)
+		}
+		if got := connA.abandonedProbes(); got > probeStrikes {
+			t.Fatalf("round %d: A holds %d abandoned probe streams, bound is %d",
+				round, got, probeStrikes)
+		}
+	}
+
+	if !connA.isDead() {
+		t.Fatalf("A abandoned %d streams across cancelled rounds and was never condemned",
+			connA.abandonedProbes())
+	}
+	if pooledContains(qp, connA) {
+		t.Fatal("A hit the abandoned-stream bound but is still pooled")
+	}
+	for i := range failing.count() {
+		if !failing.nth(t, i).IsClosed() {
+			t.Errorf("A's abandoned stream %d was not closed when A was evicted", i)
+		}
+	}
+
+	// B did nothing wrong: a round it merely outlasted must not condemn it.
+	if connB.isDead() {
+		t.Error("the connection that ended the round was condemned for it")
+	}
+	if !pooledContains(qp, connB) {
+		t.Error("the connection that ended the round was evicted for it")
 	}
 }

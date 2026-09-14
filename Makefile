@@ -146,6 +146,10 @@ help:
 	@echo "  GEODE_GRPC_PORT     - Geode gRPC port (default: 50051)"
 	@echo "  GEODE_TEST_DSN      - DSN for manual server tests"
 	@echo "  GEODE_TEST_TENANT   - Tenant bound by the manual-lane DSN (default: it-harness)"
+	@echo "  GEODE_TEST_HOST_PORT - Pin the host UDP port the testcontainers engine publishes on"
+	@echo "                         (default: a free ephemeral port). Set it when the ephemeral"
+	@echo "                         range is unusable (restricted sandbox, firewalled host) or to"
+	@echo "                         keep two integration lanes off each other's port."
 	@echo "  FUZZ_TIME           - Fuzz test duration (default: 30s)"
 
 # =============================================================================
