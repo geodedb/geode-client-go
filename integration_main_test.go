@@ -39,23 +39,10 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// harnessTenant is the tenant the shared integration DSN binds.
-//
-// The harness runs the engine with GEODE_STRICT_TENANCY=1
-// (see the container Env below), under which a tenant-scoped statement from a
-// session whose resolved tenant is unset, empty, or the reserved "default"
-// sentinel is refused with GQLSTATE 42501 "Tenant scope required"
-// (geode src/execution/tenancy.zig:174-183 -> src/server/proto_util.zig:240).
-// Every data statement in this suite is tenant-scoped, so the shared DSN has to
-// carry a concrete scope or the whole lane is red.
-//
-// It is a compile-time constant, never interpolated from input:
-// CALL geode.tenant.create reads its arguments with literalString
-// (geode src/execution/tenant_dispatch.zig:191-196), so a $param raises
-// TypeMismatch and the id must be rendered into the statement text — keeping it
-// constant is what makes that safe. Same rule as tenantA/tenantB in
-// integration_tenancy_test.go and cancelTenant in integration_cancel_test.go.
-const harnessTenant = "it-harness"
+// harnessTenant is declared in harness_tenant_test.go, which carries no build
+// tag: that keeps it reachable from a plain `go test` (no Docker, no
+// `-tags=integration`) so TestHarnessTenant_MatchesMakefileAndCI can pin it as
+// the single source of truth against the Makefile and .gitlab-ci.yml defaults.
 
 // sharedDSN is the connection string used by every integration test.
 // Populated by TestMain before any test runs. In container mode it is bound to
@@ -193,9 +180,11 @@ func hostPortFromDSN(dsn string) string {
 }
 
 // ensureHarnessTenant registers harnessTenant with the engine using an
-// admin session on the unscoped dsn. Re-registering an existing tenant is a
-// benign error (the suite may run against a reused server in manual mode), so
-// only a failure to connect is fatal.
+// admin session on the unscoped dsn. Re-registering an existing tenant (the
+// suite may run against a reused server in manual mode) is the ONLY benign
+// outcome, recognised by isTenantAlreadyExists; every other failure —
+// including a connection failure — is fatal, so TestMain does not silently
+// proceed against a harness that never got its tenant.
 func ensureHarnessTenant(ctx context.Context, dsn string) error {
 	db, err := sql.Open("geode", dsn)
 	if err != nil {
@@ -208,8 +197,10 @@ func ensureHarnessTenant(ctx context.Context, dsn string) error {
 	}
 	if _, err := db.ExecContext(ctx,
 		"CALL geode.tenant.create('"+harnessTenant+"')"); err != nil {
-		log.Printf("integration: CALL geode.tenant.create(%q): %v (may already exist)",
-			harnessTenant, err)
+		if !isTenantAlreadyExists(err) {
+			return fmt.Errorf("CALL geode.tenant.create(%q): %w", harnessTenant, err)
+		}
+		log.Printf("integration: harness tenant %q already registered", harnessTenant)
 	}
 	return nil
 }

@@ -35,6 +35,10 @@
 //   - insecure: Skip TLS verification (testing only)
 //   - connect_timeout: Connection timeout in seconds (default: 0 = no timeout)
 //
+// A repeated option key resolves to its LAST occurrence, so a DSN can be
+// extended by appending overrides, e.g. base+"&tenant=override" always wins
+// over an earlier "&tenant=base" in the same string (SONNY-806).
+//
 // Environment variables:
 //   - GEODE_HOST: Default host if DSN is empty
 //   - GEODE_PORT: Default port if not specified

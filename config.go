@@ -341,6 +341,10 @@ func (c *Config) FormatDSN() string {
 //   - read_only: Refuse mutating statements (default: false, aliases: readonly, read-only)
 //   - strict_tenancy: Refuse to connect without a concrete tenant (default: false)
 //
+// A repeated option key resolves to its LAST occurrence, so a DSN can be
+// extended by appending overrides, e.g. base+"&tenant=override" always wins
+// over an earlier "&tenant=base" in the same string (SONNY-806).
+//
 // Environment variables:
 //   - GEODE_HOST: Default host if DSN is empty
 //   - GEODE_PORT: Default port if not specified

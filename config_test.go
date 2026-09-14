@@ -342,10 +342,14 @@ func TestParseDSN_Options(t *testing.T) {
 // shared base DSN ("base?...&tenant=it-harness" + "&tenant=tenant-a"), so the
 // right-most occurrence of a repeated key has to win. Taking the first would
 // silently discard every override and bind the wrong tenant, graph, or page
-// size while the DSN text read as if it had been overridden.
+// size while the DSN text read as if it had been overridden. role and ca are
+// added on top of that: they are not among the three options the integration
+// suite happens to override, so covering them pins last-occurrence-wins as a
+// rule for the whole options surface (ParseDSN's GoDoc), not a special case
+// of those three keys.
 func TestParseDSN_RepeatedParamTakesLastOccurrence(t *testing.T) {
-	cfg, err := ParseDSN("localhost:3141?tenant=base&graph=g1&page_size=100" +
-		"&tenant=override&graph=g2&page_size=250")
+	cfg, err := ParseDSN("localhost:3141?tenant=base&graph=g1&page_size=100&role=reader&ca=base.pem" +
+		"&tenant=override&graph=g2&page_size=250&role=admin&ca=override.pem")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -357,6 +361,15 @@ func TestParseDSN_RepeatedParamTakesLastOccurrence(t *testing.T) {
 	}
 	if cfg.PageSize != 250 {
 		t.Errorf("page_size = %d, want 250 (last occurrence must win)", cfg.PageSize)
+	}
+	// role and ca are neither tenant, graph, nor page_size: covering them pins
+	// the rule for the whole options surface, not just the three DSN pieces
+	// the integration suite happens to override.
+	if cfg.Role != "admin" {
+		t.Errorf("role = %q, want %q (last occurrence must win)", cfg.Role, "admin")
+	}
+	if cfg.TLSCA != "override.pem" {
+		t.Errorf("ca = %q, want %q (last occurrence must win)", cfg.TLSCA, "override.pem")
 	}
 }
 

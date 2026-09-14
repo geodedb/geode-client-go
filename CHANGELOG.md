@@ -52,3 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   type is rejected with an error instead of being silently formatted into a
   string.
 - Parameter names beginning with `_gq` are reserved by the driver and rejected.
+- `ParseDSN`: a DSN option repeated across the query string now resolves to
+  its LAST occurrence for every option, not the first, so a DSN can be
+  extended by appending overrides (e.g. a shared base DSN plus a per-call
+  `&tenant=...&graph=...`) (SONNY-806).
