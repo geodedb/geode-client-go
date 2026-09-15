@@ -63,14 +63,25 @@ const (
 	// receive-window memory.  A value of 1 reduces the pool to the old
 	// no-multiplex behaviour (one in-flight stream per connection).
 	//
-	// The liveness probe's stream is NOT counted here, nor against
-	// DefaultMaxStreams: it is opened directly on the pooled connection rather
-	// than through acquire, so a pooled connection carries up to this many
-	// REQUEST streams plus its own probe stream (see pooledConn.probe).
+	// The connection's ANCHOR stream and its liveness probe's stream are NOT
+	// counted here, nor against DefaultMaxStreams: both are opened directly on
+	// the pooled connection rather than through acquire, so a pooled connection
+	// carries up to this many REQUEST streams plus its anchor (see
+	// pooledConn.anchor) and its probe stream (see pooledConn.probe).
 	//
 	// Override via DSN `?max_streams_per_conn=N` (minimum 1).
 	DefaultMaxStreamsPerConn = 8
 )
+
+// anchorHandshakeTimeout bounds the anchor handshake when the caller set no
+// deadline of its own.
+//
+// dialLocked runs the handshake with the POOL LOCK held (the dial already was),
+// so a server that accepts a stream and then never answers the HELLO would
+// otherwise hold every other caller out of the pool forever. A DSN that sets
+// connect_timeout still wins: connectPooled applies it to the context before
+// acquire, and a context that already carries a deadline is left alone.
+const anchorHandshakeTimeout = 30 * time.Second
 
 // QUICPool manages a small pool of persistent QUIC connections.
 // Each database/sql Conn gets a new QUIC stream on a pooled connection,
@@ -232,6 +243,47 @@ type pooledConn struct {
 	// step of probeTransport. Tests use it to drive the probe state machine
 	// without a live QUIC connection; it is nil in production.
 	probeOpener func(ctx context.Context) (Transport, error)
+
+	// anchor is the stream that OWNS this QUIC connection (SONNY-1219).
+	//
+	// geode ties a connection's lifetime to the first stream opened on it:
+	// when the HELLO-bearing stream closes, the engine shuts the per-connection
+	// stream acceptor down and destroys the connection with CONNECTION_CLOSE
+	// code 0, killing every sibling multiplexed stream — including ones with a
+	// request in flight (geode src/server/quic_connection_handler.zig:3548-3589,
+	// triage 2026-09-15). A burst of 64 requests over a pool of 8 connections
+	// therefore resolved ok=8 err=56: exactly one stream per connection lived.
+	//
+	// So the pool opens its own stream FIRST, at dial time, performs the HELLO
+	// on it, and holds it open for the connection's whole life. Every request
+	// stream is then a sibling that may come and go freely, and no request's
+	// Close is ever the connection's death. The anchor is closed only when the
+	// connection itself goes away (discard / QUICPool.Close).
+	//
+	// Like the probe stream it is opened DIRECTLY on the pooled connection, not
+	// through acquire, so it consumes no admission slot and counts against
+	// neither maxStreams nor maxStreamsPerConn. It carries exactly one exchange
+	// — the HELLO — and after that nothing is ever written on it; the only
+	// reader is watchAnchor. Guarded by mu.
+	anchor Transport
+
+	// anchorClosed marks the anchor as closed BY US (discard, pool close), so
+	// the watcher can tell a local teardown from the peer dropping the stream.
+	anchorClosed atomic.Bool
+
+	// retiring is set when the connection has been condemned and taken out of
+	// the pool but may still be draining request streams. The last release
+	// closes it. See QUICPool.retire.
+	retiring atomic.Bool
+
+	// discardOnce makes discard idempotent: a retire and a drain-completing
+	// release can both reach it, and so can an eviction that raced them.
+	discardOnce sync.Once
+
+	// anchorOpener, when set, replaces the "open a stream on this connection"
+	// step of the anchor handshake. Tests use it to drive the anchor state
+	// machine without a live QUIC connection; it is nil in production.
+	anchorOpener func(ctx context.Context) (Transport, error)
 }
 
 // NewQUICPool creates a new QUIC connection pool for the given config.
@@ -461,8 +513,15 @@ func (p *QUICPool) release(pc *pooledConn) {
 	if pc == nil {
 		return
 	}
-	atomic.AddInt32(&pc.active, -1)
+	remaining := atomic.AddInt32(&pc.active, -1)
 	p.releaseSlot()
+
+	// A retired connection is out of the pool and waiting for its last stream:
+	// this may be it. See QUICPool.retire for the ordering that guarantees one
+	// of the two sides closes it.
+	if remaining <= 0 && pc.retiring.Load() {
+		pc.discard("drained after its anchor was lost")
+	}
 }
 
 // remove removes a dead connection from the pool so it won't be reused.
@@ -509,6 +568,10 @@ func (p *QUICPool) Close() error {
 
 	var firstErr error
 	for _, pc := range p.conns {
+		// The anchor is closed here and only here (and in discard): closing it
+		// while the connection is still in service is the teardown it exists to
+		// prevent. Marking it as OUR close keeps its watcher quiet.
+		pc.closeAnchor()
 		pc.closeProbeStreams()
 		// nil-safe: a pool assembled by a test fixture may hold connections
 		// with no quic.Conn behind them, and Close must still be callable.
@@ -555,8 +618,176 @@ func (p *QUICPool) dialLocked(ctx context.Context) (*pooledConn, error) {
 		qConn: qConn,
 		addr:  addr,
 	}
+
+	// Anchor the connection BEFORE it joins the pool: a connection whose
+	// handshake failed is not a pooled connection, and one that joined the pool
+	// unanchored would hand its first request stream the ownership the anchor
+	// exists to take away (SONNY-1219).
+	if err := p.anchorConn(ctx, pc); err != nil {
+		_ = qConn.CloseWithError(0, "anchor handshake failed")
+		return nil, err
+	}
+
 	p.conns = append(p.conns, pc)
 	return pc, nil
+}
+
+// anchorConn opens this connection's anchor stream, performs the HELLO on it,
+// and leaves it open with a watcher reading it.
+//
+// After this returns the connection is authenticated for EVERY stream on it —
+// geode authenticates the connection, not the stream — so pooledHello becomes a
+// pure fast path for every request stream (see pooledConn.anchor).
+func (p *QUICPool) anchorConn(ctx context.Context, pc *pooledConn) error {
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, anchorHandshakeTimeout)
+		defer cancel()
+	}
+
+	t, err := pc.openAnchor(ctx)
+	if err != nil {
+		return err
+	}
+
+	resp, err := sendHello(ctx, p.cfg, t)
+	if err != nil {
+		// Nothing was authenticated, and the caller is about to close the QUIC
+		// connection; the anchor goes with it.
+		pc.closeAnchor()
+		return err
+	}
+
+	pc.markAuthedHello(resp.GetGraph(), resp.GetSessionId(), resp.GetCapabilities())
+
+	// The watcher must OUTLIVE this call: the anchor is held for the pooled
+	// connection's whole life, long after the dial context that created it is
+	// done. Inheriting that context would cancel the watch the moment the
+	// caller who happened to dial went away, and with it the only signal that
+	// the peer dropped the anchor. watchAnchor uses a plain Background context
+	// for the same reason, and because a cancellable one would arm a read
+	// deadline on the stream (see watchAnchor).
+	//nolint:gosec // G118: the anchor watch is connection-scoped, not request-scoped
+	go p.watchAnchor(pc, t)
+	return nil
+}
+
+// openAnchor opens the anchor stream and records it. It is called exactly once
+// per connection, from dialLocked, before the connection is reachable by
+// anything else.
+func (pc *pooledConn) openAnchor(ctx context.Context) (Transport, error) {
+	if opener := pc.anchorOpener; opener != nil {
+		t, err := opener(ctx)
+		if err != nil {
+			return nil, err
+		}
+		pc.setAnchor(t)
+		return t, nil
+	}
+
+	stream, err := pc.openStream(ctx)
+	if err != nil {
+		return nil, err
+	}
+	t := &QUICTransport{
+		pc:       pc,
+		stream:   stream,
+		rdStream: stream,
+		br:       bufio.NewReaderSize(stream, quicReadBufferSize),
+		addr:     pc.addr,
+	}
+	pc.setAnchor(t)
+	return t, nil
+}
+
+func (pc *pooledConn) setAnchor(t Transport) {
+	pc.mu.Lock()
+	pc.anchor = t
+	pc.mu.Unlock()
+}
+
+// closeAnchor closes the anchor stream and records that WE closed it, so the
+// watcher does not read its own teardown as a peer failure.
+//
+// It runs only when the connection itself is going away (discard,
+// QUICPool.Close) or when the handshake on it failed: closing the anchor on a
+// live pooled connection is exactly the teardown this whole mechanism exists to
+// prevent.
+func (pc *pooledConn) closeAnchor() {
+	pc.anchorClosed.Store(true)
+	pc.mu.Lock()
+	t := pc.anchor
+	pc.anchor = nil
+	pc.mu.Unlock()
+	if t != nil {
+		_ = t.Close()
+	}
+}
+
+// isRetiring reports whether this connection has been condemned and taken out
+// of the pool, whether or not its last stream has drained yet.
+func (pc *pooledConn) isRetiring() bool { return pc.retiring.Load() }
+
+// watchAnchor is the anchor's only reader. It parks on the stream for the
+// connection's whole life and never writes to it.
+//
+// Nothing is expected to arrive: the HELLO exchange is over and no request ever
+// rides the anchor. So ANY return — a frame, a reset, an EOF — means the anchor
+// is no longer holding this connection open, and the connection must not be
+// handed out again. That is the signal the pool could not otherwise get: the
+// engine tears a connection down with CONNECTION_CLOSE code 0 and no reason
+// string, and a local liveness check (isQUICConnAlive) cannot see a stream the
+// peer dropped while the connection itself still looks alive.
+//
+// The read uses a context with no deadline and no cancellation on purpose.
+// ReceiveProto arms a read deadline on the stream only when ctx.Done() is
+// non-nil (transport.go), so a plain Background context means the anchor arms
+// no deadline, writes no frame, and keeps no timer alive: QUIC idle detection
+// (quicMaxIdleTimeout with quicKeepAlivePeriod keep-alives) and the health
+// probe remain exactly as they were. The watcher exits when the stream is
+// closed, which discard and QUICPool.Close both do.
+func (p *QUICPool) watchAnchor(pc *pooledConn, t Transport) {
+	_, err := t.ReceiveProto(context.Background())
+
+	if pc.anchorClosed.Load() {
+		// We closed it: the connection is already on its way out.
+		return
+	}
+	if p.isClosed() {
+		return
+	}
+	reason := "anchor stream closed by peer"
+	if err != nil {
+		reason = "anchor stream lost: " + err.Error()
+	}
+	p.retire(pc, reason)
+}
+
+// retire condemns a pooled connection and drains it: it leaves the pool
+// immediately, so acquire can never hand it out again, and it is closed as soon
+// as its last in-flight request stream finishes.
+//
+// Draining rather than closing outright is the difference between this and a
+// failed liveness probe. A probe failure says the peer is not answering at all,
+// so the streams riding it are already lost and closing them early is a
+// kindness. A lost ANCHOR says only that the connection has lost its owner: the
+// requests already in flight may still complete, and killing them would turn a
+// recoverable event into the very burst of failures this change exists to
+// prevent.
+func (p *QUICPool) retire(pc *pooledConn, reason string) {
+	if pc == nil || !pc.retiring.CompareAndSwap(false, true) {
+		return
+	}
+	pc.dead.Store(true)
+	p.remove(pc)
+
+	// Ordering with release: retiring is stored before active is read here,
+	// while release decrements active before reading retiring. Go's atomics are
+	// sequentially consistent, so at least one of the two sees the other and
+	// the connection is always closed exactly once (discardOnce).
+	if atomic.LoadInt32(&pc.active) <= 0 {
+		pc.discard(reason)
+	}
 }
 
 // pruneDeadLocked removes connections that are no longer usable — those whose
@@ -634,16 +865,24 @@ func (pc *pooledConn) isDead() bool {
 	return pc.qConn != nil && !isQUICConnAlive(pc.qConn)
 }
 
-// discard closes this connection for good: its probe stream first, then the
-// QUIC connection itself. Any stream still in flight on it dies with it, which
+// discard closes this connection for good: its anchor and probe streams first,
+// then the QUIC connection itself. Any stream still in flight on it dies with it, which
 // is the point — after a failed probe those streams are riding a peer that did
 // not answer, and leaving them alone means every one of their callers waits out
 // its own full deadline. That is the defect this whole path exists to fix.
+//
+// It is idempotent: a retire, the release that drains it, and an eviction can
+// all reach the same connection.
 func (pc *pooledConn) discard(reason string) {
-	pc.closeProbeStreams()
-	if pc.qConn != nil {
-		_ = pc.qConn.CloseWithError(0, reason)
-	}
+	pc.discardOnce.Do(func() {
+		// The anchor first, and marked as OUR close, so its watcher does not
+		// report this teardown as a peer failure (see watchAnchor).
+		pc.closeAnchor()
+		pc.closeProbeStreams()
+		if pc.qConn != nil {
+			_ = pc.qConn.CloseWithError(0, reason)
+		}
+	})
 }
 
 // isQUICConnAlive checks if a QUIC connection is still usable by inspecting

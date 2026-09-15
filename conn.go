@@ -280,8 +280,18 @@ func connectPooled(ctx context.Context, cfg *Config, pool *QUICPool) (*Conn, err
 	return conn, nil
 }
 
-// pooledHello performs the HELLO handshake if this is the first stream on the
-// QUIC connection. Uses double-checked locking to ensure exactly one HELLO.
+// pooledHello adopts the pooled connection's HELLO state onto this logical
+// connection.
+//
+// Since SONNY-1219 the handshake itself belongs to the connection's ANCHOR
+// stream, performed at dial time (QUICPool.anchorConn), so for every pooled
+// connection this is a pure fast path: no request stream is ever the connection
+// owner, and a request stream closing can no longer take the connection — and
+// its siblings — down with it.
+//
+// The handshake below remains for a pooled connection that arrived without an
+// anchor (a pool assembled directly by a test fixture). It keeps the
+// double-checked lock on pc.authed so even then exactly one HELLO runs.
 func pooledHello(ctx context.Context, conn *Conn, transport *QUICTransport, pool *QUICPool) error {
 	if transport.pc.isAuthed() {
 		conn.adoptHelloState(transport.pc)
@@ -479,34 +489,63 @@ func (c *Conn) execInit(ctx context.Context, query string) error {
 // are recorded on the Conn (helloCaps, boundGraph, sessionID) before it
 // returns, so a Conn always carries the handshake it performed.
 func (c *Conn) hello(ctx context.Context) (*proto.HelloResponse, error) {
-	req := &proto.HelloRequest{
-		Username:          c.cfg.Username,
-		Password:          c.cfg.Password,
-		ClientName:        c.cfg.HelloName,
-		ClientVersion:     c.cfg.HelloVersion,
-		WantedConformance: c.cfg.Conformance,
+	helloResp, err := sendHello(ctx, c.cfg, c.transport)
+	if err != nil {
+		return nil, err
 	}
-	if c.cfg.Graph != "" {
-		graph := c.cfg.Graph
+
+	// Copy the capability slice: the response message is owned by the
+	// transport decode path and must not be aliased past this call.
+	c.helloCaps = append([]string(nil), helloResp.GetCapabilities()...)
+	c.boundGraph = helloResp.GetGraph()
+	c.sessionID = helloResp.GetSessionId()
+
+	return helloResp, nil
+}
+
+// wrapHelloRecv wraps a failure to read the HELLO response. It is a function
+// rather than an inline fmt.Errorf so the anchor path and the tests that assert
+// on this shape all agree on one spelling.
+func wrapHelloRecv(err error) error {
+	return fmt.Errorf("failed to receive HELLO response: %w", err)
+}
+
+// sendHello performs the HELLO handshake on an arbitrary transport and returns
+// the server's response.
+//
+// It is deliberately independent of *Conn: the pool's ANCHOR stream
+// (QUICPool.anchorConn) performs the handshake for a whole pooled QUIC
+// connection before any *Conn exists on it, and must produce exactly the same
+// request and the same errors as a standalone connection's handshake.
+func sendHello(ctx context.Context, cfg *Config, transport Transport) (*proto.HelloResponse, error) {
+	req := &proto.HelloRequest{
+		Username:          cfg.Username,
+		Password:          cfg.Password,
+		ClientName:        cfg.HelloName,
+		ClientVersion:     cfg.HelloVersion,
+		WantedConformance: cfg.Conformance,
+	}
+	if cfg.Graph != "" {
+		graph := cfg.Graph
 		req.Graph = &graph
 	}
-	if c.cfg.Tenant != "" {
-		tenant := c.cfg.Tenant
+	if cfg.Tenant != "" {
+		tenant := cfg.Tenant
 		req.TenantId = &tenant
 	}
-	if c.cfg.Role != "" {
-		role := c.cfg.Role
+	if cfg.Role != "" {
+		role := cfg.Role
 		req.Role = &role
 	}
 	msg := proto.NewHelloMessage(req)
-	if err := c.transport.SendProto(ctx, msg); err != nil {
+	if err := transport.SendProto(ctx, msg); err != nil {
 		return nil, fmt.Errorf("failed to send HELLO: %w", err)
 	}
 
 	// Read and validate HELLO response
-	resp, err := c.transport.ReceiveProto(ctx)
+	resp, err := transport.ReceiveProto(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to receive HELLO response: %w", err)
+		return nil, wrapHelloRecv(err)
 	}
 
 	helloResp := resp.GetHello()
@@ -520,12 +559,6 @@ func (c *Conn) hello(ctx context.Context) (*proto.HelloResponse, error) {
 			Message: helloResp.GetErrorMessage(),
 		}
 	}
-
-	// Copy the capability slice: the response message is owned by the
-	// transport decode path and must not be aliased past this call.
-	c.helloCaps = append([]string(nil), helloResp.GetCapabilities()...)
-	c.boundGraph = helloResp.GetGraph()
-	c.sessionID = helloResp.GetSessionId()
 
 	return helloResp, nil
 }

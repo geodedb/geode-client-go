@@ -25,9 +25,19 @@ gate on tagging v0.2.0:
   (Critical): geode 0.8.15 does not apply the session tenant filter on the
   `MATCH` read path, so tenant binding is not an isolation boundary. Engine
   fix required; the driver cannot work around it.
-- `TestLoad_BurstExceedsPoolSize_NoDeadlock` — SONNY-1219 / BUG-0002 (Low):
-  more concurrent connections than `pool_size` intermittently time out
-  (~0.06%).
+- `TestLoad_BurstExceedsPoolSize_NoDeadlock` — SONNY-1219 (High, ENGINE
+  defect). Triaged 2026-09-15 against the pinned 0.8.15 image and against
+  engine main: geode ties a QUIC connection's lifetime to the FIRST stream
+  opened on it, so when the HELLO-bearing stream closes the engine shuts the
+  per-connection stream acceptor down and destroys the connection with
+  `CONNECTION_CLOSE` code 0 (NO_ERROR), killing every sibling multiplexed
+  stream — including ones with a request in flight
+  (`src/server/quic_connection_handler.zig:3548-3589`,
+  `src/transport/quic.zig:1176`). A burst of 64 over `pool_size=16` resolved
+  `ok=8 err=56`: exactly one stream per QUIC connection survived. The earlier
+  "~0.06% intermittent timeout" reading of this test was wrong. The driver now
+  mitigates it with an anchor stream (see Fixed below); the engine fix is
+  required for a green `ok=64`.
 - `TestMultiplex_FindCreate_And_Merge_NoWedge` — asserts a throughput floor
   and fails on a loaded host; a measurement bound, not a correctness defect.
 
@@ -310,6 +320,34 @@ measurement.
   (SONNY-806).
 
 ### Fixed
+
+- **Each pooled QUIC connection is anchored on its own HELLO stream, so a
+  finished request no longer takes the connection down with it** (SONNY-1219).
+  geode makes the first stream on a connection the connection's owner: when it
+  closes, the engine destroys the whole connection and every sibling stream
+  dies with `NO_ERROR (remote)`. With `MaxIdleConns=0` every `sql.Conn` closes
+  right after its query, so the first request stream on each pooled connection
+  closed almost immediately and took its seven siblings with it — a burst of 64
+  requests over 8 dialed connections returned `ok=8 err=56`.
+
+  `QUICPool.dialLocked` now opens a dedicated **anchor stream** the moment a
+  connection is dialed, performs the HELLO on it, and holds it open for the
+  connection's whole life (`quic_pool.go`, `pooledConn.anchor`). Every request
+  stream is a sibling that may come and go freely, and no request's `Close` is
+  ever the connection's death. The anchor is opened directly on the connection,
+  so it consumes no admission slot and counts against neither `max_streams` nor
+  `max_streams_per_conn`; it carries exactly one exchange, the HELLO, and after
+  that only a watcher reads it. `pooledHello` is therefore a pure fast path for
+  every request stream, which also removes the burst of up-to-8 concurrent
+  redundant HELLOs a freshly dialed connection used to see.
+
+  The watcher is the health half (Task 11): the peer closing or resetting the
+  anchor condemns the connection, takes it out of the pool at once so `acquire`
+  can never hand it out again, and DRAINS it — the QUIC connection is closed
+  when its last in-flight request stream finishes, not under it. The watcher
+  reads with a context that carries no deadline and no cancellation, so it arms
+  no read deadline and writes no frame: QUIC idle detection and the health
+  probe behave exactly as before.
 
 - **An abandoned gRPC result no longer wedges the next statement on the same
   session** (SONNY-806). Closing a `Rows` before its final page — with a
