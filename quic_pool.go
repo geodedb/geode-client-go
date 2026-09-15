@@ -145,6 +145,14 @@ type QUICPool struct {
 	// engine without hurting the engine; it is zero in production.
 	probeBudgetOverride atomic.Int64
 
+	// anchorWatchDone, when non-nil, receives once for every watchAnchor
+	// goroutine that returns. It exists so a test can JOIN the watcher instead
+	// of sleeping and hoping: the interesting assertion after a local close is
+	// that the watcher decided NOT to condemn the connection, and that decision
+	// is only final once the goroutine is gone. The send is non-blocking, so a
+	// full or unread channel never holds a watcher up. Nil in production.
+	anchorWatchDone chan struct{}
+
 	// slotsCh is a counting semaphore bounding in-flight streams.  Capacity
 	// equals maxStreams; tokens are consumed by acquireSlot and returned
 	// by releaseSlot.  Pre-populated at construction so the channel acts
@@ -744,9 +752,20 @@ func (pc *pooledConn) isRetiring() bool { return pc.retiring.Load() }
 // non-nil (transport.go), so a plain Background context means the anchor arms
 // no deadline, writes no frame, and keeps no timer alive: QUIC idle detection
 // (quicMaxIdleTimeout with quicKeepAlivePeriod keep-alives) and the health
-// probe remain exactly as they were. The watcher exits when the stream is
-// closed, which discard and QUICPool.Close both do.
+// probe remain exactly as they were.
+//
+// What unblocks the read is the CONNECTION going away, not the stream close
+// that precedes it: closeAnchor calls Transport.Close, and for a QUICTransport
+// that is quic.Stream.Close, which shuts the SEND side only and leaves a parked
+// read parked. Both callers of closeAnchor follow it with
+// qConn.CloseWithError — discard directly, QUICPool.Close in the same loop —
+// and that is what returns this read. (A pool assembled without a quic.Conn,
+// i.e. a test fixture, has its fake stream return on Close instead.)
 func (p *QUICPool) watchAnchor(pc *pooledConn, t Transport) {
+	// Deferred so the signal lands AFTER retire (or the decision not to
+	// retire), which is what a joining test needs to observe.
+	defer p.signalAnchorWatchDone()
+
 	_, err := t.ReceiveProto(context.Background())
 
 	if pc.anchorClosed.Load() {
@@ -761,6 +780,19 @@ func (p *QUICPool) watchAnchor(pc *pooledConn, t Transport) {
 		reason = "anchor stream lost: " + err.Error()
 	}
 	p.retire(pc, reason)
+}
+
+// signalAnchorWatchDone reports one watchAnchor goroutine's exit to a test that
+// asked to be told. It never blocks: production leaves the channel nil, and a
+// test that stopped listening must not wedge a watcher.
+func (p *QUICPool) signalAnchorWatchDone() {
+	if p.anchorWatchDone == nil {
+		return
+	}
+	select {
+	case p.anchorWatchDone <- struct{}{}:
+	default:
+	}
 }
 
 // retire condemns a pooled connection and drains it: it leaves the pool
@@ -794,6 +826,22 @@ func (p *QUICPool) retire(pc *pooledConn, reason string) {
 // local quic.Conn has gone away AND those a liveness probe found orphaned. The
 // second class is the one acquire could not see before: an orphaned connection
 // looks perfectly alive locally.
+//
+// Leaving the pool and being CLOSED are two different things here, and the
+// difference is what keeps a retired connection's requests alive. retire
+// condemns in two steps that are not atomic against this lock: it stores
+// pc.dead and only then queues for p.mu in remove. A goroutine already holding
+// p.mu — every acquire does — runs this prune inside that window and finds
+// isDead() true for a connection that is merely DRAINING. Discarding it there
+// would close qConn under the request streams still in flight: the yank retire
+// exists to avoid (SONNY-1219 review, F1). Reordering retire would not help,
+// because isDead() also turns true on its own the moment the peer cancels the
+// QUIC connection's context.
+//
+// So a retiring connection with in-flight streams is dropped from the pool (it
+// must never be handed out again) but NOT discarded. Its last release closes
+// it — see release and retire for the ordering that guarantees exactly one
+// side does.
 // Must be called with p.mu held.
 func (p *QUICPool) pruneDeadLocked() {
 	alive := p.conns[:0]
@@ -813,6 +861,15 @@ func (p *QUICPool) pruneDeadLocked() {
 	p.conns = alive
 
 	for _, pc := range dropped {
+		if pc.isRetiring() {
+			// Condemned by retire, not by a probe. Still draining: leave the
+			// close to the release that finishes the last stream.
+			if atomic.LoadInt32(&pc.active) > 0 {
+				continue
+			}
+			pc.discard("retired after its anchor was lost")
+			continue
+		}
 		pc.discard("failed liveness probe")
 	}
 }

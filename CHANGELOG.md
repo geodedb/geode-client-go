@@ -353,6 +353,17 @@ measurement.
   no read deadline and writes no frame: QUIC idle detection and the health
   probe behave exactly as before.
 
+  The drain is enforced in the PRUNE as well, not only in `retire`. `retire`
+  condemns in two steps that are not atomic against the pool lock — it stores
+  `pc.dead`, then queues for `p.mu` in `remove` — so a goroutine already holding
+  the lock ran `acquire` → `pruneDeadLocked` inside that window, saw `isDead()`
+  report true for a merely draining connection and discarded it, closing the
+  QUIC connection under the request streams still in flight. Reordering `retire`
+  would not have closed it: `isDead()` also turns true on its own once the peer
+  cancels the connection's context. `pruneDeadLocked` now drops a retiring
+  connection from the pool but leaves the close to the release that finishes its
+  last stream, and reports it as retired rather than as a failed liveness probe.
+
 - **A connection-level HELLO failure reaches `database/sql` as
   `driver.ErrBadConn`, so it re-dials instead of failing the caller**
   (SONNY-1219). `Connector.Connect` returned the raw `*TransportError`, and

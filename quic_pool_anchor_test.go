@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -220,6 +221,10 @@ func newAnchorTestPool(t *testing.T) (*QUICPool, *pooledConn, *anchorStreamFacto
 	t.Helper()
 	af := &anchorStreamFactory{}
 	p := NewQUICPool(anchorTestCfg(), 4)
+	// Set before any watcher starts: lets a test join watchAnchor's exit
+	// instead of sleeping. Buffered and sent to non-blockingly, so tests that
+	// never read it are unaffected.
+	p.anchorWatchDone = make(chan struct{}, 1)
 	pc := &pooledConn{addr: "fake://anchor", anchorOpener: af.open}
 	t.Cleanup(func() {
 		_ = p.Close()
@@ -420,8 +425,14 @@ func TestAnchor_LocalCloseDoesNotCondemn(t *testing.T) {
 	pc.discard("test close")
 
 	anchorEventually(t, "the anchor stream to be closed", anchor.IsClosed)
-	// Give the watcher a moment to (wrongly) react.
-	time.Sleep(50 * time.Millisecond)
+
+	// Join the watcher rather than sleeping: its verdict is only final once the
+	// goroutine has returned.
+	select {
+	case <-p.anchorWatchDone:
+	case <-time.After(anchorTestBudget):
+		t.Fatal("the anchor watcher did not exit after the local close")
+	}
 	if pc.isRetiring() {
 		t.Error("a locally closed anchor was reported as a peer failure")
 	}
@@ -449,4 +460,71 @@ func TestAnchor_WatcherDoesNotArmDeadlines(t *testing.T) {
 	if ctx.Done() != nil {
 		t.Error("the anchor watcher read with a cancellable context; ReceiveProto would arm a read deadline")
 	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A draining connection survives the liveness prune
+// ─────────────────────────────────────────────────────────────────────────────
+
+// retire condemns a connection in two steps that are NOT atomic against the
+// pool lock: pc.dead is stored first, and only then does p.remove(pc) queue for
+// p.mu. Any goroutine already holding p.mu runs acquire → pruneDeadLocked in
+// that window, sees isDead() report true for a connection that is merely
+// DRAINING, and discards it — closing qConn under the request streams still in
+// flight. That is exactly the yank retire exists to avoid, and swapping the two
+// statements in retire would not close it: isDead() also turns true on its own
+// once the peer cancels the QUIC connection's context.
+//
+// So the prune itself must know the difference: a retiring connection with
+// in-flight streams leaves the pool but is never discarded there. Its last
+// release closes it.
+func TestPrune_NeverDiscardsADrainingConnection(t *testing.T) {
+	p, pc, af := newAnchorTestPool(t)
+	if err := p.anchorConn(t.Context(), pc); err != nil {
+		t.Fatalf("anchorConn: %v", err)
+	}
+	p.mu.Lock()
+	p.conns = append(p.conns, pc)
+	p.mu.Unlock()
+
+	// One request stream in flight on this connection.
+	if err := p.acquireSlot(t.Context()); err != nil {
+		t.Fatalf("acquireSlot: %v", err)
+	}
+	atomic.StoreInt32(&pc.active, 1)
+
+	anchor := af.first(t)
+
+	// Hold the pool lock for the whole window: retire's p.remove cannot get in,
+	// which is precisely the state every acquire runs in.
+	p.mu.Lock()
+	go p.retire(pc, "anchor stream lost: test")
+
+	deadline := time.Now().Add(anchorTestBudget)
+	for !pc.dead.Load() && time.Now().Before(deadline) {
+		runtime.Gosched()
+	}
+	condemned := pc.dead.Load()
+	if condemned {
+		// What acquire does next, with the connection condemned but not yet
+		// removed.
+		p.pruneDeadLocked()
+	}
+	stillPooled := len(p.conns)
+	p.mu.Unlock()
+
+	if !condemned {
+		t.Fatal("retire never condemned the connection; the race window was not reached")
+	}
+	if anchor.IsClosed() {
+		t.Fatal("the prune discarded a DRAINING connection: its anchor was closed " +
+			"while a request stream was still in flight")
+	}
+	if stillPooled != 0 {
+		t.Errorf("a condemned connection must leave the pool: %d still pooled", stillPooled)
+	}
+
+	// The drain still owns the close: the last release ends the connection.
+	p.release(pc)
+	anchorEventually(t, "the drained connection to be closed by its last release", anchor.IsClosed)
 }
