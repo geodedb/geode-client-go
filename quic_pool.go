@@ -69,6 +69,20 @@ const (
 	// carries up to this many REQUEST streams plus its anchor (see
 	// pooledConn.anchor) and its probe stream (see pooledConn.probe).
 	//
+	// That reservation sets an EFFECTIVE CEILING on the configured value. The
+	// engine accepts at most 65 concurrent streams on one QUIC connection
+	// (engine fact at 0.8.15), and the driver spends two of them on every
+	// pooled connection — the anchor for the connection's whole life, the probe
+	// stream from its first liveness check onwards — so the highest usable
+	// `max_streams_per_conn` is 63. Set higher, the request streams past that
+	// point are refused by the peer rather than multiplexed. The default of 8
+	// is far below it.
+	//
+	// The ceiling is documented rather than clamped deliberately: 65 is an
+	// ENGINE fact pinned to 0.8.15, and a driver-side clamp would go on
+	// silently contradicting a DSN that a newer engine could honour. A caller
+	// tuning this high is already reading this comment.
+	//
 	// Override via DSN `?max_streams_per_conn=N` (minimum 1).
 	DefaultMaxStreamsPerConn = 8
 )

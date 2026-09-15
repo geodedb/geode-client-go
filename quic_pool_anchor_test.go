@@ -528,3 +528,97 @@ func TestPrune_NeverDiscardsADrainingConnection(t *testing.T) {
 	p.release(pc)
 	anchorEventually(t, "the drained connection to be closed by its last release", anchor.IsClosed)
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The anchor's admission cost, and dialLocked's anchor-failure path
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// These drive anchorConn, which is the whole of dialLocked's anchor half. The
+// two statements they cannot reach are dialLocked's own: the quic.DialAddr
+// above anchorConn and the qConn.CloseWithError(0, "anchor handshake failed")
+// below it. Both need a LIVE QUIC listener — there is no fake one in this
+// repo, and no seam to inject a dialer through: dialLocked calls quic.DialAddr
+// directly. Every other pool test is in the same position, which is why they
+// all assemble pooledConns by hand. The behaviour those two statements produce
+// is asserted against a real engine by the integration lane; what is unit-
+// testable — that a failed handshake leaves no pooled connection behind, closes
+// its anchor, and costs the pool nothing — is asserted here.
+
+// The anchor is opened directly on the connection, never through acquire, so it
+// must consume no admission slot: not against max_streams (the semaphore) and
+// not against max_streams_per_conn (pc.active, which is what counts() reports).
+func TestAnchor_ConsumesNoAdmissionSlot(t *testing.T) {
+	p, pc, _ := newAnchorTestPool(t)
+
+	slotsBefore := len(p.slotsCh)
+	if slotsBefore == 0 {
+		t.Fatal("the test pool has no admission slots to spend")
+	}
+
+	if err := p.anchorConn(t.Context(), pc); err != nil {
+		t.Fatalf("anchorConn: %v", err)
+	}
+	p.mu.Lock()
+	p.conns = append(p.conns, pc)
+	p.mu.Unlock()
+
+	if got := len(p.slotsCh); got != slotsBefore {
+		t.Errorf("the anchor spent an admission slot: %d available, want %d", got, slotsBefore)
+	}
+	pooled, inFlight := p.counts()
+	if pooled != 1 {
+		t.Errorf("pooled = %d, want 1", pooled)
+	}
+	if inFlight != 0 {
+		t.Errorf("the anchor was counted as an in-flight request stream: inFlight = %d, want 0", inFlight)
+	}
+}
+
+// A failed anchor handshake is dialLocked's error return: the connection never
+// joins p.conns, its anchor is closed, and the pool's admission budget is
+// exactly where it was — a caller whose dial failed must not have leaked a slot
+// that the next one then waits for.
+func TestDialLocked_AnchorFailureLeavesNoPooledConnAndNoAdmissionCost(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		apply func(af *anchorStreamFactory)
+	}{
+		{"the anchor stream cannot be opened", func(af *anchorStreamFactory) {
+			af.openErr = &TransportError{Op: "open_stream", Addr: "127.0.0.1:3141", cause: io.ErrUnexpectedEOF}
+		}},
+		{"the HELLO on the anchor fails", func(af *anchorStreamFactory) {
+			af.helloErr = &TransportError{Op: "read_length", Addr: "127.0.0.1:3141", cause: io.EOF}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, pc, af := newAnchorTestPool(t)
+			tc.apply(af)
+
+			slotsBefore := len(p.slotsCh)
+
+			if err := p.anchorConn(t.Context(), pc); err == nil {
+				t.Fatal("anchorConn succeeded although the anchor could not be established")
+			}
+
+			// dialLocked returns before `p.conns = append(...)`, so the pool
+			// never sees this connection.
+			pooled, inFlight := p.counts()
+			if pooled != 0 {
+				t.Errorf("a connection with no anchor joined the pool: pooled = %d, want 0", pooled)
+			}
+			if inFlight != 0 {
+				t.Errorf("inFlight = %d, want 0", inFlight)
+			}
+			if pc.isAuthed() {
+				t.Error("a connection whose anchor failed must not be authed")
+			}
+			if got := len(p.slotsCh); got != slotsBefore {
+				t.Errorf("the failed anchor leaked an admission slot: %d available, want %d",
+					got, slotsBefore)
+			}
+			if af.count() > 0 && !af.first(t).IsClosed() {
+				t.Error("the anchor stream of a failed handshake must be closed")
+			}
+		})
+	}
+}

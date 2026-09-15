@@ -364,6 +364,23 @@ measurement.
   connection from the pool but leaves the close to the release that finishes its
   last stream, and reports it as retired rather than as a failed liveness probe.
 
+  Two consequences of retiring-by-draining are **recorded, not fixed**, and
+  neither is exercised by a test here:
+
+  - `Drain` does not wait for a RETIRED connection's last streams. It counts
+    in-flight streams over `p.conns`, and a retired connection has already left
+    that slice, so a drain can return while one of its request streams is still
+    finishing. `Pool.Health` has the same blind spot for the same reason. The
+    stream is not orphaned — it holds its admission slot and closes the
+    connection through `release` — but the drain's "all in-flight statements
+    finished" guarantee now excludes it. The window is narrow (an anchor lost
+    during a drain).
+  - `transportErrBadConn` (`conn.go`) still collapses a transport error on the
+    QUERY path to a bare `driver.ErrBadConn`, discarding the cause. It could now
+    use `markBadConn` and keep both, which is strictly better; it is left alone
+    because it is outside the reported defect and would change error text on
+    paths this work did not measure.
+
 - **A connection-level HELLO failure reaches `database/sql` as
   `driver.ErrBadConn`, so it re-dials instead of failing the caller**
   (SONNY-1219). `Connector.Connect` returned the raw `*TransportError`, and
