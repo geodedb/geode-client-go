@@ -35,9 +35,13 @@ gate on tagging v0.2.0:
   (`src/server/quic_connection_handler.zig:3548-3589`,
   `src/transport/quic.zig:1176`). A burst of 64 over `pool_size=16` resolved
   `ok=8 err=56`: exactly one stream per QUIC connection survived. The earlier
-  "~0.06% intermittent timeout" reading of this test was wrong. The driver now
-  mitigates it with an anchor stream (see Fixed below); the engine fix is
-  required for a green `ok=64`.
+  "~0.06% intermittent timeout" reading of this test was wrong. The driver's
+  anchor stream (see Fixed below) mitigates it: measured against the same
+  pinned image, `ok=63 err=1` on a host at load 158 — the one failure being the
+  caller's own deadline, with zero `NO_ERROR` teardowns — and `ok=64 err=0`
+  (PASS) on the repeat run. The test stays listed here until it is green
+  repeatedly on a quiet host, and the engine fix is still required: the engine
+  continues to tie connection lifetime to its first stream.
 - `TestMultiplex_FindCreate_And_Merge_NoWedge` — asserts a throughput floor
   and fails on a loaded host; a measurement bound, not a correctness defect.
 
