@@ -28,6 +28,13 @@ const (
 const (
 	constOpDial = "dial"
 	constOpRead = "read"
+
+	// constOpHandshake is the gRPC transport's HELLO op. grpc.NewClient is
+	// LAZY — it establishes nothing — so an unreachable gRPC server produces
+	// no dial error at all: the first RPC is the Handshake, and the outage
+	// surfaces here instead. markBadConn treats it exactly like constOpDial
+	// for that reason.
+	constOpHandshake = "handshake"
 )
 
 // readDeadlineStream is the read side of a transport stream with deadline

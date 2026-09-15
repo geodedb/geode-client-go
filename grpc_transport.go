@@ -146,7 +146,7 @@ func (t *GRPCTransport) SendProto(ctx context.Context, msg *proto.QuicClientMess
 		resp, err := t.client.Handshake(ctx, m.Hello)
 		if err != nil {
 			return &TransportError{
-				Op:    "handshake",
+				Op:    constOpHandshake,
 				Addr:  t.addr,
 				cause: err,
 			}

@@ -376,7 +376,17 @@ measurement.
   resource pressure and `RetryBackoff` would be wrong. A DIAL failure is
   deliberately excluded: there was no connection to be bad, and reporting
   `ErrBadConn` would make `database/sql` pay the connect timeout three times
-  over before surfacing the same outage.
+  over before surfacing the same outage. The gRPC HELLO is excluded for the
+  same reason at one remove: `grpc.NewClient` is lazy and establishes nothing,
+  so an unreachable gRPC server produces no dial error at all — the first RPC
+  is the `Handshake`, and the outage surfaces on the `handshake` op instead.
+
+  The anchor handshake is bounded at **10 s** when the caller set no deadline of
+  its own. That bound is the operative one for an ordinary DSN rather than a
+  fallback for an unusual one: `connect_timeout` defaults to NONE, so nothing
+  else limits how long a silent server can hold the pool lock while
+  `dialLocked` waits for its HELLO. Dialing and handshaking off the pool lock
+  remains the real fix and is still a follow-up.
 
 - **An abandoned gRPC result no longer wedges the next statement on the same
   session** (SONNY-806). Closing a `Rows` before its final page — with a

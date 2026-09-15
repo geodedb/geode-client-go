@@ -81,7 +81,17 @@ const (
 // otherwise hold every other caller out of the pool forever. A DSN that sets
 // connect_timeout still wins: connectPooled applies it to the context before
 // acquire, and a context that already carries a deadline is left alone.
-const anchorHandshakeTimeout = 30 * time.Second
+//
+// This is the DEFAULT bound, not a fallback for an unusual DSN: Config's
+// ConnectTimeout is 0 — no timeout — unless `connect_timeout` is set
+// explicitly (config.go), so for an ordinary DSN nothing else bounds the
+// handshake and this value alone decides how long a silent server can freeze
+// p.mu. 10s is chosen against that: long enough to survive a loaded engine's
+// slow HELLO, short enough that a silent server costs roughly the QUIC dial
+// plus ten seconds rather than half a minute. The real fix is to dial and
+// handshake OFF the pool lock; that remains a follow-up (SONNY-1219 review,
+// F3).
+const anchorHandshakeTimeout = 10 * time.Second
 
 // QUICPool manages a small pool of persistent QUIC connections.
 // Each database/sql Conn gets a new QUIC stream on a pooled connection,

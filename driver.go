@@ -277,6 +277,14 @@ func (e *badConnError) Unwrap() []error { return []error{e.cause, driver.ErrBadC
 // A DIAL failure is deliberately excluded. There was no connection to be bad;
 // the server is unreachable, and reporting ErrBadConn would make database/sql
 // pay the connect timeout three times over before surfacing the same outage.
+//
+// The gRPC HELLO (constOpHandshake) is excluded for the SAME reason, even
+// though it is not named "dial": grpc.NewClient is lazy and establishes
+// nothing, so an unreachable gRPC server produces no dial error at all — the
+// first RPC is the Handshake, and the outage surfaces there. Marking it would
+// reintroduce exactly the triple connect-timeout the dial exclusion exists to
+// avoid, against an endpoint that was never reachable in the first place.
+//
 // Everything else — auth refusals, config errors, pool sentinels — is returned
 // untouched, so their retry classes (RetryNever, RetryBackoff) stand.
 func markBadConn(err error) error {
@@ -287,7 +295,12 @@ func markBadConn(err error) error {
 		return err
 	}
 	var te *TransportError
-	if !errors.As(err, &te) || te == nil || te.Op == constOpDial {
+	if !errors.As(err, &te) || te == nil {
+		return err
+	}
+	// Ops that mean "there was never a connection": retrying them on a fresh
+	// one buys nothing but another full connect timeout.
+	if te.Op == constOpDial || te.Op == constOpHandshake {
 		return err
 	}
 	return &badConnError{cause: err}

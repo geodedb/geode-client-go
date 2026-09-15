@@ -55,6 +55,15 @@ func TestMarkBadConn_LeavesNonConnectionErrorsAlone(t *testing.T) {
 	}{
 		{"nil", nil, RetryNever},
 		{"dial failure", &TransportError{Op: constOpDial, Addr: "a", cause: io.EOF}, RetryNewConn},
+		// grpc.NewClient is lazy, so an unreachable gRPC server never fails at
+		// the dial — it fails at the HELLO. Marking that would make
+		// database/sql pay the connect timeout three times over against an
+		// endpoint that was never reachable.
+		{
+			"grpc handshake against an unreachable server",
+			&TransportError{Op: constOpHandshake, Addr: "a", cause: io.EOF},
+			RetryNewConn,
+		},
 		{"auth refusal", &DriverError{Code: "AUTH", Message: "Authentication required"}, RetryNever},
 		{"pool draining", ErrPoolDraining, RetryNever},
 		{"pool exhausted", ErrPoolExhausted, RetryBackoff},
