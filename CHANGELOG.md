@@ -349,6 +349,20 @@ measurement.
   no read deadline and writes no frame: QUIC idle detection and the health
   probe behave exactly as before.
 
+- **A connection-level HELLO failure reaches `database/sql` as
+  `driver.ErrBadConn`, so it re-dials instead of failing the caller**
+  (SONNY-1219). `Connector.Connect` returned the raw `*TransportError`, and
+  `database/sql` re-dials only for `driver.ErrBadConn` — so every caller in a
+  burst whose connection had been torn down under it saw the transport error
+  directly. `Connect` now marks a connection-level failure (`markBadConn`,
+  `driver.go`): the error satisfies `errors.Is(err, driver.ErrBadConn)` for
+  `database/sql` AND still yields its `*TransportError` to `errors.As`, so
+  `Classify` keeps returning `RetryNewConn` — the correct class; this is not
+  resource pressure and `RetryBackoff` would be wrong. A DIAL failure is
+  deliberately excluded: there was no connection to be bad, and reporting
+  `ErrBadConn` would make `database/sql` pay the connect timeout three times
+  over before surfacing the same outage.
+
 - **An abandoned gRPC result no longer wedges the next statement on the same
   session** (SONNY-806). Closing a `Rows` before its final page — with a
   perfectly live context, which is ordinary caller behaviour — left geode's

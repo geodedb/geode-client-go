@@ -71,6 +71,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 )
 
 // registeredDriver is the singleton driver instance used by sql.Register.
@@ -227,11 +228,69 @@ var _ driver.Connector = (*Connector)(nil)
 // pooled connection rather than dialing a new QUIC connection. The HELLO
 // handshake is performed once per underlying QUIC connection, and subsequent
 // streams inherit the authenticated state.
+// A connection-level failure is reported as driver.ErrBadConn so database/sql
+// transparently retries on a FRESH connection instead of handing the transport
+// error to the caller — see markBadConn.
 func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 	if c.quicPool != nil {
-		return connectPooled(ctx, c.cfg, c.quicPool)
+		conn, err := connectPooled(ctx, c.cfg, c.quicPool)
+		if err != nil {
+			return nil, markBadConn(err)
+		}
+		return conn, nil
 	}
-	return connect(ctx, c.cfg)
+	conn, err := connect(ctx, c.cfg)
+	if err != nil {
+		return nil, markBadConn(err)
+	}
+	return conn, nil
+}
+
+// badConnError reports a connection-level failure to database/sql without
+// throwing the driver's own classification away.
+//
+// database/sql re-dials only for driver.ErrBadConn: any other error from
+// Connector.Connect is handed straight to the caller, which is why a burst
+// whose connections were torn down under it saw 56 raw transport errors
+// (SONNY-1219). Wrapping keeps both answers available — errors.Is(err,
+// driver.ErrBadConn) for database/sql, errors.As(err, &te) for the caller and
+// for Classify, which already maps *TransportError to RetryNewConn
+// (retryclass.go). The message is the cause's own, so nothing a caller logs
+// changes.
+type badConnError struct{ cause error }
+
+func (e *badConnError) Error() string { return e.cause.Error() }
+
+// Unwrap returns both branches: the cause, so the concrete error type and every
+// sentinel under it stay reachable, and driver.ErrBadConn, so database/sql
+// retries. Go's errors package walks multi-error trees since 1.20.
+func (e *badConnError) Unwrap() []error { return []error{e.cause, driver.ErrBadConn} }
+
+// markBadConn marks a CONNECTION-LEVEL failure as driver.ErrBadConn.
+//
+// The condition is a *TransportError that is not a dial failure: the connection
+// the driver was handed (or had just established) is gone or untrustworthy, and
+// another one will work — exactly what database/sql's retry does. It is NOT
+// classified as backoff-worthy: this is not resource pressure and waiting does
+// not help (Classify maps it to RetryNewConn).
+//
+// A DIAL failure is deliberately excluded. There was no connection to be bad;
+// the server is unreachable, and reporting ErrBadConn would make database/sql
+// pay the connect timeout three times over before surfacing the same outage.
+// Everything else — auth refusals, config errors, pool sentinels — is returned
+// untouched, so their retry classes (RetryNever, RetryBackoff) stand.
+func markBadConn(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, driver.ErrBadConn) {
+		return err
+	}
+	var te *TransportError
+	if !errors.As(err, &te) || te == nil || te.Op == constOpDial {
+		return err
+	}
+	return &badConnError{cause: err}
 }
 
 // Driver returns the underlying Driver.

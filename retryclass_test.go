@@ -35,6 +35,13 @@ func TestClassify(t *testing.T) {
 		{"pool exhausted", ErrPoolExhausted, RetryBackoff},
 		{"wrapped serialization", fmt.Errorf("batch: %w",
 			&DriverError{Class: StatusSerialization}), RetrySameConn},
+		// SONNY-1219: a connection-level HELLO failure is reported to
+		// database/sql as driver.ErrBadConn, and must still classify as
+		// RetryNewConn — not RetryBackoff: it is not resource pressure, and
+		// waiting does not help.
+		{"marked bad conn", markBadConn(&TransportError{Op: "read_length"}), RetryNewConn},
+		{"marked bad conn, wrapped hello", markBadConn(wrapHelloRecv(
+			&TransportError{Op: "read_length"})), RetryNewConn},
 		{"unknown", errors.New("boom"), RetryNever},
 	}
 	for _, c := range cases {
