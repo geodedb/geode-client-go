@@ -13,7 +13,7 @@ DOCKER ?= docker
 # mutable tags. The digest is the multi-arch index digest of
 # docker.io/geodedb/geode:0.8.18 and makes the pin immutable even if the tag
 # is republished. This MUST match `pinnedEngineVersion` in
-# integration_version_test.go, the integration:geode service in
+# engine_pin_test.go, the integration:geode service in
 # .gitlab-ci.yml, and the .version field of ../geode/build.zig.zon.
 # Update all of them together.
 GEODE_IMAGE ?= geodedb/geode:0.8.18@sha256:5ebbc7c5b8d13375749e7c1df8a77e54935bc609321cd4d8107d8e26f370c6f1
