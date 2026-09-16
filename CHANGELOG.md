@@ -18,13 +18,29 @@ capability contract is pinned as a 59-row golden file. Behaviour described
 below as an "engine fact" is pinned to that version and may change with the
 engine.
 
+Engine fixes now exist for three of the four items below, but **not in the
+pinned release**: geode **0.8.16** (tag `v0.8.16`, engine commit `a4c5b08f`)
+carries the engine halves of SONNY-1229 (`0beb108b`, tenant scope on
+engine-direct reads), SONNY-1219 (`f80a812d`/`9afe5d05`/`6d9e0dec`, a QUIC
+connection now outlives its first stream and accepts are driven from a
+reactor) and SONNY-1560 (`33a39499`/`3d3b1b60`, the session mutex is released
+between pushed gRPC pages and the flow-control seam is pinned, with grpc-zig
+v0.1.10), alongside SONNY-1218, SONNY-1318, SONNY-1326, SONNY-1330 and
+SONNY-1574. **None of that is verified from this driver yet.** The pin below
+is still 0.8.15 and every measurement in this file was taken against 0.8.15.
+Tagging v0.2.0 requires re-pinning to 0.8.16 and re-running the integration
+lane against it; each test below stays listed until it is measured green on
+that image.
+
 Known-RED integration tests, each an open defect rather than a flake, and the
 gate on tagging v0.2.0:
 
 - `TestIntegration_CrossTenantReadIsDenied` — SONNY-1229 / GAP-SONNY806-02
   (Critical): geode 0.8.15 does not apply the session tenant filter on the
   `MATCH` read path, so tenant binding is not an isolation boundary. Engine
-  fix required; the driver cannot work around it.
+  fix required; the driver cannot work around it. The engine fix landed in
+  **0.8.16** (`0beb108b`), with the graph-procedure and subquery halves in
+  SONNY-1318/SONNY-1326 — unmeasured from here until the driver re-pins.
 - `TestLoad_BurstExceedsPoolSize_NoDeadlock` — SONNY-1219 (High, ENGINE
   defect). Triaged 2026-09-15 against the pinned 0.8.15 image and against
   engine main: geode ties a QUIC connection's lifetime to the FIRST stream
@@ -40,8 +56,11 @@ gate on tagging v0.2.0:
   pinned image, `ok=63 err=1` on a host at load 158 — the one failure being the
   caller's own deadline, with zero `NO_ERROR` teardowns — and `ok=64 err=0`
   (PASS) on the repeat run. The test stays listed here until it is green
-  repeatedly on a quiet host, and the engine fix is still required: the engine
-  continues to tie connection lifetime to its first stream.
+  repeatedly on a quiet host, and the engine fix is still required: at 0.8.15
+  the engine continues to tie connection lifetime to its first stream. The
+  engine fix landed in **0.8.16** (`f80a812d` keeps a connection alive until
+  its last stream drains; `9afe5d05` drives accepts from a reactor) —
+  unmeasured from here until the driver re-pins.
 - `TestMultiplex_FindCreate_And_Merge_NoWedge` — asserts a throughput floor
   and fails on a loaded host; a measurement bound, not a correctness defect.
 
@@ -57,7 +76,9 @@ against the same engine process during that window can fail mid-way with
 `driver.ErrBadConn` (measured: `TestIntegration_GRPCBatchExecPastOnePage`
 fails around statement 29 of 647 when run immediately after the stall
 reproducer, and passes alone). See `docs/GAP_ANALYSIS.md` for the full
-measurement.
+measurement. The engine fix landed in **0.8.16** (`33a39499`, `3d3b1b60`, and
+grpc-zig v0.1.10); until this driver re-pins and re-measures, the caveat above
+is the contract.
 
 ### Added
 

@@ -1,6 +1,6 @@
 # GAP Analysis
 
-Last updated: 2026-09-14
+Last updated: 2026-09-15
 Reviewed by: Adversarial Security Review Agent (2026-03-21); divelife bulk-seed investigation (2026-06-17); Lane D tenancy/role binding (SONNY-806 / GEO-GO-UP-001, 2026-09-13)
 Repository: devnw/codepros/geode/geode-client-go
 Branch: `eng-4622/geode-go`. Each finding below names the commit that filed or
@@ -61,8 +61,13 @@ Top risks (remaining):
 - **Component:** geode ENGINE 0.8.15 gRPC path / the vendored grpc-zig — **not
   the Go driver**. The driver is reading; grpc-go emits HTTP/2
   `WINDOW_UPDATE`s as the application consumes each page.
-- **Status:** **Open** (filed 2026-09-14, SONNY-806 / GEO-GO-UP-001 Lane D
-  Task 14c)
+- **Status:** **Open against the pinned engine.** The engine fix landed in
+  geode **0.8.16** (`33a39499` releases the session mutex between pushed gRPC
+  pages and bounds a stalled stream; `3d3b1b60` lets the library's `RST` end an
+  exhausted stream and pins the flow-control seam; grpc-zig v0.1.10). This
+  driver is still pinned to 0.8.15 and has not re-measured the ceiling, so the
+  finding stays open here until the lane re-runs against 0.8.16. (Filed
+  2026-09-14, SONNY-806 / GEO-GO-UP-001 Lane D Task 14c.)
 - **Reproducer:** `TestIntegration_GRPCLargePushedResultFailsLoudly` logs the
   stall point; any oversized result reproduces it, e.g.
   `FOR i IN range(0, 19999) RETURN i` over gRPC.
@@ -160,7 +165,16 @@ requested address is not the one that will be bound.
 
 - **Severity:** Critical
 - **Component:** geode ENGINE 0.8.15 (read path) — not the Go driver
-- **Status:** **Open** (filed 2026-09-13, SONNY-806 / GEO-GO-UP-001)
+- **Status:** **Open against the pinned engine.** The engine fix landed in
+  geode **0.8.16** (`0beb108b` applies tenant scope to engine-direct reads;
+  `d0fe80fb`/`afcdbd6f`/`97bd9b83` extend it to graph procedures and
+  introspection under SONNY-1318; `9ea03ccc`/`1d99e0e0` cover shortestPath,
+  `COUNT{}`, `EXISTS{}` and pattern comprehensions and advertise
+  `graph_procedure_tenancy` under SONNY-1326). This driver is still pinned to
+  0.8.15 and has not re-measured isolation, so the finding stays open here
+  until the lane re-runs against 0.8.16 — note that the capability golden
+  below will change when it does. (Filed 2026-09-13, SONNY-806 /
+  GEO-GO-UP-001.)
 - **Reproducer:** `integration_tenancy_test.go` →
   `TestIntegration_CrossTenantReadIsDenied` (RED; this is the P0 evidence and is
   deliberately not skipped)
