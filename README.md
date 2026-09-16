@@ -456,6 +456,13 @@ deliberate differences separate the two wires.
 > work on OTHER connections against the same engine to fail for roughly 30 s,
 > not just the query that overflowed. See `docs/GAP_ANALYSIS.md` for the full
 > measurement.
+>
+> **The engine fix landed in geode 0.8.16** (`33a39499` releases the session
+> mutex between pushed pages and bounds a stalled stream, `3d3b1b60` lets the
+> library's `RST` end an exhausted stream and pins the flow-control seam, with
+> grpc-zig v0.1.10). This driver is still pinned to 0.8.15 and has not
+> re-measured the ceiling, so everything above remains the contract until it
+> does.
 
 The four deliberate differences:
 
@@ -485,13 +492,16 @@ This driver is developed and tested against **geode 0.8.15**
 integration lane pins that image, and `engine_pin_test.go` asserts the running
 server reports it.
 
-Known-RED tests, each tracking a defect rather than a flake:
+Known-RED tests, each tracking a defect rather than a flake. "Engine fix"
+names the engine release that carries the server-side fix — it is NOT a claim
+that this driver has been re-measured against it; every measurement in this
+repository was taken against the pinned 0.8.15 image:
 
-| Test | Tracking | Cause |
-|------|----------|-------|
-| `TestIntegration_CrossTenantReadIsDenied` | SONNY-1229 / GAP-SONNY806-02 | Engine does not filter by tenant on the MATCH read path |
-| `TestLoad_BurstExceedsPoolSize_NoDeadlock` | SONNY-1219 / BUG-0002 | More concurrent conns than `pool_size` intermittently times out (~0.06%) |
-| `TestMultiplex_FindCreate_And_Merge_NoWedge` | — | Asserts a throughput floor; fails on a loaded host, not a correctness defect |
+| Test | Tracking | Cause | Engine fix |
+|------|----------|-------|------------|
+| `TestIntegration_CrossTenantReadIsDenied` | SONNY-1229 / GAP-SONNY806-02 | Engine does not filter by tenant on the MATCH read path | geode 0.8.16 (`0beb108b`; graph-procedure and subquery halves in SONNY-1318/1326) — unverified from here |
+| `TestLoad_BurstExceedsPoolSize_NoDeadlock` | SONNY-1219 | Engine ties a QUIC connection's lifetime to the FIRST stream opened on it, so the connection dies with `NO_ERROR` when that stream closes, killing every sibling — a burst of 64 over `pool_size=16` resolved `ok=8 err=56` before the driver's anchor stream mitigated it | geode 0.8.16 (`f80a812d`, `9afe5d05`) — unverified from here |
+| `TestMultiplex_FindCreate_And_Merge_NoWedge` | — | Asserts a throughput floor; fails on a loaded host, not a correctness defect | n/a |
 
 ## Transactions
 

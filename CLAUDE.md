@@ -252,7 +252,9 @@ tests are known-RED and are NOT regressions:
 `TestIntegration_CrossTenantReadIsDenied` (SONNY-1229, engine tenant-filter
 defect), `TestLoad_BurstExceedsPoolSize_NoDeadlock` (SONNY-1219) and
 `TestMultiplex_FindCreate_And_Merge_NoWedge` (throughput floor on a loaded
-host).
+host). The engine halves of SONNY-1229, SONNY-1219 and SONNY-1560 shipped in
+geode **0.8.16**; this lane has NOT re-pinned or re-measured against it, so do
+not read a green 0.8.16 claim into anything here.
 
 Host load is part of the result. Several integration tests seed their fixture
 INSIDE the same context budget they then assert against —
