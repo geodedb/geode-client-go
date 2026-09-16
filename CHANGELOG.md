@@ -43,9 +43,11 @@ not assumed. Two results matter and they point in opposite directions.
   fail mid-way. 0.8.18 surfaces a typed gRPC `ResourceExhausted` —
   `stream window exhausted: peer stopped draining the pushed result` — after
   5632 of 20000 rows in **0.62 s**, and
-  `TestIntegration_GRPCBatchExecPastOnePage` PASSES immediately afterwards
-  where it used to fail around statement 29. The cross-session blast radius is
-  gone. `TestIntegration_GRPCLargePushedResultFailsLoudly` was RED against it:
+  the cross-session blast radius is gone: `TestIntegration_GRPCBatchExecPastOnePage`
+  no longer fails around statement 29. It still failed, at a statement number
+  that moved run to run, for an unrelated driver reason — see the
+  finished-`Execute`-stream entry under Fixed — and passes now.
+  `TestIntegration_GRPCLargePushedResultFailsLoudly` was RED against it:
   it enumerated `io.EOF`-with-every-row or `context.DeadlineExceeded` and had
   no arm for a promptly surfaced typed error, so the engine's IMPROVEMENT
   tripped the test's `default` case. It now has an arm for a surfaced
@@ -393,6 +395,97 @@ kept as the record of what was measured there.
   (SONNY-806).
 
 ### Fixed
+
+- **A closed `*sql.DB` no longer leaks its QUIC pool — which was leaking ENGINE
+  stream workers, not just client memory** (SONNY-806, Lane D Task 16d). The
+  `Connector` owns the shared `QUICPool` and nothing else can reach it, but it
+  implemented no `Close`, so `sql.DB.Close` — which closes its connector only
+  when the connector is an `io.Closer` — never closed the pool. Every closed DB
+  left its dialed QUIC connections up (10 s keep-alives against a 120 s idle
+  timeout, so the engine could not reap them either), each holding its anchor
+  stream, plus a 1 Hz health-probe loop holding a probe stream on every one.
+
+  Each of those streams pins one worker of the engine's SHARED stream pool for
+  the stream's whole life (geode 0.8.18 `default_quic_stream_worker_count = 64`,
+  `src/server/main.zig:264`; released only when `handleAdditionalStream`
+  returns, `src/server/quic_connection_handler.zig:2891`). Against CI's one
+  long-lived service engine the 65th `sql.Open`/`db.Close` cycle therefore found
+  no worker left and its handshake was never answered: **`failed to receive
+  HELLO response: context deadline exceeded`**, which is what turned every
+  `TestDocker_*` and `TestLoad_*` after `TestDocker_MatchRelationshipPattern`
+  RED. It never showed up locally because the testcontainers harness gives each
+  test a fresh engine.
+
+  Measured against one pinned 0.8.18 container: the engine's
+  `geode_runtime_quic_active_connections` climbed 1:1 with the cycles and never
+  came down (66 live connections, 133 stream handlers, after 65 closed DBs), and
+  the wall tracked the worker count exactly — `GEODE_QUIC_STREAM_WORKERS=8`
+  moved it from the 65th cycle to the 9th. With the probe loop disabled the leak
+  is anchor-only and the wall moves to 320 = 256 detached first-stream owners
+  (`quic_connection_handler.zig:176`) + 64 pool workers. After the fix the same
+  80-cycle loop leaves the engine at 0 connections and 0 stream handlers.
+
+  `Connector.Close` now closes the pool, and the deprecated one-shot
+  `Driver.Open` — which builds a private connector per call that nothing else
+  can ever close — hands that pool's lifetime to the connection it returns.
+  Regression coverage, RED before the fix:
+  `TestIntegration_RepeatedOpenCloseDoesNotExhaustOneEngine` (80 cycles against
+  one engine; failed at cycle 66 with the CI error verbatim),
+  `TestIntegration_ClosedDBLeavesNoPooledConnection`, and, with no engine,
+  `TestConnector_IsAnIOCloser` / `TestDBClose_ClosesTheConnectorsPool`.
+
+- **A completed gRPC `Execute` stream is now finished, not left for the next
+  statement to reset** (SONNY-806, Lane D Task 16d). Every `Execute` rides its
+  own server-streaming RPC and the driver stops reading as soon as it has the
+  answer, so the RPC was left dangling and the NEXT `Execute` tore it down with
+  an `RST_STREAM` — one reset per statement. The engine's vendored grpc-zig
+  races that reset against its own handler: it logs `gRPC streaming: failed to
+  send initial response error=PeerGone` and then drops the **whole TCP
+  connection** rather than the one stream (`error: Handler error:
+  error.PeerGone`). `TestIntegration_GRPCBatchExecPastOnePage` therefore died
+  mid-transaction with `rpc error: code = Unavailable desc = error reading from
+  server: EOF` at a statement number that moved run to run — 3 in CI, 5, 84 and
+  138 across local reproductions against one shared engine.
+
+  This corrects the claim above that the 0.8.18 bump made that test pass: the
+  statement-29 failure it used to show was the GAP-SONNY806-07 blast radius and
+  is indeed gone, but a second, independent defect was underneath it.
+
+  `GRPCTransport.FinishExecStream` now half-closes and drains a finished
+  request to its trailers (bounded by `finishExecStreamBudget`, falling back to
+  the old reset), and `Conn.ExecContext` calls it once the response is complete.
+  A result the engine is still pushing is still cancelled, never drained —
+  `CancelActiveStream` is unchanged. Side effect of not stranding streams: the
+  gRPC lane got much faster on one shared engine
+  (`GRPCPagedResultIsConsumedAcrossPushedPages` 45.3 s -> 3.1 s,
+  `GRPCCancelMidStream` 24.9 s -> 1.2 s). Regression coverage, RED before the
+  fix: `TestIntegration_GRPCCompletedExecLeavesNoStreamToReset`. The engine
+  losing a connection over one reset stream is an ENGINE defect and keeps its
+  own ticket.
+
+- **A statement that fails on the transport now says why** (SONNY-806, Lane D
+  Task 16d). `transportErrBadConn` collapsed every `*TransportError` into the
+  bare `driver.ErrBadConn` sentinel. That retires the connection correctly and
+  then tells the caller nothing, and inside a transaction — where `database/sql`
+  cannot retry and hands the error straight back — a 647-statement
+  `Pool.BatchExec` failed with exactly `statement 3: driver: bad connection`.
+  It now returns the same `badConnError` wrapper `markBadConn` uses, so
+  `errors.Is(err, driver.ErrBadConn)` still retires the conn while
+  `errors.As(err, &te)` and `Classify` keep working and the caller sees the
+  cause. Covered by `TestTransportErrBadConn_KeepsTheCause`.
+
+- **The multiplex probe tests no longer hard-code one developer's home
+  directory** (SONNY-806, Lane D Task 16d). `probeGeodeBinary` was
+  `/home/benji/src/devnw/.../zig-out/bin/geode` (committed in `2134501`, before
+  this branch), so `TestPooledHello_ConcurrentFirstStreams`,
+  `TestMultiplexServerProbe` and `TestMultiplex_FindCreate_And_Merge_NoWedge`
+  failed at 0.00 s everywhere else — `fork/exec ...: no such file or directory`
+  — including CI. The binary is now resolved from `GEODE_PROBE_BINARY` (or the
+  pre-existing `GEODE_BINARY`), then from `geode` on `PATH`; with none of those
+  the tests SKIP with that reason, because they launch a LOCAL engine that CI
+  does not have. An env var naming a missing binary is still a hard failure.
+  `TestNoDeveloperMachinePathsInSources` keeps such a path from coming back and
+  runs in `make test-unit`.
 
 - **Each pooled QUIC connection is anchored on its own HELLO stream, so a
   finished request no longer takes the connection down with it** (SONNY-1219).
