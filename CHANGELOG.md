@@ -44,40 +44,71 @@ not assumed. Two results matter and they point in opposite directions.
   5632 of 20000 rows in **0.62 s**, and
   `TestIntegration_GRPCBatchExecPastOnePage` PASSES immediately afterwards
   where it used to fail around statement 29. The cross-session blast radius is
-  gone. `TestIntegration_GRPCLargePushedResultFailsLoudly` is nevertheless RED:
-  it enumerates `io.EOF`-with-every-row or `context.DeadlineExceeded` and has
+  gone. `TestIntegration_GRPCLargePushedResultFailsLoudly` was RED against it:
+  it enumerated `io.EOF`-with-every-row or `context.DeadlineExceeded` and had
   no arm for a promptly surfaced typed error, so the engine's IMPROVEMENT
-  trips the test's `default` case. The invariant the test exists to protect —
-  never a silent truncation — holds. The test needs the extra arm.
+  tripped the test's `default` case. It now has an arm for a surfaced
+  `*TransportError`, keyed on the driver's own error type rather than on
+  message text, and that arm still fails the test if a complete result arrives
+  with an error attached. The invariant the test exists to protect — never a
+  silent truncation — is untouched: a short result reported as a clean `io.EOF`
+  is still a hard failure, whatever the engine version.
 - The capability contract moved by exactly one row:
   `graph_procedure_tenancy` `false` -> `true`. `tenant_scope_fail_closed` and
   `tenant_binding_server_verified` are still `false`.
 
-**The driver got worse, and this is what blocks v0.2.0.**
+**The driver got worse, and it is now fixed.**
 
-- **The SONNY-1219 anchor stream drops the session's tenant and graph scope on
-  every request stream (GAP-SONNY806-08, Critical, DRIVER defect).** Moving
-  HELLO onto a dedicated anchor stream means the sibling request streams, which
-  now skip HELLO by design, never carry the scope HELLO established. A
-  tenant-bound session reads **zero rows, including rows it wrote itself**.
-  Bisected against the engine, so it cannot be blamed on the bump:
+- **The SONNY-1219 anchor stream dropped the session's tenant and graph scope
+  on every request stream (GAP-SONNY806-08, Critical, DRIVER defect) — FIXED.**
+  Moving HELLO onto a dedicated anchor stream made the sibling request streams
+  skip it by design, and HELLO is what tells the engine which tenant and which
+  graph a stream is. A tenant-bound session read **zero rows, including rows it
+  wrote itself**, with no error anywhere: a silent wrong answer. Bisected
+  against the engine, so it could not be blamed on the bump:
 
   | driver commit | engine | `ParamsBindInPropertyMaps` | `CrossTenantReadIsDenied` |
   |---|---|---|---|
   | `29d373b` (pre-anchor) | 0.8.15 | PASS | FAIL - the old cross-tenant LEAK |
   | `29d373b` (pre-anchor) | **0.8.18** | **PASS** | **PASS** |
   | `05b4653` (anchor) | 0.8.15 | FAIL - `no rows in result set` | FAIL - `tenant-a saw 0 of its own nodes` |
-  | `3c14794` (current) | 0.8.18 | FAIL - `no rows in result set` | FAIL - `tenant-a saw 0 of its own nodes` |
+  | `3c14794` (anchor) | 0.8.18 | FAIL - `no rows in result set` | FAIL - `tenant-a saw 0 of its own nodes` |
+  | **this change** | **0.8.18** | **PASS** | **PASS** |
 
   `05b4653` is the introducing commit. The up-to-8 "redundant" per-stream
-  HELLOs it removed were what carried the tenant binding onto each request
-  stream. Also RED for the same reason:
+  HELLOs it removed were what carried the binding onto each request stream.
+
+  **The fix binds every stream rather than reverting the anchor.** Reverting
+  would have been smaller, and at 0.8.15 it would even have worked — but only
+  by accident. At 0.8.15 the engine destroyed a pooled connection as soon as
+  its first request stream closed, so almost every request stream was a FIRST
+  stream performing its own handshake; the unbound-sibling window existed and
+  was simply rarely survivable. Engine 0.8.18 (`f80a812d`) keeps a connection
+  alive until its LAST stream drains, so siblings now live — and a plain revert
+  would leave them alive AND unbound, reproducing this same defect. So
+  `pooledHello` now performs an unconditional HELLO on every request stream,
+  and `pooledGraphInit` reads the binding from the stream's own handshake
+  response rather than from the pooled connection's. There is no state in which
+  a request stream can be issued unbound. The anchor stream is kept for the one
+  thing it is actually for: owning the QUIC connection's lifetime so a finished
+  request cannot take its siblings down with it (SONNY-1219).
+
+  The cost is one round trip per logical connection, which is what the driver
+  paid before `05b4653`.
+
+  Also RED for the same reason and now green:
   `TestIntegration_ParamsAreNotInQueryText`,
   `TestIntegration_ParamsBindTimeValue`,
   `TestIntegration_ProfileTimingsAreSyntheticOnTheTenantBoundPath`.
 
-  **v0.2.0 cannot ship until this is fixed.** It is a data-visibility defect,
-  not a flake.
+  Regression coverage, written before the fix and RED against it:
+  `TestIntegration_TenantBoundSessionReadsItsOwnWritesOnEveryStream` (a
+  tenant-bound session writes and reads across four simultaneously held request
+  streams, and a second tenant must see none of it) and, with no engine needed,
+  `TestAnchor_RequestStreamCarriesTenantAndGraphBinding` /
+  `TestAnchor_EveryRequestStreamBindsItself`, which assert on the WIRE that
+  each request stream's own transport carries a `HelloRequest` naming the
+  configured tenant, graph and role.
 
 Known engine limit on the gRPC wire: **a single `Execute` stalls past roughly
 64 KiB of pushed payload** (GAP-SONNY806-07 / SONNY-1560, High —
