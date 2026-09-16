@@ -7,8 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Target release: **v0.2.0** — the GraphRAG driver surface (SONNY-806 /
-GEO-GO-UP-001).
+## [v0.2.0] - 2026-09-16
+
+The GraphRAG driver surface (SONNY-806 / GEO-GO-UP-001).
 
 Engine pin: this release is developed and tested against **geode 0.8.18**
 (`geodedb/geode:0.8.18`, manifest-list digest
