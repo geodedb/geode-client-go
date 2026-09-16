@@ -31,6 +31,33 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// nomuxWedgeGraph is this file's OWN graph, and it is not a stylistic choice.
+//
+// This test writes 30,000 twenty-property nodes, and on the shared engine CI
+// runs (one `services:` container for the whole job, not a fresh container per
+// test) its data outlives it: cleanupLabel deletes them under a fixed 30s
+// budget and SWALLOWS the result, so on a runner where that delete does not fit
+// in 30s the nodes simply stay. Every later test that cleans the graph it runs
+// in then inherits them — cleanupTestData's `MATCH (n) DETACH DELETE n`
+// (integration_test.go) is the one that pays, and it has the same fixed budget.
+// That is what turned pipeline 2855806396's QUIC lane red: TestDocker_CreateNode
+// spent 34s on a cleanup it then abandoned, and from TestDocker_CreateMultipleNodes
+// on, every test died at its own deadline behind an engine still working through
+// the delete nobody could cancel — the QUIC protocol carries no cancel message,
+// so an abandoned statement runs to completion no matter what the client does
+// (measured: a 30s-abandoned DETACH DELETE of 30,000 such nodes reported
+// `context deadline exceeded` to the caller and left 0 nodes behind).
+//
+// Putting this test's bulk in its own graph is the fix, not a mitigation: a
+// test's working set has no business sitting in the namespace another test
+// bulk-deletes. TestIntegration_SustainedIngestStaysOutOfTheSharedGraph pins it.
+const nomuxWedgeGraph = "nomuxwedge"
+
+// nomuxWedgeDSN binds nomuxWedgeGraph. sharedDSN already carries the harness
+// tenant; a repeated DSN key resolves to its last occurrence (applyQueryParams
+// in config.go), so appending is safe.
+func nomuxWedgeDSN() string { return sharedDSN + "&graph=" + nomuxWedgeGraph }
+
 // TestConn_SustainedSingleConnIngest_NoWedge is the in-repo reproduction for the
 // no-multiplex sustained-ingest wedge.
 //
@@ -56,7 +83,7 @@ func TestConn_SustainedSingleConnIngest_NoWedge(t *testing.T) {
 		perBatchLimit = 20 * time.Second
 	)
 
-	db, err := sql.Open("geode", sharedDSN)
+	db, err := sql.Open("geode", nomuxWedgeDSN())
 	require.NoError(t, err, "open db")
 	defer db.Close()
 
