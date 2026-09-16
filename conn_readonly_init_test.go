@@ -117,14 +117,15 @@ func TestPooledGraphInit_ReadOnlySkipsCreateGraph(t *testing.T) {
 			rec := newInitRecordingTransport()
 			conn := newConn(cfg, rec)
 
-			// An unbound graph is the precondition: HELLO did not bind it,
-			// so pooledGraphInit must do the graph selection itself.
-			transport := &QUICTransport{pc: &pooledConn{}}
-			if transport.pc.isGraphBound() {
+			// An unbound graph is the precondition: THIS stream's HELLO did
+			// not bind it, so pooledGraphInit must do the graph selection
+			// itself. The binding is read from the Conn because it is per
+			// stream, not per pooled connection (GAP-SONNY806-08).
+			if conn.boundGraph != "" {
 				t.Fatal("precondition: graph must not be bound by HELLO")
 			}
 
-			if err := pooledGraphInit(context.Background(), conn, cfg, transport); err != nil {
+			if err := pooledGraphInit(context.Background(), conn, cfg); err != nil {
 				t.Fatalf("pooledGraphInit: %v", err)
 			}
 
@@ -150,17 +151,18 @@ func TestPooledGraphInit_ReadOnlySkipsCreateGraph(t *testing.T) {
 }
 
 // TestPooledGraphInit_BoundGraphSkipsBoth covers the other pooled branch: when
-// HELLO bound the graph, neither statement is emitted on either mode.
+// this stream's own HELLO bound the graph, neither statement is emitted on
+// either mode.
 func TestPooledGraphInit_BoundGraphSkipsBoth(t *testing.T) {
 	for _, readOnly := range []bool{true, false} {
 		cfg := &Config{Graph: "g", ReadOnly: readOnly}
 		rec := newInitRecordingTransport()
 		conn := newConn(cfg, rec)
 
-		transport := &QUICTransport{pc: &pooledConn{}}
-		transport.pc.markAuthed("g")
+		// THIS stream's HELLO bound the graph.
+		conn.boundGraph = "g"
 
-		if err := pooledGraphInit(context.Background(), conn, cfg, transport); err != nil {
+		if err := pooledGraphInit(context.Background(), conn, cfg); err != nil {
 			t.Fatalf("read_only=%v: pooledGraphInit: %v", readOnly, err)
 		}
 		if got, _ := rec.sent(); len(got) != 0 {

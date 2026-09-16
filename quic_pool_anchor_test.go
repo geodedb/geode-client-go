@@ -134,6 +134,14 @@ func (f *fakeAnchorStream) RemoteClosed() bool   { return false }
 func (f *fakeAnchorStream) Addr() string         { return "fake://anchor" }
 
 // helloSent reports whether a HELLO was written on this stream.
+// sentMessages returns a copy of everything written on this stream, so a caller
+// can inspect the frames without holding the stream's lock.
+func (f *fakeAnchorStream) sentMessages() []*proto.QuicClientMessage {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]*proto.QuicClientMessage(nil), f.sent...)
+}
+
 func (f *fakeAnchorStream) helloSent() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -286,23 +294,105 @@ func TestAnchor_HelloRunsOnDedicatedStream(t *testing.T) {
 	}
 }
 
-// A request stream must never have to run the handshake once the anchor did:
-// that is the whole point — no request stream owns the connection.
-func TestAnchor_RequestStreamsSkipHello(t *testing.T) {
+// TestAnchor_RequestStreamCarriesTenantAndGraphBinding is the unit half of the
+// GAP-SONNY806-08 regression (SONNY-806, SONNY-1219), and needs no engine.
+//
+// HELLO is not merely authentication: it is what tells the server which TENANT
+// and which GRAPH this stream is, and the server applies both per stream.
+// Between 05b4653 and the fix, an anchored connection made pooledHello a pure
+// client-side adoption — the request stream told the server nothing — and a
+// tenant-bound session silently read zero rows, including its own writes.
+//
+// So the assertion is on the WIRE, not on the Conn's fields: the request
+// stream's own transport must carry a HelloRequest naming the configured tenant
+// and graph, even though the connection's anchor already handshook.
+func TestAnchor_RequestStreamCarriesTenantAndGraphBinding(t *testing.T) {
+	p, pc, af := newAnchorTestPool(t)
+	p.cfg.Tenant = "tenant-a"
+	p.cfg.Graph = "g1"
+	p.cfg.Role = "readwrite"
+
+	if err := p.anchorConn(t.Context(), pc); err != nil {
+		t.Fatalf("anchorConn: %v", err)
+	}
+	if !pc.isAuthed() {
+		t.Fatal("precondition: the connection must be anchored and authed")
+	}
+	// The anchor is not the request stream. Keep a handle on it so the
+	// assertions below cannot accidentally read the anchor's HELLO.
+	anchor := af.first(t)
+
+	// The request stream: its own transport, a sibling of the anchor.
+	reqStream := newFakeAnchorStream()
+	conn := newConn(p.cfg, reqStream)
+	if err := pooledHello(t.Context(), conn, pc, p); err != nil {
+		t.Fatalf("pooledHello on a request stream of an anchored connection: %v", err)
+	}
+
+	hello := firstHelloRequest(t, reqStream)
+	if hello == nil {
+		t.Fatalf("the request stream sent NO HELLO: it is unbound, so the server applies "+
+			"no tenant and no graph to it (GAP-SONNY806-08). Sent %d message(s), "+
+			"anchor sent hello=%v", len(reqStream.sentMessages()), anchor.helloSent())
+	}
+	if got := hello.GetTenantId(); got != "tenant-a" {
+		t.Errorf("request stream HELLO tenant_id = %q, want %q", got, "tenant-a")
+	}
+	if got := hello.GetGraph(); got != "g1" {
+		t.Errorf("request stream HELLO graph = %q, want %q", got, "g1")
+	}
+	if got := hello.GetRole(); got != "readwrite" {
+		t.Errorf("request stream HELLO role = %q, want %q", got, "readwrite")
+	}
+
+	// The stream still reports the handshake IT performed.
+	if conn.boundGraph != "g1" || conn.sessionID != "sess-1" {
+		t.Errorf("the request stream did not record its own HELLO response: graph=%q session=%q",
+			conn.boundGraph, conn.sessionID)
+	}
+}
+
+// TestAnchor_EveryRequestStreamBindsItself pins the sibling case: the second
+// and later request streams on an already-authed connection must each carry
+// their own binding too. A fix that only binds the first request stream leaves
+// exactly the silent-empty-read window GAP-SONNY806-08 describes.
+func TestAnchor_EveryRequestStreamBindsItself(t *testing.T) {
 	p, pc, _ := newAnchorTestPool(t)
+	p.cfg.Tenant = "tenant-a"
+	p.cfg.Graph = "g1"
+
 	if err := p.anchorConn(t.Context(), pc); err != nil {
 		t.Fatalf("anchorConn: %v", err)
 	}
 
-	conn := newConn(p.cfg, &fakeAnchorStream{})
-	transport := &QUICTransport{pool: p, pc: pc}
-	if err := pooledHello(t.Context(), conn, transport, p); err != nil {
-		t.Fatalf("pooledHello on an anchored connection: %v", err)
+	for i := 0; i < 3; i++ {
+		reqStream := newFakeAnchorStream()
+		conn := newConn(p.cfg, reqStream)
+		if err := pooledHello(t.Context(), conn, pc, p); err != nil {
+			t.Fatalf("request stream %d: pooledHello: %v", i, err)
+		}
+		hello := firstHelloRequest(t, reqStream)
+		if hello == nil {
+			t.Fatalf("request stream %d sent no HELLO: it would run unbound "+
+				"(GAP-SONNY806-08)", i)
+		}
+		if hello.GetTenantId() != "tenant-a" || hello.GetGraph() != "g1" {
+			t.Errorf("request stream %d HELLO = (tenant %q, graph %q), want (tenant-a, g1)",
+				i, hello.GetTenantId(), hello.GetGraph())
+		}
 	}
-	if conn.boundGraph != "g1" || conn.sessionID != "sess-1" {
-		t.Errorf("the request stream did not adopt the anchor's HELLO state: graph=%q session=%q",
-			conn.boundGraph, conn.sessionID)
+}
+
+// firstHelloRequest returns the HelloRequest the stream sent, or nil if it
+// never sent one.
+func firstHelloRequest(t *testing.T, f *fakeAnchorStream) *proto.HelloRequest {
+	t.Helper()
+	for _, msg := range f.sentMessages() {
+		if h := msg.GetHello(); h != nil {
+			return h
+		}
 	}
+	return nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -124,14 +124,16 @@ func TestIntegration_ServerInfoReadOnly(t *testing.T) {
 	}
 }
 
-// TestIntegration_HelloCapabilitiesInheritedByPooledStreams proves a stream
-// that skips the HELLO handshake still reports what the server said.
+// TestIntegration_HelloCapabilitiesInheritedByPooledStreams proves that EVERY
+// stream on a pooled QUIC connection reports what the server said in HELLO,
+// not just the first one.
 //
-// pooledHello runs the handshake once per underlying QUIC connection, so every
-// logical connection after the first sees no HelloResponse at all. Both
-// connections are held open at once deliberately: the second must be a stream
-// on the same already-authenticated QUIC connection for the inheritance to be
-// under test.
+// Since GAP-SONNY806-08 every request stream performs its own handshake — HELLO
+// carries the tenant and graph binding and the engine applies both per stream —
+// so this now asserts that a sibling stream gets its own answer rather than an
+// empty one. Both connections are held open at once deliberately: the second
+// must be a stream on the same already-anchored QUIC connection for the
+// property to be under test.
 func TestIntegration_HelloCapabilitiesInheritedByPooledStreams(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()

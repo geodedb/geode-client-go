@@ -79,7 +79,7 @@ func (c *Conn) markConnFailed() {
 // connSeq numbers driver connections so a caller can assert that two
 // operations ran on the same one. It is a client-side identity only: the
 // server's own session identifier is shared by every stream multiplexed onto
-// one pooled QUIC connection (see adoptHelloState) and therefore cannot
+// one pooled QUIC connection and therefore cannot
 // distinguish two Conns.
 //
 //nolint:gochecknoglobals // monotonic counter for connection identity
@@ -103,11 +103,10 @@ type Conn struct {
 	// HELLO response: the advertised capability strings, the graph it bound
 	// (empty when unbound) and the session identifier.
 	//
-	// All three are written once during connection setup — either by hello()
-	// on the connection that performed the handshake, or by adoptHelloState()
-	// on a later stream that inherited an already-authenticated pooled QUIC
-	// connection — before the Conn is published to database/sql, and are
-	// read-only thereafter. That is why they need no mutex.
+	// All three are written once by hello(), during this connection's own
+	// handshake — every connection performs one, pooled or not
+	// (GAP-SONNY806-08) — before the Conn is published to database/sql, and
+	// are read-only thereafter. That is why they need no mutex.
 	//
 	// helloCaps is NOT the SHOW CAPABILITIES feature matrix. The two are
 	// different vocabularies and neither is derived from the other; see
@@ -123,17 +122,6 @@ type Conn struct {
 	// answer the statement. Nil until the first successful probe; a failed
 	// probe is never stored, so a transient failure cannot pin a refusal.
 	caps atomic.Pointer[Capabilities]
-}
-
-// adoptHelloState copies the HELLO response metadata recorded on an
-// already-authenticated pooled QUIC connection onto this Conn.
-//
-// Without it, every stream after the first on a pooled connection would report
-// no capabilities and no session: pooledHello short-circuits when the
-// underlying connection is already authenticated, so only the very first Conn
-// ever sees a HelloResponse. Callers must not have published the Conn yet.
-func (c *Conn) adoptHelloState(pc *pooledConn) {
-	c.boundGraph, c.sessionID, c.helloCaps = pc.helloState()
 }
 
 // HelloCapabilities returns the capability strings the server advertised in
@@ -247,8 +235,9 @@ func newConn(cfg *Config, transport Transport) *Conn {
 }
 
 // connectPooled creates a new logical connection using a QUIC stream from the
-// shared pool. The HELLO handshake is only performed on the first stream of
-// each underlying QUIC connection; subsequent streams skip it.
+// shared pool. Every stream performs its own HELLO handshake: the handshake
+// carries the session's tenant and graph binding, and the engine applies both
+// per stream (GAP-SONNY806-08).
 func connectPooled(ctx context.Context, cfg *Config, pool *QUICPool) (*Conn, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -267,12 +256,12 @@ func connectPooled(ctx context.Context, cfg *Config, pool *QUICPool) (*Conn, err
 
 	conn := newConn(cfg, transport)
 
-	if err := pooledHello(ctx, conn, transport, pool); err != nil {
+	if err := pooledHello(ctx, conn, transport.pc, pool); err != nil {
 		_ = transport.Close()
 		return nil, err
 	}
 
-	if err := pooledGraphInit(ctx, conn, cfg, transport); err != nil {
+	if err := pooledGraphInit(ctx, conn, cfg); err != nil {
 		_ = transport.Close()
 		return nil, err
 	}
@@ -280,56 +269,54 @@ func connectPooled(ctx context.Context, cfg *Config, pool *QUICPool) (*Conn, err
 	return conn, nil
 }
 
-// pooledHello adopts the pooled connection's HELLO state onto this logical
-// connection.
+// pooledHello performs this REQUEST STREAM's own HELLO handshake.
 //
-// Since SONNY-1219 the handshake itself belongs to the connection's ANCHOR
-// stream, performed at dial time (QUICPool.anchorConn), so for every pooled
-// connection this is a pure fast path: no request stream is ever the connection
-// owner, and a request stream closing can no longer take the connection — and
-// its siblings — down with it.
+// GAP-SONNY806-08 (SONNY-806, SONNY-1219): HELLO is not merely authentication.
+// It is what carries the session's TENANT and the graph it binds, and the
+// engine applies both per stream. Between 05b4653 and this change the anchor
+// stream performed the only HELLO on a pooled QUIC connection and every request
+// stream adopted its recorded state client-side without ever telling the server
+// who it was — so a tenant-bound session read ZERO rows, including rows it had
+// just written itself, with no error anywhere. A silent wrong answer.
 //
-// The handshake below remains for a pooled connection that arrived without an
-// anchor (a pool assembled directly by a test fixture). It keeps the
-// double-checked lock on pc.authed so even then exactly one HELLO runs.
-func pooledHello(ctx context.Context, conn *Conn, transport *QUICTransport, pool *QUICPool) error {
-	if transport.pc.isAuthed() {
-		conn.adoptHelloState(transport.pc)
-		return nil
-	}
-
-	// Double-check under lock to avoid racing with a concurrent first stream.
-	transport.pc.mu.Lock()
-	alreadyAuthed := transport.pc.authed
-	transport.pc.mu.Unlock()
-
-	if alreadyAuthed {
-		conn.adoptHelloState(transport.pc)
-		return nil
-	}
-
+// So every request stream binds itself. The handshake is unconditional: there
+// is no state in which a request stream may be issued unbound, which is the
+// failure class this closes. The anchor stream (QUICPool.anchorConn) is kept
+// for what it is actually for — owning the QUIC connection's lifetime so a
+// finished request cannot take its siblings down (SONNY-1219) — and carries no
+// scope for anyone else.
+//
+// The recorded connection-level state is still refreshed here because the
+// health probe reads it (pooledConn.isAuthed) and because markAuthedHello is
+// how a pooled connection reports the handshake it last completed.
+func pooledHello(ctx context.Context, conn *Conn, pc *pooledConn, pool *QUICPool) error {
 	resp, err := conn.hello(ctx)
 	if err != nil {
-		pool.remove(transport.pc)
+		// A HELLO that fails on a live stream is a connection-level verdict in
+		// every case the driver can distinguish (bad credentials, a refused
+		// graph bind, a dropped connection), so the connection leaves the pool
+		// rather than serving the next caller the same failure.
+		pool.remove(pc)
 		return err
 	}
-	// Record the HELLO metadata on the pooled connection so every later
-	// stream that skips the handshake above can still report it.
-	transport.pc.markAuthedHello(resp.GetGraph(), resp.GetSessionId(), resp.GetCapabilities())
+	pc.markAuthedHello(resp.GetGraph(), resp.GetSessionId(), resp.GetCapabilities())
 	return nil
 }
 
 // pooledGraphInit handles graph creation and selection for pooled connections.
 // When the server already bound the graph via HELLO (DSN path), USE GRAPH
 // must be skipped — the server rejects it for DSN-bound sessions.
-func pooledGraphInit(ctx context.Context, conn *Conn, cfg *Config, transport *QUICTransport) error {
+func pooledGraphInit(ctx context.Context, conn *Conn, cfg *Config) error {
 	if cfg.Graph == "" {
 		return nil
 	}
 
-	// If the server bound the graph during HELLO (DSN path), skip
-	// CREATE/USE GRAPH — the session is already targeting the correct graph.
-	if transport.pc.isGraphBound() {
+	// If the server bound the graph during THIS stream's HELLO (DSN path),
+	// skip CREATE/USE GRAPH — this stream is already targeting the correct
+	// graph. The answer is read from the Conn, not from the pooled connection:
+	// the binding is per stream, and a sibling's handshake says nothing about
+	// this one (GAP-SONNY806-08).
+	if conn.boundGraph != "" {
 		return nil
 	}
 

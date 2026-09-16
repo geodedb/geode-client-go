@@ -264,13 +264,21 @@ func readCapabilityGolden(t *testing.T) []CapabilityRow {
 	return rows
 }
 
-// TestPooledHelloStatePropagates proves a stream that inherits an
-// already-authenticated pooled QUIC connection still reports the HELLO the
-// first stream performed. Without adoptHelloState every connection after the
-// first would report no capabilities, no graph and no session — and
-// Connector.ServerInfo, which opens one fresh connection per call, would
-// return empty HELLO metadata for every call but the very first.
-func TestPooledHelloStatePropagates(t *testing.T) {
+// TestPooledHelloStateIsNeverAliased pins the copy semantics of the HELLO
+// metadata a connection reports.
+//
+// The pooled connection records the handshake it last completed
+// (markAuthedHello) and a Conn records its own (hello); both hand the
+// capability slice out to callers, and neither may hand out the slice it holds.
+// The strings come from a decoded protobuf message whose lifetime ends with the
+// handshake, so an aliased slice is both a lifetime bug and a way for one
+// caller to mutate what another sees.
+//
+// Note what is NOT asserted here any more: a request stream does not inherit
+// another stream's HELLO. Since GAP-SONNY806-08 every stream performs its own
+// handshake, because HELLO carries the tenant and graph binding and the engine
+// applies both per stream.
+func TestPooledHelloStateIsNeverAliased(t *testing.T) {
 	pc := &pooledConn{}
 	pc.markAuthedHello("g1", "sess-1", []string{"tx", "vectors"})
 
@@ -281,8 +289,10 @@ func TestPooledHelloStatePropagates(t *testing.T) {
 		t.Error("pooled connection is not graph-bound after a non-empty HELLO graph")
 	}
 
+	// A Conn records the handshake IT performed; here it is populated the way
+	// hello() populates it, from a copy of the recorded state.
 	later := &Conn{}
-	later.adoptHelloState(pc)
+	later.boundGraph, later.sessionID, later.helloCaps = pc.helloState()
 
 	if later.BoundGraph() != "g1" {
 		t.Errorf("BoundGraph() = %q, want %q", later.BoundGraph(), "g1")

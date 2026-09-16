@@ -390,12 +390,14 @@ func TestMultiplexServerProbe(t *testing.T) {
 			defer wg.Done()
 
 			// Each goroutine opens its own stream on the SHARED qConn and runs
-			// queries DIRECTLY — no per-stream HELLO. This mirrors the real driver
-			// (conn.go connectPooled / pooledHello): authentication is bound to the
-			// QUIC *connection*, performed exactly once on the first stream; every
-			// subsequent stream on that connection skips HELLO and sends queries.
-			// (Sending a second HELLO on an already-authed conn is rejected by the
-			// server with a clean stream close, which is correct behavior.)
+			// queries DIRECTLY — no per-stream HELLO. This probes the ENGINE's
+			// multiplexing: whether a sibling stream is usable at all once the
+			// connection is authenticated. It deliberately does NOT mirror the
+			// driver any more. The driver sends a HELLO on every request stream
+			// (conn.go pooledHello) because HELLO carries the session's tenant and
+			// graph binding and the engine applies both per stream — skipping it,
+			// as this probe does, is exactly what made a tenant-bound session read
+			// zero rows (GAP-SONNY806-08).
 			rawStream, err := qConn.OpenStreamSync(runCtx)
 			if err != nil {
 				errsCh <- fmt.Errorf("goroutine %d: OpenStreamSync: %v", gid, err)

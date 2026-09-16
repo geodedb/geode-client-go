@@ -2,21 +2,16 @@
 
 // conn_multiplex_hello_test.go — Task 4 of the multiplex-driver plan.
 //
-// Verifies the per-connection HELLO/graph-init invariant holds under
-// concurrent first streams: when K logical connections open *simultaneously*
-// as the first users of a freshly dialed QUIC connection, the HELLO handshake
-// must run exactly ONCE (double-checked lock on pc.authed in pooledHello),
-// the other K-1 streams must skip HELLO and query directly, and every query
-// must succeed.
+// Verifies that K logical connections opening *simultaneously* on one freshly
+// dialed QUIC connection all come up and all query successfully.
 //
-// Why "all K queries succeed + zero errors" proves no double-HELLO: the geode
-// server authenticates per QUIC *connection*, exactly once on the first stream.
-// A second HELLO on an already-authed connection is rejected by the server with
-// a clean stream close. So if the double-checked lock raced and two goroutines
-// both sent a HELLO, the loser's stream would be torn down and its subsequent
-// query would fail. A clean run of K concurrent first-streams therefore
-// demonstrates that HELLO ran exactly once and all streams used the shared
-// connection-level auth.
+// Since GAP-SONNY806-08 each of the K streams performs its OWN HELLO: the
+// handshake carries the session's tenant and graph binding and the engine
+// applies both per stream, so a stream that skipped it would run unbound. This
+// test is therefore the concurrency evidence for that design — K simultaneous
+// HELLOs on one connection must all be accepted and must leave every stream
+// usable. Before the fix the assertion here was the opposite (exactly one
+// HELLO, K-1 streams adopting it client-side), which is the defect.
 package geode
 
 import (
@@ -56,15 +51,16 @@ func TestPooledHello_ConcurrentFirstStreams(t *testing.T) {
 		Conformance:        DefaultConformance,
 	}
 
-	// maxSize=1 forces every concurrent first-stream onto ONE QUIC connection,
-	// so the double-checked HELLO lock in pooledHello is the only thing standing
-	// between us and a double-HELLO. maxStreamsPerConn defaults to 8 (= K), so
-	// all K streams are admitted onto the single connection concurrently.
+	// maxSize=1 forces every concurrent stream onto ONE QUIC connection, so K
+	// HELLOs land on one connection at once. maxStreamsPerConn defaults to 8
+	// (= K), so all K streams are admitted onto the single connection
+	// concurrently.
 	pool := NewQUICPool(cfg, 1)
 	t.Cleanup(func() { _ = pool.Close() })
 
 	// Barrier so all goroutines fire connectPooled (acquire → openStream →
-	// pooledHello) at the same instant, maximising the race on the first HELLO.
+	// pooledHello) at the same instant, maximising the concurrency of the K
+	// handshakes.
 	var (
 		start    = make(chan struct{})
 		wg       sync.WaitGroup
@@ -91,9 +87,8 @@ func TestPooledHello_ConcurrentFirstStreams(t *testing.T) {
 			}
 			conns[idx] = c
 
-			// Auth-requiring query. If this goroutine had been the loser of a
-			// HELLO race, its stream would be torn down by the server and this
-			// query would fail.
+			// Auth-requiring query. A stream whose handshake the server did
+			// not accept would be torn down and this query would fail.
 			rows, err := c.QueryContext(ctx, "MATCH (n) RETURN count(n)", nil)
 			if err != nil {
 				errs[idx] = fmt.Errorf("query: %w", err)
@@ -135,9 +130,9 @@ func TestPooledHello_ConcurrentFirstStreams(t *testing.T) {
 	}
 	pool.mu.Unlock()
 
-	require.Equal(t, 1, nConns, "all concurrent first-streams must share ONE QUIC connection")
-	require.True(t, authed, "the shared connection must be authed exactly once")
+	require.Equal(t, 1, nConns, "all concurrent streams must share ONE QUIC connection")
+	require.True(t, authed, "the shared connection must be authed")
 
-	t.Logf("OK: %d concurrent first-streams shared one connection, HELLO ran once, all queries succeeded",
+	t.Logf("OK: %d concurrent streams shared one connection, each handshook, all queries succeeded",
 		helloConcurrentStreams)
 }

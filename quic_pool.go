@@ -297,6 +297,10 @@ type pooledConn struct {
 	// neither maxStreams nor maxStreamsPerConn. It carries exactly one exchange
 	// — the HELLO — and after that nothing is ever written on it; the only
 	// reader is watchAnchor. Guarded by mu.
+	//
+	// The anchor's HELLO is the ANCHOR's session, not anybody else's: tenant
+	// and graph bind per stream, so every request stream performs its own
+	// handshake (pooledHello, GAP-SONNY806-08).
 	anchor Transport
 
 	// anchorClosed marks the anchor as closed BY US (discard, pool close), so
@@ -667,9 +671,12 @@ func (p *QUICPool) dialLocked(ctx context.Context) (*pooledConn, error) {
 // anchorConn opens this connection's anchor stream, performs the HELLO on it,
 // and leaves it open with a watcher reading it.
 //
-// After this returns the connection is authenticated for EVERY stream on it —
-// geode authenticates the connection, not the stream — so pooledHello becomes a
-// pure fast path for every request stream (see pooledConn.anchor).
+// The anchor's HELLO authenticates the anchor and proves the connection is
+// usable before it joins the pool. It does NOT bind anybody else's scope:
+// tenant and graph are applied per stream, so every request stream performs its
+// own handshake (pooledHello, GAP-SONNY806-08). The anchor exists for one
+// reason — to own the connection's lifetime so a finished request stream cannot
+// take its siblings down with it (SONNY-1219, see pooledConn.anchor).
 func (p *QUICPool) anchorConn(ctx context.Context, pc *pooledConn) error {
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
@@ -1357,9 +1364,9 @@ func (p *QUICPool) probeTimeout() time.Duration {
 //
 // The stream is long-lived on purpose: it is opened once and reused by every
 // later probe, so a probe never closes a stream on a live pooled connection
-// (SONNY-1227). It carries no HELLO — on a pooled connection the server
-// authenticates the CONNECTION, which is why every stream after the first
-// already skips the handshake (see pooledHello).
+// (SONNY-1227). It carries no HELLO because it carries no query either: it only
+// pings. It is therefore never a session and never needs a scope, which is why
+// it is the one stream exempt from the per-stream handshake (see pooledHello).
 //
 // The stream is opened DIRECTLY on the pooled connection, not through
 // acquire, so it consumes no admission slot: it is counted neither against
