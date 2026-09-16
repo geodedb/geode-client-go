@@ -122,6 +122,21 @@ type Conn struct {
 	// answer the statement. Nil until the first successful probe; a failed
 	// probe is never stored, so a transient failure cannot pin a refusal.
 	caps atomic.Pointer[Capabilities]
+
+	// ownedPool is a QUIC pool whose ENTIRE lifetime this Conn owns, closed by
+	// Close along with the stream.
+	//
+	// It is set on exactly one path: Driver.Open, the deprecated one-shot API
+	// that builds a private Connector per call and hands back a single Conn.
+	// Nothing else ever closes that Connector, so without this the pool — its
+	// dialed QUIC connections, their anchor streams and its 1Hz probe loop —
+	// outlived the connection for the life of the process, and each of those
+	// streams pins an engine stream-pool worker (see Connector.Close).
+	//
+	// Nil for every pooled Conn reached through a Connector, where the pool is
+	// SHARED by every connection database/sql opens and closing it here would
+	// tear the other connections down. That pool is closed by Connector.Close.
+	ownedPool *QUICPool
 }
 
 // HelloCapabilities returns the capability strings the server advertised in
@@ -603,7 +618,18 @@ func (c *Conn) Close() error {
 		c.activeRows = nil
 	}
 
-	return c.transport.Close()
+	err := c.transport.Close()
+
+	// Driver.Open's private pool, if this is one of its connections. The
+	// stream is closed first: closing the pool tears down the QUIC connection
+	// the stream rides on.
+	if c.ownedPool != nil {
+		if perr := c.ownedPool.Close(); perr != nil && err == nil {
+			err = perr
+		}
+	}
+
+	return err
 }
 
 // Begin starts a transaction.

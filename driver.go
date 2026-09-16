@@ -72,6 +72,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"io"
 )
 
 // registeredDriver is the singleton driver instance used by sql.Register.
@@ -106,7 +107,28 @@ func (d *Driver) Open(name string) (driver.Conn, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), defaultDeprecatedMethodTimeout)
 	defer cancel()
-	return connector.Connect(ctx)
+	conn, err := connector.Connect(ctx)
+	if err != nil {
+		// The connector was built for this one call and nothing else holds it,
+		// so its pool goes with the failed attempt rather than outliving it.
+		if c, ok := connector.(io.Closer); ok {
+			_ = c.Close()
+		}
+		return nil, err
+	}
+
+	// This connector is private to this one call: no Connector.Close will ever
+	// run for it, so the returned connection owns the pool's whole lifetime.
+	// Without this every Driver.Open leaked a pool — see Connector.Close for
+	// what a leaked pool costs the engine.
+	if c, ok := connector.(*Connector); ok && c.quicPool != nil {
+		if gc, ok := conn.(*Conn); ok {
+			gc.ownedPool = c.quicPool
+		} else {
+			_ = c.Close()
+		}
+	}
+	return conn, nil
 }
 
 // OpenConnector returns a Connector for the given DSN.
@@ -219,8 +241,12 @@ type Connector struct {
 	quicPool *QUICPool // shared QUIC connection pool for stream multiplexing
 }
 
-// Compile-time interface check.
-var _ driver.Connector = (*Connector)(nil)
+// Compile-time interface checks. The io.Closer one is load-bearing: it is
+// what makes sql.DB.Close release the shared QUIC pool (see Connector.Close).
+var (
+	_ driver.Connector = (*Connector)(nil)
+	_ io.Closer        = (*Connector)(nil)
+)
 
 // Connect returns a new connection to the database.
 //
@@ -304,6 +330,37 @@ func markBadConn(err error) error {
 		return err
 	}
 	return &badConnError{cause: err}
+}
+
+// Close releases the connector's shared QUIC pool.
+//
+// database/sql calls this from sql.DB.Close when the connector implements
+// io.Closer, and this is the ONLY thing that ever closes the pool. Without it
+// a closed *sql.DB left its whole pool running for the life of the process:
+// every pooled QUIC connection stayed dialed (10s keep-alives against a 120s
+// idle timeout, so the peer never reaped them either), every connection kept
+// its anchor stream open, and the 1Hz health probe loop kept ticking and
+// holding a probe stream on each one.
+//
+// That is a server-side resource leak, not merely a client-side one. Each of
+// those streams pins one worker of the engine's SHARED stream pool for the
+// stream's whole life (geode 0.8.18: default_quic_stream_worker_count = 64,
+// src/server/main.zig:264; the worker is released only when
+// handleAdditionalStream returns, src/server/quic_connection_handler.zig:2891).
+// Against one long-lived engine the 65th sql.Open/db.Close cycle therefore
+// found no free worker and its HELLO was never serviced — "failed to receive
+// HELLO response: context deadline exceeded" (SONNY-806, the RED main
+// pipeline). Measured: with GEODE_QUIC_STREAM_WORKERS=8 the wall moved to the
+// 9th cycle, 1:1 with the worker count.
+//
+// Close is idempotent (QUICPool.Close is), safe on a connector with no pool
+// (gRPC), and deliberately does NOT close the connections database/sql still
+// holds: database/sql closes those first and only then calls this.
+func (c *Connector) Close() error {
+	if c.quicPool == nil {
+		return nil
+	}
+	return c.quicPool.Close()
 }
 
 // Driver returns the underlying Driver.
