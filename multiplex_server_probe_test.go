@@ -32,11 +32,75 @@ import (
 )
 
 const (
-	probeGeodeBinary = "/home/benji/src/devnw/codepros/geode/geode/zig-out/bin/geode"
-	probeGoroutines  = 8
-	probeDuration    = 20 * time.Second
-	probeWedge       = 15 * time.Second
+	probeGoroutines = 8
+	probeDuration   = 20 * time.Second
+	probeWedge      = 15 * time.Second
+
+	// probeGeodeBinaryEnv names a built geode engine binary for the probe
+	// tests to launch.
+	//
+	// It replaces a hard-coded path into one developer's home directory
+	// (2134501). That path existed nowhere else, so every probe test failed at
+	// 0.00s on any other machine — including the CI runner, where it turned the
+	// main pipeline RED (SONNY-806, Lane D Task 16d) with "fork/exec ...: no
+	// such file or directory". A test that can only pass on one machine is not
+	// a gate.
+	probeGeodeBinaryEnv = "GEODE_PROBE_BINARY"
+
+	// probeGeodeBinaryLegacyEnv is the spelling startProbeServer already
+	// honoured as an override; it keeps working so nobody's local shell breaks.
+	probeGeodeBinaryLegacyEnv = "GEODE_BINARY"
+
+	// probeGeodeBinaryName is looked up on PATH when neither variable is set.
+	probeGeodeBinaryName = "geode"
 )
+
+// resolveProbeGeodeBinary finds the engine binary these probe tests launch, or
+// SKIPS.
+//
+// Resolution order: probeGeodeBinaryEnv, then probeGeodeBinaryLegacyEnv, then
+// probeGeodeBinaryName on PATH. Nothing else — in particular no path into
+// anybody's home directory.
+//
+// An env var that names a binary which is not there is a FAILURE, not a skip:
+// the caller asked for a specific engine and did not get it, and silently
+// skipping would hide it. Finding no engine at all is a skip, because these
+// tests need a LOCAL engine build that neither CI nor the container harness
+// has, and "this machine has no engine checkout" must not be reported as a
+// defect in the driver.
+func resolveProbeGeodeBinary(t *testing.T) string {
+	t.Helper()
+
+	for _, env := range []string{probeGeodeBinaryEnv, probeGeodeBinaryLegacyEnv} {
+		v := strings.TrimSpace(os.Getenv(env))
+		if v == "" {
+			continue
+		}
+		// gosec flags the Stat because the path came from the environment.
+		// That is the point: this is a TEST asking the person running it which
+		// engine build to launch, on their own machine, with their own
+		// privileges. The alternative it replaced was a path hard-coded to one
+		// developer's home directory.
+		info, err := os.Stat(v) //nolint:gosec // test-only path, supplied by the operator running the test
+		if err != nil {
+			t.Fatalf("%s=%q names no usable engine binary: %v", env, v, err)
+		}
+		if info.IsDir() {
+			t.Fatalf("%s=%q is a directory, not an engine binary", env, v)
+		}
+		return v
+	}
+
+	if resolved, err := exec.LookPath(probeGeodeBinaryName); err == nil {
+		return resolved
+	}
+
+	t.Skipf("no geode engine binary found: set %s (or %s) to a built engine, "+
+		"or put %q on PATH. These probe tests launch a LOCAL engine process; "+
+		"they cannot run against the container harness.",
+		probeGeodeBinaryEnv, probeGeodeBinaryLegacyEnv, probeGeodeBinaryName)
+	return ""
+}
 
 // findFreeUDPPort finds a free UDP port in [min, max].
 // It binds a UDP socket to probe availability, then releases it.
@@ -59,10 +123,7 @@ func findFreeUDPPort(t *testing.T, min, max int) int {
 func startProbeServer(t *testing.T, port, metricsPort int, tmpDir string) {
 	t.Helper()
 
-	binary := probeGeodeBinary
-	if b := os.Getenv("GEODE_BINARY"); b != "" {
-		binary = b
-	}
+	binary := resolveProbeGeodeBinary(t)
 
 	listenAddr := fmt.Sprintf("127.0.0.1:%d", port)
 	cmd := exec.Command(binary,
