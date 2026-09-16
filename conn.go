@@ -44,10 +44,10 @@ const (
 func transportErrBadConn(err error) error {
 	var te *TransportError
 	if errors.As(err, &te) {
-		return driver.ErrBadConn
+		return &badConnError{cause: err}
 	}
 	if errors.Is(err, io.EOF) {
-		return driver.ErrBadConn
+		return &badConnError{cause: err}
 	}
 	return err
 }
@@ -839,7 +839,23 @@ func (c *Conn) ExecContext(ctx context.Context, query string, args []driver.Name
 		}
 	}
 
+	// The response is complete, so end the request the server's way rather
+	// than leaving it for the next one to reset. See FinishExecStream.
+	finishExecStream(c.transport)
+
 	return &Result{}, nil
+}
+
+// execStreamFinisher is implemented by transports whose every request rides its own
+// server-streaming RPC.
+type execStreamFinisher interface{ FinishExecStream() }
+
+// finishExecStream closes out a completed request stream on transports that
+// have one. A no-op on QUIC, where a request stream is not per-statement.
+func finishExecStream(t Transport) {
+	if f, ok := t.(execStreamFinisher); ok {
+		f.FinishExecStream()
+	}
 }
 
 // QueryContext executes a query that returns rows.

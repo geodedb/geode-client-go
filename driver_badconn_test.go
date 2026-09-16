@@ -86,3 +86,57 @@ func TestMarkBadConn_LeavesNonConnectionErrorsAlone(t *testing.T) {
 		})
 	}
 }
+
+// TestTransportErrBadConn_KeepsTheCause — SONNY-806, Lane D Task 16d.
+//
+// transportErrBadConn is the OTHER bad-conn path: markBadConn guards
+// Connector.Connect, this one guards every statement. It used to collapse any
+// *TransportError into the bare driver.ErrBadConn sentinel, which retires the
+// connection correctly and then tells the caller nothing — inside a
+// transaction, where database/sql cannot retry and hands the error straight
+// back, a 647-statement Pool.BatchExec failed with exactly "statement 3:
+// driver: bad connection" and no way to tell a reset stream from a dropped
+// engine. Everything markBadConn preserves must survive here too.
+func TestTransportErrBadConn_KeepsTheCause(t *testing.T) {
+	te := &TransportError{Op: "recv", Addr: "127.0.0.1:50051", cause: io.EOF}
+	err := transportErrBadConn(te)
+
+	if !errors.Is(err, driver.ErrBadConn) {
+		t.Error("a transport failure must still match driver.ErrBadConn so the conn is retired")
+	}
+	var got *TransportError
+	if !errors.As(err, &got) || got != te {
+		t.Error("the *TransportError must survive: it is the only account of WHY the conn died")
+	}
+	if cls := Classify(err); cls != RetryNewConn {
+		t.Errorf("Classify = %v, want RetryNewConn", cls)
+	}
+	if err.Error() != te.Error() {
+		t.Errorf("the marking changed the message: %q vs %q", err.Error(), te.Error())
+	}
+	if err.Error() == driver.ErrBadConn.Error() {
+		t.Error("the caller must not be handed the bare sentinel's message")
+	}
+}
+
+// TestTransportErrBadConn_KeepsTheCauseForRawEOF covers the other arm: a raw
+// io.EOF from drainExecStream, with no *TransportError around it.
+func TestTransportErrBadConn_KeepsTheCauseForRawEOF(t *testing.T) {
+	err := transportErrBadConn(io.EOF)
+
+	if !errors.Is(err, driver.ErrBadConn) {
+		t.Error("a raw io.EOF must still match driver.ErrBadConn")
+	}
+	if !errors.Is(err, io.EOF) {
+		t.Error("the io.EOF cause must survive")
+	}
+}
+
+// TestTransportErrBadConn_LeavesOtherErrorsAlone — a DriverError (an engine
+// refusal) is not a connection failure and must not be turned into one.
+func TestTransportErrBadConn_LeavesOtherErrorsAlone(t *testing.T) {
+	de := &DriverError{Code: "42501", Message: "Permission denied"}
+	if err := transportErrBadConn(de); err != error(de) {
+		t.Errorf("transportErrBadConn rewrote a non-transport error: %v", err)
+	}
+}

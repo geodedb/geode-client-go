@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"sync"
+	"time"
 
 	"geodedb.com/geode/proto"
 	"google.golang.org/grpc"
@@ -12,6 +13,15 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 )
+
+// finishExecStreamBudget bounds the graceful drain in FinishExecStream.
+//
+// The stream being drained has already delivered everything the driver asked
+// for, so the only thing left on it is the server's end-of-stream; that arrives
+// in microseconds on a healthy connection. The budget exists so a server that
+// never ends it degrades to the old reset behaviour instead of blocking the
+// caller — it is a backstop, not a wait anybody should ever observe.
+const finishExecStreamBudget = 2 * time.Second
 
 // GRPCTransport implements Transport over gRPC.
 type GRPCTransport struct {
@@ -460,6 +470,68 @@ func (t *GRPCTransport) CancelActiveStream() {
 	t.execStream = nil
 	t.mu.Unlock()
 
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// FinishExecStream ends the Execute RPC this transport is reading the way the
+// SERVER expects: half-closed and drained to its trailers, not reset.
+//
+// Every Execute opens its own server-streaming RPC and the driver stops reading
+// as soon as it has what it asked for, so until this existed the RPC was left
+// dangling and the NEXT Execute tore it down with an RST_STREAM (see the
+// ordering note in SendProto). A statement-per-RPC workload therefore emitted
+// one RST_STREAM per statement, and the engine's vendored grpc-zig races that
+// reset against its own handler: it reports `gRPC streaming: failed to send
+// initial response error=PeerGone` and then drops the WHOLE TCP connection
+// rather than the one stream (`error: Handler error: error.PeerGone`), so a
+// 647-statement Pool.BatchExec died mid-transaction with `rpc error: code =
+// Unavailable desc = error reading from server: EOF` at a statement number that
+// moved run to run. Draining instead of resetting keeps the driver off that
+// race: a stream the server finished itself is never reset.
+//
+// It is called only where the driver KNOWS the response is complete. A result
+// the engine is still pushing must still be cancelled, not drained — draining
+// one of those is what GAP-SONNY806-07 parks on — so CancelActiveStream stays
+// exactly as it was.
+//
+// The drain is bounded by finishExecStreamBudget and falls back to cancelling.
+// A server that will not end a stream it has already answered gets the reset it
+// used to get, on a timer, instead of hanging the caller.
+func (t *GRPCTransport) FinishExecStream() {
+	t.mu.Lock()
+	stream := t.execStream
+	cancel := t.execCancel
+	t.execStream = nil
+	t.execCancel = nil
+	t.mu.Unlock()
+
+	if stream == nil {
+		if cancel != nil {
+			cancel()
+		}
+		return
+	}
+
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		for {
+			if _, err := stream.Recv(); err != nil {
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-drained:
+	case <-time.After(finishExecStreamBudget):
+	}
+
+	// Always run cancel: after a clean drain the RPC is already over and this
+	// only releases the context's resources, and after a timeout it is the
+	// teardown that stops the goroutine above.
 	if cancel != nil {
 		cancel()
 	}
