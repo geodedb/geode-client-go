@@ -260,6 +260,10 @@ instead of matching engine prose.
 > reproducer `TestIntegration_CrossTenantReadIsDenied` is RED by design until
 > the engine fixes it. **Do not rely on tenant binding as an isolation boundary
 > at 0.8.15.**
+>
+> **Fixed at the pinned engine 0.8.18** (`0beb108b`, SONNY-1318/1326), verified
+> 2026-09-16; `TestIntegration_CrossTenantReadIsDenied` now passes. Everything
+> above describes 0.8.15 and is kept as the record of what was measured there.
 
 ## Cancellation
 

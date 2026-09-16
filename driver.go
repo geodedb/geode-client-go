@@ -225,9 +225,9 @@ var _ driver.Connector = (*Connector)(nil)
 // Connect returns a new connection to the database.
 //
 // For QUIC transport with a shared pool, this opens a new QUIC stream on a
-// pooled connection rather than dialing a new QUIC connection. The HELLO
-// handshake is performed once per underlying QUIC connection, and subsequent
-// streams inherit the authenticated state.
+// pooled connection rather than dialing a new QUIC connection. Every stream
+// performs its own HELLO handshake: it carries the session's tenant and
+// graph binding and the engine applies both per stream (GAP-SONNY806-08).
 // A connection-level failure is reported as driver.ErrBadConn so database/sql
 // transparently retries on a FRESH connection instead of handing the transport
 // error to the caller — see markBadConn.
