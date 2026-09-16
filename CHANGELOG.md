@@ -396,6 +396,55 @@ kept as the record of what was measured there.
 
 ### Fixed
 
+- **Every COMPLETED gRPC request now finishes its `Execute` stream, not just a
+  successful `ExecContext`** (SONNY-806, Lane D Task 16e). Task 16d finished the
+  stream on one path out of four. Three others still handed a pooled connection
+  back with a live server-streaming RPC on it — a statement the ENGINE REFUSED
+  (`ExecContext`'s `DriverError` branch returned early), an `EXPLAIN` or
+  `PROFILE` (`plan.go`'s `collectPlanFrames` never finished one at all), and a
+  `Rows` read to its FINAL page (`Rows.Close` cancelled every pushed-page
+  stream, finished or not). The next statement on that connection then reset
+  the stream, and the engine's vendored grpc-zig escalates ONE stream reset
+  into a whole-connection teardown, which reaches the caller as
+  `Unavailable: error reading from server: EOF`. That is what turned pipeline
+  2855806396's gRPC lane red at
+  `TestIntegration_GRPCExplainBindsArgumentsRatherThanInliningThem`, one
+  statement after a `CREATE INDEX` the engine refused with 42P07. A refusal and
+  a final page are both COMPLETE answers, so both are now finished the way a
+  successful statement is; `CancelActiveStream` stays for the one case that
+  needs it — a result the engine may still be pushing, which must never be
+  drained. `GRPCTransport.ExecStreamResets` counts the resets the driver still
+  makes the engine handle so a regression is a number, not a race: it is 0 for
+  a workload in which every request completed.
+- **The sustained-ingest reproduction no longer writes 30,000 nodes into the
+  graph every other test bulk-deletes** (SONNY-806, Lane D Task 16e).
+  `TestConn_SustainedSingleConnIngest_NoWedge` now binds its own graph. On CI's
+  ONE `services:` engine — not the testcontainers harness, which gives each
+  test a fresh engine and hides all of this — its 30,000 twenty-property nodes
+  outlived it, because its cleanup ran under a fixed 30 s budget and threw the
+  result away. `cleanupTestData`'s whole-graph `MATCH (n) DETACH DELETE n` then
+  inherited them under the same fixed budget, and on a slower runner that
+  delete no longer fitted: `TestDocker_CreateNode` burned 34 s and gave up,
+  `TestDocker_CreateMultipleNodes` queued behind the delete nobody had
+  cancelled and died at its deadline, and every test after it did the same
+  until the 20-minute package timeout. QUIC carries no cancel message, so an
+  abandoned statement is not a cancelled one — measured against 0.8.18, a
+  `MATCH (n) DETACH DELETE n` over 8,000 nodes abandoned at a 2 s deadline
+  reported `context deadline exceeded` to the caller and the NEXT `CREATE`, on
+  a different pool over a different QUIC connection, took 10.5 s; the seven
+  after it took 3 ms each.
+- **A cleanup that did not finish now says so** (SONNY-806, Lane D Task 16e).
+  `cleanupTestData` fails the test instead of discarding the error — a graph
+  that could not be cleaned is a graph the next test cannot trust — and
+  `cleanupLabel` logs it. The silent `_, _ =` is what let one over-budget
+  delete cascade through forty later tests without a single line naming it.
+- **A statement abandoned at a deadline no longer reads like a statement that
+  did not run** (SONNY-806, Lane D Task 16e). `Conn.ExecContext` annotates a
+  context error raised while the engine was executing: the statement was
+  abandoned by this client, not cancelled, the engine is still running it, and
+  later statements on that graph queue behind it. The wrap is `%w` on the
+  original, so `errors.Is(err, context.DeadlineExceeded)` and every
+  classification built on it are unchanged; only what a human reads differs.
 - **A closed `*sql.DB` no longer leaks its QUIC pool — which was leaking ENGINE
   stream workers, not just client memory** (SONNY-806, Lane D Task 16d). The
   `Connector` owns the shared `QUICPool` and nothing else can reach it, but it
