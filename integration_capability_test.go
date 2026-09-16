@@ -124,17 +124,21 @@ func TestIntegration_ServerInfoReadOnly(t *testing.T) {
 	}
 }
 
-// TestIntegration_HelloCapabilitiesInheritedByPooledStreams proves that EVERY
-// stream on a pooled QUIC connection reports what the server said in HELLO,
-// not just the first one.
+// TestIntegration_EveryPooledStreamGetsItsOwnHelloResponse proves that EVERY
+// stream on a pooled QUIC connection reports a HELLO response of its own, not
+// just the first one — and that the two are DIFFERENT SESSIONS.
 //
-// Since GAP-SONNY806-08 every request stream performs its own handshake — HELLO
-// carries the tenant and graph binding and the engine applies both per stream —
-// so this now asserts that a sibling stream gets its own answer rather than an
-// empty one. Both connections are held open at once deliberately: the second
-// must be a stream on the same already-anchored QUIC connection for the
-// property to be under test.
-func TestIntegration_HelloCapabilitiesInheritedByPooledStreams(t *testing.T) {
+// Before GAP-SONNY806-08 was fixed this test asserted the opposite: that a
+// sibling stream inherited the first stream's session id, because only the
+// first stream handshook. That inheritance was the defect. HELLO carries the
+// session's tenant and graph binding and the engine applies both per stream, so
+// every request stream now performs its own handshake and the server answers
+// each with its own session.
+//
+// Both connections are held open at once deliberately: the second must be a
+// stream on the same already-anchored QUIC connection for the property to be
+// under test.
+func TestIntegration_EveryPooledStreamGetsItsOwnHelloResponse(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -159,28 +163,41 @@ func TestIntegration_HelloCapabilitiesInheritedByPooledStreams(t *testing.T) {
 	}
 	defer func() { _ = second.Close() }()
 
-	handshaker, ok := first.(*Conn)
+	firstConn, ok := first.(*Conn)
 	if !ok {
 		t.Fatalf("first conn is %T, want *Conn", first)
 	}
-	inheritor, ok := second.(*Conn)
+	sibling, ok := second.(*Conn)
 	if !ok {
 		t.Fatalf("second conn is %T, want *Conn", second)
 	}
 
-	if len(handshaker.HelloCapabilities()) == 0 {
-		t.Fatal("the handshaking connection reported no HELLO capabilities; the test would prove nothing")
+	if len(firstConn.HelloCapabilities()) == 0 {
+		t.Fatal("the first connection reported no HELLO capabilities; the test would prove nothing")
 	}
-	if got, want := strings.Join(inheritor.HelloCapabilities(), ","), strings.Join(handshaker.HelloCapabilities(), ","); got != want {
-		t.Errorf("inherited HELLO capabilities = %q, want %q", got, want)
+	// The sibling handshook too, so it reports its own non-empty answer.
+	if len(sibling.HelloCapabilities()) == 0 {
+		t.Error("the sibling stream reported NO HELLO capabilities: it did not handshake, " +
+			"so the server applied no tenant and no graph to it (GAP-SONNY806-08)")
 	}
-	if inheritor.SessionID() != handshaker.SessionID() {
-		t.Errorf("inherited session id = %q, want %q", inheritor.SessionID(), handshaker.SessionID())
+	if sibling.SessionID() == "" {
+		t.Error("the sibling stream reported no session id: it did not handshake (GAP-SONNY806-08)")
 	}
-	if inheritor.BoundGraph() != handshaker.BoundGraph() {
-		t.Errorf("inherited bound graph = %q, want %q", inheritor.BoundGraph(), handshaker.BoundGraph())
+	// Same server, same DSN: the negotiated capability set and the bound graph
+	// must agree. The SESSION must not.
+	if got, want := strings.Join(sibling.HelloCapabilities(), ","), strings.Join(firstConn.HelloCapabilities(), ","); got != want {
+		t.Errorf("sibling HELLO capabilities = %q, want %q", got, want)
 	}
-	t.Logf("HELLO capabilities: %v (session %q)", handshaker.HelloCapabilities(), handshaker.SessionID())
+	if sibling.BoundGraph() != firstConn.BoundGraph() {
+		t.Errorf("sibling bound graph = %q, want %q", sibling.BoundGraph(), firstConn.BoundGraph())
+	}
+	if sibling.SessionID() == firstConn.SessionID() {
+		t.Errorf("both streams report session %q: a stream that reuses another stream's "+
+			"HELLO response never told the server who it was (GAP-SONNY806-08)",
+			sibling.SessionID())
+	}
+	t.Logf("HELLO capabilities: %v; sessions %q and %q on one pooled connection",
+		firstConn.HelloCapabilities(), firstConn.SessionID(), sibling.SessionID())
 }
 
 // writeCapabilityGolden rewrites the committed snapshot from live engine rows.
