@@ -92,11 +92,24 @@ func warmPool(t *testing.T, db *sql.DB, maxOpen int) {
 }
 
 // cleanupLabel deletes all nodes with the given GQL label.
+//
+// It does NOT swallow the result. A cleanup the client gave up on is not a
+// cleanup that did not happen: QUIC carries no cancel message, so the engine
+// finishes the DELETE regardless (measured — a 30s-abandoned DETACH DELETE of
+// 30,000 nodes reported `context deadline exceeded` to the caller and left 0
+// nodes behind), and until it does, every later statement queues behind it.
+// A silent `_, _ =` here is what let one over-budget delete cascade through
+// forty later tests in pipeline 2855806396. Logging it names the test that
+// made the mess at the moment it made it.
 func cleanupLabel(t *testing.T, db *sql.DB, label string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	_, _ = db.ExecContext(ctx, fmt.Sprintf("MATCH (n:%s) DETACH DELETE n", label))
+	if _, err := db.ExecContext(ctx, fmt.Sprintf("MATCH (n:%s) DETACH DELETE n", label)); err != nil {
+		t.Logf("CLEANUP INCOMPLETE: MATCH (n:%s) DETACH DELETE n: %v — "+
+			"the engine is still executing it and the statements after this "+
+			"one queue behind it", label, err)
+	}
 }
 
 // loadCtx returns a context with a 30-second deadline.

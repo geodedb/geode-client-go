@@ -276,12 +276,31 @@ func queryCtx() (context.Context, context.CancelFunc) {
 }
 
 // cleanupTestData removes test data created during tests.
+//
+// This is a WHOLE-GRAPH delete on an engine every other test in this file
+// shares, and its cost is therefore whatever the suite has accumulated, not
+// whatever the calling test created. That makes an over-budget run here
+// contagious: QUIC has no cancel message, so the engine keeps executing the
+// delete this client has given up on, and every statement after it — in this
+// test and in every test that follows — waits behind it. Pipeline 2855806396
+// died exactly that way: one 34s cleanup was abandoned at the 30s budget and
+// swallowed, and from the next test on nothing completed again.
+//
+// So it fails the test instead of returning quietly. A graph that could not be
+// cleaned is a graph the next test cannot trust, and the failure belongs to
+// the test that could not clean it.
 func cleanupTestData(t *testing.T, db *sql.DB) {
+	t.Helper()
 	ctx, cancel := queryCtx()
 	defer cancel()
 
 	// Delete all test nodes
-	_, _ = db.ExecContext(ctx, "MATCH (n) DETACH DELETE n")
+	if _, err := db.ExecContext(ctx, "MATCH (n) DETACH DELETE n"); err != nil {
+		t.Errorf("cleanupTestData: MATCH (n) DETACH DELETE n: %v — the shared "+
+			"graph was left dirty and the engine is still working through the "+
+			"delete this client abandoned; every test after this one runs "+
+			"behind it", err)
+	}
 }
 
 // =============================================================================
