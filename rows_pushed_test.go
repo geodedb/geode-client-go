@@ -442,3 +442,84 @@ func TestConn_PushedPages_RefusedExecFinishesItsStream(t *testing.T) {
 			"the stream is in sync, and the connection must stay poolable")
 	}
 }
+
+// TestConn_PushedPages_RefusedQueryFinishesItsStream is the unit half of
+// TestIntegration_GRPCRefusedQueryLeavesNoStreamToReset (SONNY-806 Task 16f,
+// F-16e-01).
+//
+// QueryContext's engine-refusal branch — the immediate-error-frame arm at
+// conn.go's `execResp.GetError() != nil` — returned the DriverError without
+// retiring the request stream, byte-for-byte the same gap
+// TestConn_PushedPages_RefusedExecFinishesItsStream closed for ExecContext.
+// No Rows is created on this path, so Rows.Close never runs to finish it: a
+// refused read query (cross-tenant denied, a type error, a missing label) hands
+// a pooled connection back with a live Execute RPC on it, and the statement
+// after it resets that RPC.
+func TestConn_PushedPages_RefusedQueryFinishesItsStream(t *testing.T) {
+	fastDrainTimeout(t)
+	ctx := context.Background()
+
+	pt := &pushTransport{mockTransport: newMockTransport()}
+	c := newConn(&Config{PageSize: 100}, pt)
+	pt.push(mockErrorMsg("42601", "syntax error"))
+
+	_, err := c.QueryContext(ctx, "MATCH (n RETURN n", nil)
+	var de *DriverError
+	if !errors.As(err, &de) {
+		t.Fatalf("QueryContext returned %v, want a DriverError refusal", err)
+	}
+	if de.Code != "42601" {
+		t.Fatalf("DriverError code = %q, want 42601", de.Code)
+	}
+	if n := pt.finishCount(); n != 1 {
+		t.Fatalf("FinishExecStream called %d time(s) after a refused query, want 1: "+
+			"the refusal is the engine's complete answer, and no Rows was created for "+
+			"Rows.Close to finish it — a stream left live is one the next statement "+
+			"resets, which the engine escalates into a whole-connection teardown", n)
+	}
+	if n := pt.cancelCount(); n != 0 {
+		t.Fatalf("CancelActiveStream called %d time(s) after a refused query, want 0", n)
+	}
+	if !c.IsValid() {
+		t.Fatal("IsValid() is false after an ENGINE refusal: the statement was answered, " +
+			"the stream is in sync, and the connection must stay poolable")
+	}
+}
+
+// TestConn_PushedPages_RefusedQueryAfterSchemaFinishesItsStream covers
+// QueryContext's OTHER refusal branch: an error frame arriving as the page
+// response that follows a schema frame (conn.go's
+// `pageExecResp.GetError() != nil` arm). Same defect, same fix, different
+// shape of engine answer — a schema the engine could describe, followed by a
+// refusal instead of the data page it promised.
+func TestConn_PushedPages_RefusedQueryAfterSchemaFinishesItsStream(t *testing.T) {
+	fastDrainTimeout(t)
+	ctx := context.Background()
+
+	pt := &pushTransport{mockTransport: newMockTransport()}
+	c := newConn(&Config{PageSize: 100}, pt)
+	pt.push(mockSchemaMsg([]string{"i"}))
+	pt.push(mockErrorMsg("02000", "No active result set"))
+
+	_, err := c.QueryContext(ctx, "MATCH (n:X) RETURN n.i", nil)
+	var de *DriverError
+	if !errors.As(err, &de) {
+		t.Fatalf("QueryContext returned %v, want a DriverError refusal", err)
+	}
+	if de.Code != "02000" {
+		t.Fatalf("DriverError code = %q, want 02000", de.Code)
+	}
+	if n := pt.finishCount(); n != 1 {
+		t.Fatalf("FinishExecStream called %d time(s) after a schema-then-refused query, "+
+			"want 1: no Rows was created for Rows.Close to finish it, and a stream left "+
+			"live is one the next statement resets", n)
+	}
+	if n := pt.cancelCount(); n != 0 {
+		t.Fatalf("CancelActiveStream called %d time(s) after a schema-then-refused query, "+
+			"want 0", n)
+	}
+	if !c.IsValid() {
+		t.Fatal("IsValid() is false after an ENGINE refusal: the statement was answered, " +
+			"the stream is in sync, and the connection must stay poolable")
+	}
+}

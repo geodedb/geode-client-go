@@ -971,6 +971,13 @@ func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.Nam
 	}
 
 	if execResp.GetError() != nil {
+		// Same rationale as ExecContext's refusal branch (conn.go, F-16d-01): a
+		// refusal is a COMPLETE answer, and no Rows is created here for
+		// Rows.Close to finish it on. Left unfinished, the request stream stays
+		// live on the pooled connection and the next statement resets it, which
+		// grpc-zig escalates into a whole-connection teardown (SONNY-806 Task
+		// 16f, F-16e-01).
+		finishExecStream(c.transport)
 		c.mu.Unlock()
 		return nil, &DriverError{
 			Code:    execResp.GetError().GetCode(),
@@ -1001,6 +1008,12 @@ func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.Nam
 		}
 		pageExecResp := pageResp.GetExecute()
 		if pageExecResp != nil && pageExecResp.GetError() != nil {
+			// Same as the refusal branch above: the engine's answer to this
+			// statement is complete (a schema frame followed by an error frame
+			// instead of a data page), no Rows is created, and the request
+			// stream must be finished here or the next statement resets it
+			// (SONNY-806 Task 16f, F-16e-01).
+			finishExecStream(c.transport)
 			c.mu.Unlock()
 			return nil, &DriverError{
 				Code:    pageExecResp.GetError().GetCode(),

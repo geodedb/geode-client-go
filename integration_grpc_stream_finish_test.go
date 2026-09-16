@@ -285,3 +285,107 @@ func TestIntegration_GRPCRefusedThenPlanOnOneConnection(t *testing.T) {
 		}
 	}
 }
+
+// TestIntegration_GRPCRefusedQueryLeavesNoStreamToReset is F-16e-01: the
+// review's "fifth path" ExecContext's fix did not cover.
+//
+// QueryContext's engine-refusal branches returned the DriverError straight
+// from the error branch without finishing the request stream — no Rows is
+// created on a refusal, so Rows.Close never runs to finish it on their
+// behalf. Byte-for-byte the same defect TestIntegration_GRPCRefusedExecLeavesNoStreamToReset
+// closed for ExecContext (F-16d-01), reached through a refused READ instead
+// of a refused write: a syntax error is the simplest statement the engine
+// parses and rejects without ever touching a graph, but the same gap is
+// reachable through a cross-tenant-denied MATCH, a type error or a missing
+// label/procedure — any refusal that returns via conn.go's QueryContext
+// error branches.
+func TestIntegration_GRPCRefusedQueryLeavesNoStreamToReset(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn := grpcDriverConn(t, ctx, grpcBatchGraph)
+	transport, ok := conn.transport.(*GRPCTransport)
+	if !ok {
+		t.Fatalf("gRPC conn carries a %T, want *GRPCTransport", conn.transport)
+	}
+
+	const refused = "MATCH (n RETURN n"
+
+	for i := range 5 {
+		_, err := conn.QueryContext(ctx, refused, nil)
+		var de *DriverError
+		if !errors.As(err, &de) {
+			t.Fatalf("round %d: a syntax error returned %v, want a DriverError "+
+				"refusal — the test is not exercising the engine-refusal path at all",
+				i, err)
+		}
+
+		transport.mu.Lock()
+		stream, streamCancel := transport.execStream, transport.execCancel
+		transport.mu.Unlock()
+
+		if stream != nil {
+			t.Fatalf("round %d: the refused query (%s) left its Execute RPC "+
+				"dangling; the next statement resets it and the engine drops the "+
+				"whole connection on that race", i, de.Code)
+		}
+		if streamCancel != nil {
+			t.Fatalf("round %d: the refused query left an exec cancel func behind", i)
+		}
+	}
+
+	if n := transport.ExecStreamResets(); n != 0 {
+		t.Fatalf("refused queries reset %d live Execute RPCs; every reset is a "+
+			"whole-connection teardown the engine has to survive, and a refusal "+
+			"has nothing to reset", n)
+	}
+
+	// The connection must still be usable for a normal statement afterwards —
+	// the whole point of finishing rather than leaving the stream live.
+	if _, err := conn.ExecContext(ctx, "MERGE (n:GRPCFinishProbe {i: 999})", nil); err != nil {
+		t.Fatalf("statement after the refused queries: %v", err)
+	}
+}
+
+// TestIntegration_GRPCRefusedQueryThenQueryOnOneConnection is the CI shape for
+// F-16e-01, black-box: a refused QUERY followed by a second, successful
+// statement on the SAME connection, repeated enough rounds to make the
+// engine's racy RST_STREAM-to-connection-teardown escalation a certainty
+// rather than a coin flip (see TestIntegration_GRPCRefusedThenPlanOnOneConnection,
+// which pins the same shape for ExecContext/EXPLAIN). Pre-fix this fails with
+// the CI message verbatim:
+//
+//	geode: Pool.Query: geode: Conn.QueryContext: geode: transport recv to …:
+//	rpc error: code = Unavailable desc = error reading from server: EOF
+//
+// Post-fix, every round succeeds.
+func TestIntegration_GRPCRefusedQueryThenQueryOnOneConnection(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	conn := grpcDriverConn(t, ctx, grpcBatchGraph)
+	if _, err := conn.ExecContext(ctx, "MERGE (n:GRPCFinishProbe {i: 0})", nil); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	const refused = "MATCH (n RETURN n"
+
+	for i := range 300 {
+		if _, err := conn.QueryContext(ctx, refused, nil); err == nil {
+			t.Fatalf("round %d: syntax-error query succeeded; the refusal arm is "+
+				"not being exercised", i)
+		}
+
+		rows, err := conn.QueryContext(ctx, "MATCH (n:GRPCFinishProbe {i: 0}) RETURN n.i", nil)
+		if err != nil {
+			t.Fatalf("round %d: query after a refused query on the same connection: %v", i, err)
+		}
+		n := drainDriverRows(t, rows)
+		if err := rows.Close(); err != nil {
+			t.Fatalf("round %d: rows.Close: %v", i, err)
+		}
+		if n == 0 {
+			t.Fatalf("round %d: 0 rows back from the seeded node", i)
+		}
+	}
+}
