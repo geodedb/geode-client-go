@@ -151,9 +151,25 @@ func (r *Rows) Close() error {
 	// already-finished RPC's context) and keeps a healthy connection in the
 	// pool. markConnFailed would trade a wedge for a needless eviction and
 	// re-dial on every Close.
+	//
+	// WHICH of the two teardowns is used matters, and that is what `final`
+	// decides. A result the engine may STILL be pushing has to be CANCELLED:
+	// draining it would mean reading a result nobody wants, page after page,
+	// for as long as the engine cares to send it. A result that reached its
+	// final page has nothing left on it but the server's end-of-stream, and
+	// cancelling THAT emits an RST_STREAM the engine's grpc-zig escalates
+	// into a whole-connection teardown — the next RPC on that connection dies
+	// with `Unavailable: error reading from server: EOF` (SONNY-806 Task 16e,
+	// F-16d-02). So a finished result is FINISHED, the same way ExecContext
+	// finishes a completed statement, and only an abandoned one is cancelled.
 	if r.conn.transport.PagesArePushed() {
-		if sc, ok := r.conn.transport.(streamCanceller); ok {
-			sc.CancelActiveStream()
+		switch {
+		case final:
+			finishExecStream(r.conn.transport)
+		default:
+			if sc, ok := r.conn.transport.(streamCanceller); ok {
+				sc.CancelActiveStream()
+			}
 		}
 	}
 

@@ -32,16 +32,30 @@ type pushTransport struct {
 
 	cancelMu sync.Mutex
 	cancels  int
+	finishes int
 }
 
 func (t *pushTransport) PagesArePushed() bool { return true }
 
 // CancelActiveStream makes pushTransport a streamCanceller, the way
 // GRPCTransport is, and counts the calls. On the real transport this tears
-// down the server-streaming Execute RPC; here it only has to be observable.
+// down the server-streaming Execute RPC with an RST_STREAM the engine
+// escalates into a whole-connection teardown; here it only has to be
+// observable.
 func (t *pushTransport) CancelActiveStream() {
 	t.cancelMu.Lock()
 	t.cancels++
+	t.cancelMu.Unlock()
+}
+
+// FinishExecStream makes pushTransport an execStreamFinisher, the way
+// GRPCTransport is. On the real transport this half-closes an ANSWERED request
+// and drains it to its trailers — no reset, nothing for the engine to
+// escalate. Which of the two a Close picks is the whole point of
+// TestRows_PushedPages_FullReadFinishesInsteadOfResetting.
+func (t *pushTransport) FinishExecStream() {
+	t.cancelMu.Lock()
+	t.finishes++
 	t.cancelMu.Unlock()
 }
 
@@ -49,6 +63,12 @@ func (t *pushTransport) cancelCount() int {
 	t.cancelMu.Lock()
 	defer t.cancelMu.Unlock()
 	return t.cancels
+}
+
+func (t *pushTransport) finishCount() int {
+	t.cancelMu.Lock()
+	defer t.cancelMu.Unlock()
+	return t.finishes
 }
 
 // mockErrorMsg builds an ExecutionResponse carrying an engine error, the frame
@@ -212,29 +232,38 @@ func TestRows_PushedPages_EarlyCloseCancelsTheStream(t *testing.T) {
 	if n := pt.cancelCount(); n != 1 {
 		t.Fatalf("CancelActiveStream called %d time(s) after a second Close, want 1", n)
 	}
+	if n := pt.finishCount(); n != 0 {
+		t.Fatalf("FinishExecStream called %d time(s) on a NON-final Close, want 0: "+
+			"draining a result the engine is still pushing means reading pages "+
+			"nobody wants for as long as the engine cares to send them — that one "+
+			"has to be cancelled (SONNY-806 Task 16e)", n)
+	}
 }
 
-// TestRows_PushedPages_FullReadAlsoCancels is the other half: a result read
-// to its final page still gets its Execute context cancelled on Close, same
-// as an early one.
+// TestRows_PushedPages_FullReadFinishesInsteadOfResetting is the other half: a
+// result read to its final page must still have its Execute retired on Close —
+// but FINISHED, not reset.
 //
-// This looks redundant on the wire — the RPC already finished sending — but
-// it is not redundant in the driver's own bookkeeping. Before this fix, a
-// final Close left GRPCTransport.execCancel/execStream referencing a spent
-// RPC's context with nothing scheduled to retire it: the only remaining
-// triggers were the next Execute on THIS SAME connection (which cancels the
-// previous stream before issuing its own, still holding the connection
-// exclusively) and the transport's own Close. Between this Close returning
-// the connection to database/sql's pool and either of those firing, that
-// child context sits alive, its fate tied to whatever unrelated deadline or
-// cancellation its parent (the caller's query context) eventually hits —
-// unordered against whichever statement next borrows this connection. That
-// race is what measured as driver.ErrBadConn on a later, unrelated
-// transaction (GAP-SONNY806-07, SONNY-1560). Cancelling on every Close, while
-// the connection is still exclusively held, retires the context
-// deterministically instead of leaving it to outlive the connection's return
-// to the pool.
-func TestRows_PushedPages_FullReadAlsoCancels(t *testing.T) {
+// Retiring it at all is not redundant, even though the RPC has finished
+// sending. Before Task 14b, a final Close left
+// GRPCTransport.execCancel/execStream referencing a spent RPC's context with
+// nothing scheduled to retire it: the only remaining triggers were the next
+// Execute on THIS SAME connection and the transport's own Close. Between this
+// Close returning the connection to database/sql's pool and either of those
+// firing, that child context sat alive, its fate tied to whatever unrelated
+// deadline its parent eventually hit — unordered against whichever statement
+// next borrowed the connection (GAP-SONNY806-07, SONNY-1560).
+//
+// WHICH retirement it gets is Task 16e, and it is not cosmetic. Cancelling
+// emits an RST_STREAM, and the engine's vendored grpc-zig turns one stream
+// reset into a whole-connection teardown — the next RPC on that connection
+// dies with `Unavailable: error reading from server: EOF`, which is exactly
+// what failed pipeline 2855806396's gRPC lane. A result that reached its final
+// page has nothing left on its stream but the server's end-of-stream, so it is
+// finished the way ExecContext finishes a completed statement. Cancelling stays
+// for the case that genuinely needs it: a result the engine may still be
+// pushing (the test above).
+func TestRows_PushedPages_FullReadFinishesInsteadOfResetting(t *testing.T) {
 	fastDrainTimeout(t)
 	ctx := context.Background()
 
@@ -247,10 +276,15 @@ func TestRows_PushedPages_FullReadAlsoCancels(t *testing.T) {
 	if err := rows.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if n := pt.cancelCount(); n != 1 {
-		t.Fatalf("CancelActiveStream called %d time(s) after a fully-read result, want 1: "+
-			"the finished Execute's context must be retired on Close, not left to outlive "+
-			"the connection's return to the pool (GAP-SONNY806-07, SONNY-1560)", n)
+	if n := pt.finishCount(); n != 1 {
+		t.Fatalf("FinishExecStream called %d time(s) after a fully-read result, want 1: "+
+			"the finished Execute must be retired on Close, not left to outlive the "+
+			"connection's return to the pool (GAP-SONNY806-07, SONNY-1560)", n)
+	}
+	if n := pt.cancelCount(); n != 0 {
+		t.Fatalf("CancelActiveStream called %d time(s) after a fully-read result, want 0: "+
+			"a reset on an answered stream is an RST_STREAM the engine escalates into a "+
+			"whole-connection teardown (SONNY-806 Task 16e)", n)
 	}
 	if !c.IsValid() {
 		t.Fatal("IsValid() is false after a fully-read pushed result")
@@ -364,5 +398,47 @@ func TestTransportsAgreeOnWhoDrivesPaging(t *testing.T) {
 	if !gt.PagesArePushed() {
 		t.Error("GRPCTransport.PagesArePushed() = false, want true: geode 0.8.15 " +
 			"serves Execute as a server-streaming RPC and pushes every page")
+	}
+}
+
+// TestConn_PushedPages_RefusedExecFinishesItsStream is the unit half of
+// TestIntegration_GRPCRefusedExecLeavesNoStreamToReset (SONNY-806 Task 16e,
+// F-16d-01).
+//
+// ExecContext's engine-refusal branch returned the DriverError without
+// retiring the request stream at all, so a refused statement — a duplicate
+// CREATE INDEX, a constraint violation, a syntax error inside a batch — handed
+// a pooled connection back with a live Execute RPC on it, and the statement
+// after it reset that RPC. A refusal is a COMPLETE answer: the engine planned
+// the statement, rejected it, and will send nothing else, so the stream is
+// finished, not cancelled.
+func TestConn_PushedPages_RefusedExecFinishesItsStream(t *testing.T) {
+	fastDrainTimeout(t)
+	ctx := context.Background()
+
+	pt := &pushTransport{mockTransport: newMockTransport()}
+	c := newConn(&Config{PageSize: 100}, pt)
+	pt.push(mockErrorMsg("42P07", "Duplicate index name"))
+
+	_, err := c.ExecContext(ctx, "CREATE INDEX x_idx ON X(i) USING btree", nil)
+	var de *DriverError
+	if !errors.As(err, &de) {
+		t.Fatalf("ExecContext returned %v, want a DriverError refusal", err)
+	}
+	if de.Code != "42P07" {
+		t.Fatalf("DriverError code = %q, want 42P07", de.Code)
+	}
+	if n := pt.finishCount(); n != 1 {
+		t.Fatalf("FinishExecStream called %d time(s) after a refused statement, want 1: "+
+			"the refusal is the engine's complete answer, and a stream left live is one "+
+			"the next statement resets — which the engine escalates into a "+
+			"whole-connection teardown", n)
+	}
+	if n := pt.cancelCount(); n != 0 {
+		t.Fatalf("CancelActiveStream called %d time(s) after a refused statement, want 0", n)
+	}
+	if !c.IsValid() {
+		t.Fatal("IsValid() is false after an ENGINE refusal: the statement was answered, " +
+			"the stream is in sync, and the connection must stay poolable")
 	}
 }

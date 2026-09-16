@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"geodedb.com/geode/proto"
@@ -57,10 +58,25 @@ type GRPCTransport struct {
 	// rows.go).
 	execCancel context.CancelFunc
 
+	// streamResets counts the Execute RPCs this transport tore down with
+	// CancelActiveStream while they were still live — i.e. every RST_STREAM
+	// the driver made the engine handle. The engine's vendored grpc-zig turns
+	// ONE stream reset into a whole-connection teardown
+	// (zig-pkg/grpc_zig/src/server.zig treats an inbound RST_STREAM exactly
+	// like GOAWAY), so this is not a statistic: it is the count of times the
+	// driver put a pooled connection at risk. Regression tests assert it stays
+	// at zero for requests that completed (SONNY-806 Task 16e).
+	streamResets atomic.Uint64
+
 	mu     sync.Mutex
 	closed bool
 	addr   string
 }
+
+// ExecStreamResets reports how many live Execute RPCs this transport has torn
+// down with a reset rather than finishing. Zero is the only correct value for
+// a workload in which every request ran to completion.
+func (t *GRPCTransport) ExecStreamResets() uint64 { return t.streamResets.Load() }
 
 // NewGRPCTransport creates a new gRPC transport to the Geode server.
 func NewGRPCTransport(_ context.Context, cfg *Config) (*GRPCTransport, error) {
@@ -210,6 +226,11 @@ func (t *GRPCTransport) SendProto(ctx context.Context, msg *proto.QuicClientMess
 		t.execStream = nil
 		t.mu.Unlock()
 		if prev != nil {
+			// A superseded RPC is reset, not finished: nothing has read it to
+			// its end and the engine may still be pushing it. Counted for the
+			// same reason CancelActiveStream is — every one of these is a
+			// whole-connection teardown the engine has to survive.
+			t.streamResets.Add(1)
 			prev()
 		}
 
@@ -471,6 +492,7 @@ func (t *GRPCTransport) CancelActiveStream() {
 	t.mu.Unlock()
 
 	if cancel != nil {
+		t.streamResets.Add(1)
 		cancel()
 	}
 }

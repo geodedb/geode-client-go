@@ -823,6 +823,16 @@ func (c *Conn) ExecContext(ctx context.Context, query string, args []driver.Name
 	}
 
 	if execResp.GetError() != nil {
+		// A refusal IS a complete answer: the engine planned the statement,
+		// rejected it and will send nothing else. The request stream must be
+		// finished here for the same reason the success path finishes it —
+		// otherwise the connection goes back to the pool with a live Execute
+		// RPC on it and the NEXT statement resets that RPC, which is the
+		// RST_STREAM the engine turns into a whole-connection teardown. A
+		// statement the engine refuses is not rare: a duplicate CREATE INDEX,
+		// a constraint violation or a syntax error inside a batch all land
+		// here (SONNY-806 Task 16e, F-16d-01).
+		finishExecStream(c.transport)
 		return nil, &DriverError{
 			Code:    execResp.GetError().GetCode(),
 			Message: execResp.GetError().GetMessage(),

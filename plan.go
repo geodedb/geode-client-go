@@ -879,6 +879,10 @@ func (c *Conn) collectPlanFrames(ctx context.Context, kind planKind) (*planFrame
 			return nil, fmt.Errorf("expected Execute response, got %s", describeServerMessage(resp))
 		}
 		if execResp.GetError() != nil {
+			// Complete answer: finish the request stream so the connection
+			// does not go back to the pool with a live Execute RPC on it.
+			// See the EXPLAIN/PROFILE note on finishExecStream below.
+			finishExecStream(c.transport)
 			return nil, &DriverError{
 				Code:    execResp.GetError().GetCode(),
 				Message: execResp.GetError().GetMessage(),
@@ -887,9 +891,25 @@ func (c *Conn) collectPlanFrames(ctx context.Context, kind planKind) (*planFrame
 
 		done, err := c.absorbPlanFrame(ctx, execResp, kind, out, &pullID)
 		if err != nil {
+			// absorbPlanFrame marks the conn failed for every error that
+			// leaves the stream in doubt; the ones it does NOT (a kind
+			// mismatch) got one complete, well-formed response, so the
+			// request is over and its stream must be finished.
+			if c.state != StateInError {
+				finishExecStream(c.transport)
+			}
 			return nil, err
 		}
 		if done {
+			// EXPLAIN and PROFILE ride the same per-statement Execute stream
+			// as ExecContext does on a transport that has one (gRPC), and the
+			// plan payload is the whole answer — nothing follows it. Leaving
+			// the stream open hands the next statement on this connection an
+			// RST_STREAM to emit, and the engine's grpc-zig escalates ONE
+			// stream reset into a whole-connection teardown, which surfaces to
+			// the caller as `Unavailable: error reading from server: EOF`
+			// (SONNY-806 Task 16e).
+			finishExecStream(c.transport)
 			return out, nil
 		}
 	}
