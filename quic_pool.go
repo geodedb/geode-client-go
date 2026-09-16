@@ -995,7 +995,18 @@ func (pc *pooledConn) markAuthed(serverGraph string) {
 }
 
 // markAuthedHello marks the connection authenticated and records the HELLO
-// response metadata every later stream on it will inherit.
+// response metadata for diagnostics.
+//
+// GAP-SONNY806-08: since every request stream now performs its own HELLO
+// (see pooledHello), only the authed bool this call sets is ever read by
+// production code (isAuthed, below).
+// graphBound/graph/sessionID/helloCaps are write-only in production — they
+// hold whichever stream's response was recorded last, which is not
+// meaningful as a connection-level fact once streams bind themselves — and
+// are kept only so helloState/isGraphBound below remain available to tests
+// (capabilities_test.go, quic_pool_anchor_test.go, quic_pool_test.go) that
+// assert on per-call HELLO metadata. Do not add a production caller that
+// treats them as the connection's current binding.
 //
 // The capability slice is copied: the caller's slice belongs to a decoded
 // protobuf message whose lifetime ends with the handshake.
@@ -1012,6 +1023,9 @@ func (pc *pooledConn) markAuthedHello(serverGraph, sessionID string, caps []stri
 
 // helloState returns the HELLO response metadata recorded for this connection.
 // The capability slice is a copy, so the caller may retain it.
+//
+// Test-only: no production caller (see markAuthedHello). Retained for tests
+// that assert on the metadata a given HELLO call recorded.
 // Thread-safe.
 func (pc *pooledConn) helloState() (graph, sessionID string, caps []string) {
 	pc.mu.Lock()
@@ -1020,6 +1034,10 @@ func (pc *pooledConn) helloState() (graph, sessionID string, caps []string) {
 }
 
 // isGraphBound returns whether the server bound the graph during HELLO.
+//
+// Test-only: no production caller (see markAuthedHello). pooledGraphInit
+// keys on conn.boundGraph — the per-stream truth — not this connection-level
+// field.
 // Thread-safe.
 func (pc *pooledConn) isGraphBound() bool {
 	pc.mu.Lock()
