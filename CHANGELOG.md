@@ -10,59 +10,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Target release: **v0.2.0** — the GraphRAG driver surface (SONNY-806 /
 GEO-GO-UP-001).
 
-Engine pin: this release is developed and tested against **geode 0.8.15**
-(`geodedb/geode:0.8.15`, index digest
-`sha256:96a194cfce01e59ee1dbe1504aa0ed79c0141f7e2e8b23389da18e73e6adc8ee`).
-`engine_pin_test.go` asserts the running engine reports it, and the 0.8.15
+Engine pin: this release is developed and tested against **geode 0.8.18**
+(`geodedb/geode:0.8.18`, manifest-list digest
+`sha256:5ebbc7c5b8d13375749e7c1df8a77e54935bc609321cd4d8107d8e26f370c6f1`).
+`engine_pin_test.go` asserts the running engine reports it, and the 0.8.18
 capability contract is pinned as a 59-row golden file. Behaviour described
-below as an "engine fact" is pinned to that version and may change with the
-engine.
+below as an "engine fact" was, unless the entry says otherwise, established
+against **0.8.15** and re-checked against 0.8.18 only where a test asserts it;
+an engine fact may change with the engine.
 
-Engine fixes now exist for three of the four items below, but **not in the
-pinned release**: geode **0.8.16** (tag `v0.8.16`, engine commit `a4c5b08f`)
-carries the engine halves of SONNY-1229 (`0beb108b`, tenant scope on
-engine-direct reads), SONNY-1219 (`f80a812d`/`9afe5d05`/`6d9e0dec`, a QUIC
-connection now outlives its first stream and accepts are driven from a
-reactor) and SONNY-1560 (`33a39499`/`3d3b1b60`, the session mutex is released
-between pushed gRPC pages and the flow-control seam is pinned, with grpc-zig
-v0.1.10), alongside SONNY-1218, SONNY-1318, SONNY-1326, SONNY-1330 and
-SONNY-1574. **None of that is verified from this driver yet.** The pin below
-is still 0.8.15 and every measurement in this file was taken against 0.8.15.
-Tagging v0.2.0 requires re-pinning to 0.8.16 and re-running the integration
-lane against it; each test below stays listed until it is measured green on
-that image.
+0.8.18 is the first PUBLISHED image carrying the 0.8.16 fix set. The engine's
+`v0.8.16` and `v0.8.17` tags exist but never produced a container image, so
+neither is pinnable. Moving from 0.8.15 to 0.8.18 changed exactly one row of
+the capability contract — `graph_procedure_tenancy` flipped `false` -> `true`
+(SONNY-1326) — and the golden was regenerated through the documented
+`GEODE_UPDATE_GOLDEN=1` path and renamed to
+`testdata/capabilities_0.8.18.golden`. `tenant_scope_fail_closed` and
+`tenant_binding_server_verified` are still `false` at 0.8.18.
 
-Known-RED integration tests, each an open defect rather than a flake, and the
-gate on tagging v0.2.0:
+The pin moved to **0.8.18** on 2026-09-16 and the fixes below were measured,
+not assumed. Two results matter and they point in opposite directions.
 
-- `TestIntegration_CrossTenantReadIsDenied` — SONNY-1229 / GAP-SONNY806-02
-  (Critical): geode 0.8.15 does not apply the session tenant filter on the
-  `MATCH` read path, so tenant binding is not an isolation boundary. Engine
-  fix required; the driver cannot work around it. The engine fix landed in
-  **0.8.16** (`0beb108b`), with the graph-procedure and subquery halves in
-  SONNY-1318/SONNY-1326 — unmeasured from here until the driver re-pins.
-- `TestLoad_BurstExceedsPoolSize_NoDeadlock` — SONNY-1219 (High, ENGINE
-  defect). Triaged 2026-09-15 against the pinned 0.8.15 image and against
-  engine main: geode ties a QUIC connection's lifetime to the FIRST stream
-  opened on it, so when the HELLO-bearing stream closes the engine shuts the
-  per-connection stream acceptor down and destroys the connection with
-  `CONNECTION_CLOSE` code 0 (NO_ERROR), killing every sibling multiplexed
-  stream — including ones with a request in flight
-  (`src/server/quic_connection_handler.zig:3548-3589`,
-  `src/transport/quic.zig:1176`). A burst of 64 over `pool_size=16` resolved
-  `ok=8 err=56`: exactly one stream per QUIC connection survived. The earlier
-  "~0.06% intermittent timeout" reading of this test was wrong. The driver's
-  anchor stream (see Fixed below) mitigates it: measured against the same
-  pinned image, `ok=63 err=1` on a host at load 158 — the one failure being the
-  caller's own deadline, with zero `NO_ERROR` teardowns — and `ok=64 err=0`
-  (PASS) on the repeat run. The test stays listed here until it is green
-  repeatedly on a quiet host, and the engine fix is still required: at 0.8.15
-  the engine continues to tie connection lifetime to its first stream. The
-  engine fix landed in **0.8.16** (`f80a812d` keeps a connection alive until
-  its last stream drains; `9afe5d05` drives accepts from a reactor) —
-  unmeasured from here until the driver re-pins.
-- `TestMultiplex_FindCreate_And_Merge_NoWedge` — asserts a throughput floor
-  and fails on a loaded host; a measurement bound, not a correctness defect.
+**The engine got better.**
+
+- **SONNY-1229 / GAP-SONNY806-02 (Critical) is FIXED.** Against 0.8.18,
+  `TestIntegration_CrossTenantReadIsDenied` PASSES. Tenant binding is an
+  isolation boundary on the `MATCH` read path again. (Engine `0beb108b`, with
+  the graph-procedure and subquery halves in SONNY-1318 / SONNY-1326.)
+- **SONNY-1560 / GAP-SONNY806-07 (High) is FIXED in shape and in blast
+  radius.** 0.8.15 parked for ~30 s and let a DIFFERENT session's transaction
+  fail mid-way. 0.8.18 surfaces a typed gRPC `ResourceExhausted` —
+  `stream window exhausted: peer stopped draining the pushed result` — after
+  5632 of 20000 rows in **0.62 s**, and
+  `TestIntegration_GRPCBatchExecPastOnePage` PASSES immediately afterwards
+  where it used to fail around statement 29. The cross-session blast radius is
+  gone. `TestIntegration_GRPCLargePushedResultFailsLoudly` is nevertheless RED:
+  it enumerates `io.EOF`-with-every-row or `context.DeadlineExceeded` and has
+  no arm for a promptly surfaced typed error, so the engine's IMPROVEMENT
+  trips the test's `default` case. The invariant the test exists to protect —
+  never a silent truncation — holds. The test needs the extra arm.
+- The capability contract moved by exactly one row:
+  `graph_procedure_tenancy` `false` -> `true`. `tenant_scope_fail_closed` and
+  `tenant_binding_server_verified` are still `false`.
+
+**The driver got worse, and this is what blocks v0.2.0.**
+
+- **The SONNY-1219 anchor stream drops the session's tenant and graph scope on
+  every request stream (GAP-SONNY806-08, Critical, DRIVER defect).** Moving
+  HELLO onto a dedicated anchor stream means the sibling request streams, which
+  now skip HELLO by design, never carry the scope HELLO established. A
+  tenant-bound session reads **zero rows, including rows it wrote itself**.
+  Bisected against the engine, so it cannot be blamed on the bump:
+
+  | driver commit | engine | `ParamsBindInPropertyMaps` | `CrossTenantReadIsDenied` |
+  |---|---|---|---|
+  | `29d373b` (pre-anchor) | 0.8.15 | PASS | FAIL - the old cross-tenant LEAK |
+  | `29d373b` (pre-anchor) | **0.8.18** | **PASS** | **PASS** |
+  | `05b4653` (anchor) | 0.8.15 | FAIL - `no rows in result set` | FAIL - `tenant-a saw 0 of its own nodes` |
+  | `3c14794` (current) | 0.8.18 | FAIL - `no rows in result set` | FAIL - `tenant-a saw 0 of its own nodes` |
+
+  `05b4653` is the introducing commit. The up-to-8 "redundant" per-stream
+  HELLOs it removed were what carried the tenant binding onto each request
+  stream. Also RED for the same reason:
+  `TestIntegration_ParamsAreNotInQueryText`,
+  `TestIntegration_ParamsBindTimeValue`,
+  `TestIntegration_ProfileTimingsAreSyntheticOnTheTenantBoundPath`.
+
+  **v0.2.0 cannot ship until this is fixed.** It is a data-visibility defect,
+  not a flake.
 
 Known engine limit on the gRPC wire: **a single `Execute` stalls past roughly
 64 KiB of pushed payload** (GAP-SONNY806-07 / SONNY-1560, High —
@@ -76,9 +91,10 @@ against the same engine process during that window can fail mid-way with
 `driver.ErrBadConn` (measured: `TestIntegration_GRPCBatchExecPastOnePage`
 fails around statement 29 of 647 when run immediately after the stall
 reproducer, and passes alone). See `docs/GAP_ANALYSIS.md` for the full
-measurement. The engine fix landed in **0.8.16** (`33a39499`, `3d3b1b60`, and
-grpc-zig v0.1.10); until this driver re-pins and re-measures, the caveat above
-is the contract.
+measurement. **Fixed at the pinned 0.8.18** (`33a39499`, `3d3b1b60`, grpc-zig
+v0.1.10): the stall is now a prompt typed `ResourceExhausted` and the
+cross-session blast radius is gone. The paragraph above describes 0.8.15 and is
+kept as the record of what was measured there.
 
 ### Added
 
@@ -315,7 +331,7 @@ is the contract.
   not known metadata is an error rather than a silent `false`
   (`ErrMalformedCapabilityRows`). Feature-name constants (`CapVectorKNN`,
   `CapReadOnlyExecute`, ...) cover all 59 rows geode 0.8.15 emits and are
-  pinned to `testdata/capabilities_0.8.15.golden` (SONNY-806).
+  pinned to `testdata/capabilities_0.8.18.golden` (SONNY-806).
 - The server's HELLO capabilities were previously decoded and discarded. They
   are now captured per connection and exposed via `(*Conn).HelloCapabilities()`
   and `ServerInfo.HelloCapabilities`, alongside `(*Conn).BoundGraph()` and

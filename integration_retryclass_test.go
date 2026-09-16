@@ -1,7 +1,7 @@
 //go:build integration
 
 // integration_retryclass_test.go proves the retry classification against the
-// pinned engine (geodedb/geode:0.8.15 — SONNY-806 / GEO-GO-UP-001, Lane D
+// pinned engine (geodedb/geode:0.8.18 — SONNY-806 / GEO-GO-UP-001, Lane D
 // Task 12).
 //
 // Two failures a GraphRAG ingest worker actually meets, one at each end of the

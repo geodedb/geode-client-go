@@ -31,7 +31,7 @@ fts_multi_graph	false
 knn_row_visibility	false
 knn_delete_liveness	false
 knn_filtered_ann_pushdown	false
-graph_procedure_tenancy	false
+graph_procedure_tenancy	true
 embedding_space_pinning	false
 vector_index_generations	false
 vector_generation_rollback	false

@@ -457,12 +457,14 @@ deliberate differences separate the two wires.
 > not just the query that overflowed. See `docs/GAP_ANALYSIS.md` for the full
 > measurement.
 >
-> **The engine fix landed in geode 0.8.16** (`33a39499` releases the session
-> mutex between pushed pages and bounds a stalled stream, `3d3b1b60` lets the
-> library's `RST` end an exhausted stream and pins the flow-control seam, with
-> grpc-zig v0.1.10). This driver is still pinned to 0.8.15 and has not
-> re-measured the ceiling, so everything above remains the contract until it
-> does.
+> **Fixed at the pinned engine 0.8.18** (`33a39499`, `3d3b1b60`, grpc-zig
+> v0.1.10), verified 2026-09-16. An oversized result now ends in **0.62 s**
+> with a typed gRPC `ResourceExhausted` ("stream window exhausted: peer
+> stopped draining the pushed result") instead of parking ~30 s, and the
+> cross-session blast radius is gone: `TestIntegration_GRPCBatchExecPastOnePage`
+> passes immediately after the oversized-result test where it used to fail
+> around statement 29. Everything above describes 0.8.15 and is kept as the
+> record of what was measured there.
 
 The four deliberate differences:
 
@@ -486,22 +488,31 @@ rollback_to, backup, restore, upload_backup — and are refused with the typed
 
 ## Engine support
 
-This driver is developed and tested against **geode 0.8.15**
-(`geodedb/geode:0.8.15`, index digest
-`sha256:96a194cfce01e59ee1dbe1504aa0ed79c0141f7e2e8b23389da18e73e6adc8ee`). The
+This driver is developed and tested against **geode 0.8.18**
+(`geodedb/geode:0.8.18`, manifest-list digest
+`sha256:5ebbc7c5b8d13375749e7c1df8a77e54935bc609321cd4d8107d8e26f370c6f1`). The
 integration lane pins that image, and `engine_pin_test.go` asserts the running
 server reports it.
+
+0.8.18 is the first published image carrying the 0.8.16 fix set: the `v0.8.16`
+and `v0.8.17` tags exist in the engine repository but never produced a
+container image, so neither can be pinned.
 
 Known-RED tests, each tracking a defect rather than a flake. "Engine fix"
 names the engine release that carries the server-side fix — it is NOT a claim
 that this driver has been re-measured against it; every measurement in this
 repository was taken against the pinned 0.8.15 image:
 
-| Test | Tracking | Cause | Engine fix |
-|------|----------|-------|------------|
-| `TestIntegration_CrossTenantReadIsDenied` | SONNY-1229 / GAP-SONNY806-02 | Engine does not filter by tenant on the MATCH read path | geode 0.8.16 (`0beb108b`; graph-procedure and subquery halves in SONNY-1318/1326) — unverified from here |
-| `TestLoad_BurstExceedsPoolSize_NoDeadlock` | SONNY-1219 | Engine ties a QUIC connection's lifetime to the FIRST stream opened on it, so the connection dies with `NO_ERROR` when that stream closes, killing every sibling — a burst of 64 over `pool_size=16` resolved `ok=8 err=56` before the driver's anchor stream mitigated it | geode 0.8.16 (`f80a812d`, `9afe5d05`) — unverified from here |
-| `TestMultiplex_FindCreate_And_Merge_NoWedge` | — | Asserts a throughput floor; fails on a loaded host, not a correctness defect | n/a |
+| Test | Tracking | Cause |
+|------|----------|-------|
+| `TestIntegration_ParamsBindInPropertyMaps`, `TestIntegration_ParamsAreNotInQueryText`, `TestIntegration_ParamsBindTimeValue`, `TestIntegration_ProfileTimingsAreSyntheticOnTheTenantBoundPath`, `TestIntegration_CrossTenantReadIsDenied` | **GAP-SONNY806-08 (Critical, DRIVER, blocks v0.2.0)** | The SONNY-1219 anchor stream moved HELLO off the request streams, so a tenant-bound session carries no scope and reads zero rows — including its own writes. Introduced by `05b4653`; bisected against both engines |
+| `TestIntegration_GRPCLargePushedResultFailsLoudly` | GAP-SONNY806-07 follow-up | RED because the ENGINE improved: 0.8.18 surfaces a typed `ResourceExhausted` in 0.62 s where 0.8.15 stalled ~30 s, and the test has no arm for a promptly surfaced error. No silent truncation |
+| `TestMultiplex_FindCreate_And_Merge_NoWedge` | — | Asserts a throughput floor; fails on a loaded host, not a correctness defect |
+
+Fixed by the move to engine 0.8.18 and verified on 2026-09-16: the
+cross-tenant read leak (SONNY-1229 / GAP-SONNY806-02, Critical) and the gRPC
+~64 KiB stall with its cross-session blast radius (SONNY-1560 /
+GAP-SONNY806-07, High).
 
 ## Transactions
 

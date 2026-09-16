@@ -122,7 +122,7 @@ integration:geode:
   stage: integration
   image: golang:1.27
   services:
-    - name: geodedb/geode:0.8.15@sha256:96a194cfce01e59ee1dbe1504aa0ed79c0141f7e2e8b23389da18e73e6adc8ee
+    - name: geodedb/geode:0.8.18@sha256:5ebbc7c5b8d13375749e7c1df8a77e54935bc609321cd4d8107d8e26f370c6f1
       alias: geode
       command:
         - serve

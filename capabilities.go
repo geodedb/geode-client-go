@@ -14,7 +14,7 @@ import (
 // and only become more truthful" (admin_ddl.zig:171-174).
 //
 // The pinned engine emits exactly 59 rows — 58 boolean-valued rows plus the
-// version-valued sonny_profile_version — and testdata/capabilities_0.8.15.golden
+// version-valued sonny_profile_version — and testdata/capabilities_0.8.18.golden
 // is the committed snapshot of them, asserted against a live engine by
 // TestIntegration_ServerInfo and against these constants by
 // TestCapabilityConstantsMatchEngine.

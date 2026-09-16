@@ -1,6 +1,6 @@
 # GAP Analysis
 
-Last updated: 2026-09-15
+Last updated: 2026-09-16
 Reviewed by: Adversarial Security Review Agent (2026-03-21); divelife bulk-seed investigation (2026-06-17); Lane D tenancy/role binding (SONNY-806 / GEO-GO-UP-001, 2026-09-13)
 Repository: devnw/codepros/geode/geode-client-go
 Branch: `eng-4622/geode-go`. Each finding below names the commit that filed or
@@ -11,8 +11,8 @@ Review type: Comprehensive adversarial security review (Round 6 - no new finding
 
 Open findings by severity:
 
-- Critical: 1 (GAP-SONNY806-02 — engine cross-tenant read leak, filed 2026-09-13)
-- High: 1 (GAP-SONNY806-07 / SONNY-1560 — engine stalls a gRPC result past ~64 KiB, filed 2026-09-14)
+- Critical: 1 (GAP-SONNY806-08 — the driver's anchor stream drops tenant/graph scope, filed 2026-09-16; **blocks v0.2.0**)
+- Fixed by the engine bump to 0.8.18 (2026-09-16): GAP-SONNY806-02 (Critical, cross-tenant read leak) and GAP-SONNY806-07 / SONNY-1560 (High, gRPC stall past ~64 KiB), both verified
 - Medium: 2 (GAP-SONNY806-01 — engine refuses `$param` in CALL arguments, filed 2026-09-13;
   GAP-SONNY806-03 — engine ignores the `--listen-grpc` bind address, filed 2026-09-14)
 - Low: 1 (BUG-0002 — downgraded 2026-06-17)
@@ -53,6 +53,53 @@ Top risks (remaining):
 
 ## Open Findings
 
+### GAP-SONNY806-08: the SONNY-1219 anchor stream drops the session's tenant and graph scope
+
+- **Severity:** Critical (a tenant-bound session reads ZERO rows, including
+  rows it wrote itself; silent wrong-answer, not an error)
+- **Component:** this DRIVER (`quic_pool.go`, the anchor stream) - NOT the engine
+- **Status:** **Open** (filed 2026-09-16, Lane D Task 16). **Blocks v0.2.0.**
+- **Introduced by:** `05b4653 fix(pool): anchor each QUIC connection on a
+  dedicated HELLO stream (SONNY-1219)`
+- **Reproducers:** `TestIntegration_ParamsBindInPropertyMaps`
+  (`MATCH with bound param: sql: no rows in result set`),
+  `TestIntegration_CrossTenantReadIsDenied`
+  (`tenant-a saw 0 of its own nodes, want 1`),
+  `TestIntegration_ParamsAreNotInQueryText`,
+  `TestIntegration_ParamsBindTimeValue`,
+  `TestIntegration_ProfileTimingsAreSyntheticOnTheTenantBoundPath`
+
+**Observed.** Before `05b4653`, every request stream performed its own HELLO
+(`pooledHello`). HELLO is what carries `tenant` and the bound graph. `05b4653`
+moved HELLO onto a dedicated anchor stream held for the connection's life and
+made request streams skip it - the commit describes removing "the burst of
+up-to-8 concurrent redundant HELLOs" as a benefit. Those HELLOs were not
+redundant: they were what put the session's tenant and graph scope on each
+request stream. Without them the engine serves request streams with no
+concrete scope, and a scoped read matches nothing.
+
+**Bisected against the engine**, so the engine bump is excluded as a cause:
+
+| driver commit | engine | `ParamsBindInPropertyMaps` | `CrossTenantReadIsDenied` |
+|---|---|---|---|
+| `29d373b` (pre-anchor) | 0.8.15 | PASS | FAIL - the old cross-tenant LEAK |
+| `29d373b` (pre-anchor) | **0.8.18** | **PASS** | **PASS** |
+| `05b4653` (anchor) | 0.8.15 | FAIL - `no rows in result set` | FAIL - `saw 0 of its own nodes` |
+| `3c14794` (current) | 0.8.18 | FAIL - `no rows in result set` | FAIL - `saw 0 of its own nodes` |
+
+**Why it hid.** The failure only shows on a SCOPED session. The lane's
+unit tests do not bind a tenant, and the SONNY-1219 review that approved
+`05b4653` ran targeted `-race` unit tests plus a burst load test, none of which
+bind a tenant. The full integration lane was never re-run on a quiet host
+against a scoped session between `05b4653` and this task.
+
+**Fix options.** (a) Revert the anchor stream. The engine reason for it is gone:
+0.8.18 keeps a QUIC connection alive until its LAST stream drains
+(`f80a812d`), which is exactly what the anchor was working around. (b) Keep the
+anchor and re-send HELLO (or an equivalent scope-binding message) on each
+request stream, which restores the per-stream cost the anchor removed.
+Option (a) is the smaller change and is now correct by construction.
+
 ### GAP-SONNY806-07 (SONNY-1560): a gRPC result stalls after roughly 64 KiB of pushed payload
 
 - **Severity:** High (functional cap on an entire transport; a caller sees a
@@ -61,13 +108,22 @@ Top risks (remaining):
 - **Component:** geode ENGINE 0.8.15 gRPC path / the vendored grpc-zig — **not
   the Go driver**. The driver is reading; grpc-go emits HTTP/2
   `WINDOW_UPDATE`s as the application consumes each page.
-- **Status:** **Open against the pinned engine.** The engine fix landed in
-  geode **0.8.16** (`33a39499` releases the session mutex between pushed gRPC
-  pages and bounds a stalled stream; `3d3b1b60` lets the library's `RST` end an
-  exhausted stream and pins the flow-control seam; grpc-zig v0.1.10). This
-  driver is still pinned to 0.8.15 and has not re-measured the ceiling, so the
-  finding stays open here until the lane re-runs against 0.8.16. (Filed
-  2026-09-14, SONNY-806 / GEO-GO-UP-001 Lane D Task 14c.)
+- **Status:** **FIXED at the pinned engine 0.8.18**, verified 2026-09-16.
+  The fix landed in geode 0.8.16 (`33a39499` releases the session mutex between
+  pushed gRPC pages and bounds a stalled stream; `3d3b1b60` lets the library's
+  `RST` end an exhausted stream and pins the flow-control seam; grpc-zig
+  v0.1.10) and ships in 0.8.18. Measured: the oversized result now ends in
+  **0.62 s** with a typed gRPC `ResourceExhausted` - `stream window exhausted:
+  peer stopped draining the pushed result` - after 5632 of 20000 rows, instead
+  of parking ~30 s, and `TestIntegration_GRPCBatchExecPastOnePage` PASSES
+  immediately after it (it used to fail around statement 29), so the
+  cross-session blast radius is gone. The measurements below describe 0.8.15
+  and are kept as the record of what was found there. **Follow-up:**
+  `TestIntegration_GRPCLargePushedResultFailsLoudly` is RED because its
+  `switch` accepts only `io.EOF`-with-every-row or `context.DeadlineExceeded`
+  and has no arm for a promptly surfaced typed error; the no-silent-truncation
+  invariant it protects still holds. (Filed 2026-09-14, SONNY-806 /
+  GEO-GO-UP-001 Lane D Task 14c.)
 - **Reproducer:** `TestIntegration_GRPCLargePushedResultFailsLoudly` logs the
   stall point; any oversized result reproduces it, e.g.
   `FOR i IN range(0, 19999) RETURN i` over gRPC.
@@ -165,8 +221,12 @@ requested address is not the one that will be bound.
 
 - **Severity:** Critical
 - **Component:** geode ENGINE 0.8.15 (read path) — not the Go driver
-- **Status:** **Open against the pinned engine.** The engine fix landed in
-  geode **0.8.16** (`0beb108b` applies tenant scope to engine-direct reads;
+- **Status:** **FIXED at the pinned engine 0.8.18**, verified 2026-09-16:
+  `TestIntegration_CrossTenantReadIsDenied` PASSES against 0.8.18 with a
+  pre-anchor driver (`29d373b`). It is RED on the current branch only because
+  of GAP-SONNY806-08 above, which is a driver defect with the opposite
+  symptom (no rows at all, rather than another tenant's rows). The fix landed in
+  geode **0.8.16** and ships in 0.8.18 (`0beb108b` applies tenant scope to engine-direct reads;
   `d0fe80fb`/`afcdbd6f`/`97bd9b83` extend it to graph procedures and
   introspection under SONNY-1318; `9ea03ccc`/`1d99e0e0` cover shortestPath,
   `COUNT{}`, `EXISTS{}` and pattern comprehensions and advertise
@@ -223,9 +283,11 @@ file's own SAFETY note anticipates exactly this class of bug for RLS
 passesRLSFilter leaks policy-denied rows") but no equivalent gate exists for
 tenancy.
 
-**Consistent with the engine's own capability rows** at 0.8.15
-(`testdata/capabilities_0.8.15.golden`): `tenant_scope_fail_closed=false`,
-`tenant_binding_server_verified=false`, `graph_procedure_tenancy=false`.
+**Consistent with the engine's own capability rows** at 0.8.15:
+`tenant_scope_fail_closed=false`, `tenant_binding_server_verified=false`,
+`graph_procedure_tenancy=false`. At the pinned 0.8.18
+(`testdata/capabilities_0.8.18.golden`) `graph_procedure_tenancy` is now
+`true` (SONNY-1326); the other two are still `false`.
 
 **Impact.** Any multi-tenant deployment on 0.8.15 leaks every tenant's data to
 every other authenticated session bound to the same graph. Graph-level isolation

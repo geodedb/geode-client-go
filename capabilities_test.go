@@ -18,7 +18,7 @@ import (
 // from a live engine (GEODE_UPDATE_GOLDEN=1) and fails when it drifts, so the
 // unit lane can pin the Cap* constants against real engine row names without
 // needing Docker.
-const capabilityGoldenPath = "testdata/capabilities_0.8.15.golden"
+const capabilityGoldenPath = "testdata/capabilities_0.8.18.golden"
 
 func TestCapabilities_Has(t *testing.T) {
 	c := Capabilities{"vector_knn": true, "tenant_ddl": false}

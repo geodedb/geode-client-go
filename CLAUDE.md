@@ -245,16 +245,23 @@ The gRPC parity lane lives in `integration_grpc_test.go`
 property asserted again on the gRPC wire, with a `GRPC` infix so the pairing is
 greppable.
 
-Engine pin: the lane runs `geodedb/geode:0.8.15` (index digest
-`sha256:96a194cfce01e59ee1dbe1504aa0ed79c0141f7e2e8b23389da18e73e6adc8ee`), and
+Engine pin: the lane runs `geodedb/geode:0.8.18` (manifest-list digest
+`sha256:5ebbc7c5b8d13375749e7c1df8a77e54935bc609321cd4d8107d8e26f370c6f1`;
+`v0.8.16`/`v0.8.17` are tags with no published image and are NOT pinnable), and
 `engine_pin_test.go` asserts the running server reports it. Three integration
 tests are known-RED and are NOT regressions:
-`TestIntegration_CrossTenantReadIsDenied` (SONNY-1229, engine tenant-filter
-defect), `TestLoad_BurstExceedsPoolSize_NoDeadlock` (SONNY-1219) and
 `TestMultiplex_FindCreate_And_Merge_NoWedge` (throughput floor on a loaded
-host). The engine halves of SONNY-1229, SONNY-1219 and SONNY-1560 shipped in
-geode **0.8.16**; this lane has NOT re-pinned or re-measured against it, so do
-not read a green 0.8.16 claim into anything here.
+host) and `TestIntegration_GRPCLargePushedResultFailsLoudly` (RED only because
+0.8.18 surfaces a prompt typed error where 0.8.15 stalled; the test has no arm
+for it). SONNY-1229 and SONNY-1560 are FIXED at 0.8.18 and verified.
+
+**Blocking v0.2.0: GAP-SONNY806-08.** The SONNY-1219 anchor stream
+(`05b4653`) moved HELLO onto a dedicated stream, so request streams carry no
+tenant/graph scope and a scoped session reads ZERO rows, its own writes
+included. Bisected against both engines. Anything that binds a tenant is
+affected; nothing in the unit lane does, which is why it hid. Reverting the
+anchor is viable now that 0.8.18 keeps a connection alive until its last
+stream drains.
 
 Host load is part of the result. Several integration tests seed their fixture
 INSIDE the same context budget they then assert against —

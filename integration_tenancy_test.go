@@ -148,7 +148,7 @@ func TestIntegration_ReadOnlyRole(t *testing.T) {
 	// src/gql/ast.zig:695-700); "readonly" is a recognised role name
 	// (Role.fromString("readonly") == .ReadOnly, pinned by
 	// src/security/test_auth_enforcement.zig:114). SHOW CAPABILITIES reports
-	// role_ddl=true at 0.8.15 (testdata/capabilities_0.8.15.golden).
+	// role_ddl=true at 0.8.15 (testdata/capabilities_0.8.18.golden).
 	// The engine enforces a password policy (min 8 chars, letters AND numbers)
 	// — a letters-only passphrase is refused with GQLSTATE 22000.
 	const roUser = "ro_probe"

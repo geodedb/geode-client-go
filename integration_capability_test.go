@@ -11,7 +11,7 @@ import (
 )
 
 // TestIntegration_ServerInfo records the real capability surface of the pinned
-// engine and pins it to testdata/capabilities_0.8.15.golden, which the unit
+// engine and pins it to testdata/capabilities_0.8.18.golden, which the unit
 // lane uses to keep the Cap* constants honest without Docker.
 //
 // Set GEODE_UPDATE_GOLDEN=1 to rewrite the golden from the live engine after a
