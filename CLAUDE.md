@@ -248,20 +248,26 @@ greppable.
 Engine pin: the lane runs `geodedb/geode:0.8.18` (manifest-list digest
 `sha256:5ebbc7c5b8d13375749e7c1df8a77e54935bc609321cd4d8107d8e26f370c6f1`;
 `v0.8.16`/`v0.8.17` are tags with no published image and are NOT pinnable), and
-`engine_pin_test.go` asserts the running server reports it. Three integration
-tests are known-RED and are NOT regressions:
+`engine_pin_test.go` asserts the running server reports it. One integration
+test is known-RED and is NOT a regression:
 `TestMultiplex_FindCreate_And_Merge_NoWedge` (throughput floor on a loaded
-host) and `TestIntegration_GRPCLargePushedResultFailsLoudly` (RED only because
-0.8.18 surfaces a prompt typed error where 0.8.15 stalled; the test has no arm
-for it). SONNY-1229 and SONNY-1560 are FIXED at 0.8.18 and verified.
+host). SONNY-1229 and SONNY-1560 are FIXED at 0.8.18 and verified, and
+`TestIntegration_GRPCLargePushedResultFailsLoudly` now has an arm for 0.8.18's
+prompt typed `ResourceExhausted` (its no-silent-truncation invariant is
+unchanged).
 
-**Blocking v0.2.0: GAP-SONNY806-08.** The SONNY-1219 anchor stream
-(`05b4653`) moved HELLO onto a dedicated stream, so request streams carry no
-tenant/graph scope and a scoped session reads ZERO rows, its own writes
-included. Bisected against both engines. Anything that binds a tenant is
-affected; nothing in the unit lane does, which is why it hid. Reverting the
-anchor is viable now that 0.8.18 keeps a connection alive until its last
-stream drains.
+**GAP-SONNY806-08 is FIXED (Task 16b).** The SONNY-1219 anchor stream
+(`05b4653`) moved HELLO onto a dedicated stream and made request streams skip
+it, so a scoped session read ZERO rows, its own writes included. HELLO carries
+the tenant and the bound graph and the engine applies both PER STREAM, so
+**every request stream now performs its own handshake** (`pooledHello`) and
+`pooledGraphInit` reads the binding from that stream's own response. The anchor
+is kept for what it is for: owning the QUIC connection's lifetime. Do not
+reintroduce an `isAuthed` fast path on the request-stream path — an unbound
+stream is a silent wrong answer, not an error. Regression:
+`TestIntegration_TenantBoundSessionReadsItsOwnWritesOnEveryStream`, plus
+`TestAnchor_RequestStreamCarriesTenantAndGraphBinding` /
+`TestAnchor_EveryRequestStreamBindsItself` (no engine needed).
 
 Host load is part of the result. Several integration tests seed their fixture
 INSIDE the same context budget they then assert against —

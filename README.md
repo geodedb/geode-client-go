@@ -505,14 +505,18 @@ repository was taken against the pinned 0.8.15 image:
 
 | Test | Tracking | Cause |
 |------|----------|-------|
-| `TestIntegration_ParamsBindInPropertyMaps`, `TestIntegration_ParamsAreNotInQueryText`, `TestIntegration_ParamsBindTimeValue`, `TestIntegration_ProfileTimingsAreSyntheticOnTheTenantBoundPath`, `TestIntegration_CrossTenantReadIsDenied` | **GAP-SONNY806-08 (Critical, DRIVER, blocks v0.2.0)** | The SONNY-1219 anchor stream moved HELLO off the request streams, so a tenant-bound session carries no scope and reads zero rows — including its own writes. Introduced by `05b4653`; bisected against both engines |
-| `TestIntegration_GRPCLargePushedResultFailsLoudly` | GAP-SONNY806-07 follow-up | RED because the ENGINE improved: 0.8.18 surfaces a typed `ResourceExhausted` in 0.62 s where 0.8.15 stalled ~30 s, and the test has no arm for a promptly surfaced error. No silent truncation |
 | `TestMultiplex_FindCreate_And_Merge_NoWedge` | — | Asserts a throughput floor; fails on a loaded host, not a correctness defect |
 
-Fixed by the move to engine 0.8.18 and verified on 2026-09-16: the
-cross-tenant read leak (SONNY-1229 / GAP-SONNY806-02, Critical) and the gRPC
-~64 KiB stall with its cross-session blast radius (SONNY-1560 /
-GAP-SONNY806-07, High).
+Fixed and verified on 2026-09-16: the cross-tenant read leak (SONNY-1229 /
+GAP-SONNY806-02, Critical) and the gRPC ~64 KiB stall with its cross-session
+blast radius (SONNY-1560 / GAP-SONNY806-07, High), both by the move to engine
+0.8.18; and **GAP-SONNY806-08 (Critical, DRIVER)** — the SONNY-1219 anchor
+stream had moved HELLO off the request streams, so a tenant-bound session
+carried no scope and read zero rows including its own writes. Every request
+stream now performs its own HELLO, which is what carries the tenant and graph
+binding; the anchor is kept for the connection lifetime it exists to own.
+`TestIntegration_GRPCLargePushedResultFailsLoudly` gained an arm for 0.8.18's
+prompt typed `ResourceExhausted` and still fails hard on a silent truncation.
 
 ## Transactions
 

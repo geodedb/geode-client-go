@@ -11,28 +11,33 @@ Review type: Comprehensive adversarial security review (Round 6 - no new finding
 
 Open findings by severity:
 
-- Critical: 1 (GAP-SONNY806-08 — the driver's anchor stream drops tenant/graph scope, filed 2026-09-16; **blocks v0.2.0**)
-- Fixed by the engine bump to 0.8.18 (2026-09-16): GAP-SONNY806-02 (Critical, cross-tenant read leak) and GAP-SONNY806-07 / SONNY-1560 (High, gRPC stall past ~64 KiB), both verified
+- Critical: 0
+- Fixed 2026-09-16: GAP-SONNY806-02 (Critical, cross-tenant read leak) and
+  GAP-SONNY806-07 / SONNY-1560 (High, gRPC stall past ~64 KiB) by the engine
+  bump to 0.8.18, both verified; GAP-SONNY806-08 (Critical, DRIVER — the
+  anchor stream dropped tenant/graph scope) by binding every request stream
+  with its own HELLO (Lane D Task 16b), verified
 - Medium: 2 (GAP-SONNY806-01 — engine refuses `$param` in CALL arguments, filed 2026-09-13;
   GAP-SONNY806-03 — engine ignores the `--listen-grpc` bind address, filed 2026-09-14)
 - Low: 1 (BUG-0002 — downgraded 2026-06-17)
 - Info: 0
 
-Closed findings: 32 (Issues #1-#23, #25-#28; BUG-0001; GAP-ENG4658-02;
+Closed findings: 33 (Issues #1-#23, #25-#28; BUG-0001; GAP-ENG4658-02;
 GAP-SONNY806-04 — gRPC paging, driver defect, closed 2026-09-14;
 GAP-SONNY806-05 — abandoned gRPC stream wedges the session, driver defect,
 closed 2026-09-14; GAP-SONNY806-06 — trailing-frame drain on a pushed-page
-transport, driver defect, closed 2026-09-14)
+transport, driver defect, closed 2026-09-14; GAP-SONNY806-08 — the anchor
+stream dropped the session's tenant and graph scope, driver defect, closed
+2026-09-16)
 Won't Do findings: 1 (Issue #24)
 
 Top risks (remaining):
 
-- **GAP-SONNY806-02 (Critical)** — geode engine 0.8.15 does not apply the session
-  tenant filter on the `MATCH` read path. Two sessions that bind different
-  tenants at HELLO read each other's rows in the same graph, even with
-  `GEODE_STRICT_TENANCY=1`. This is an ENGINE defect, not a driver defect; the
-  driver cannot work around it. Reproducer:
-  `TestIntegration_CrossTenantReadIsDenied` (currently RED by design).
+- **GAP-SONNY806-02 (Critical) — FIXED at engine 0.8.18**, verified 2026-09-16.
+  geode 0.8.15 did not apply the session tenant filter on the `MATCH` read
+  path, so two sessions binding different tenants at HELLO read each other's
+  rows even with `GEODE_STRICT_TENANCY=1`. `TestIntegration_CrossTenantReadIsDenied`
+  now PASSES against 0.8.18 with a correctly bound driver.
 
 - **GAP-SONNY806-07 (High, engine ticket SONNY-1560)** — geode 0.8.15 cannot
   finish pushing a gRPC result larger than roughly 64 KiB. The stream stalls
@@ -53,53 +58,6 @@ Top risks (remaining):
 
 ## Open Findings
 
-### GAP-SONNY806-08: the SONNY-1219 anchor stream drops the session's tenant and graph scope
-
-- **Severity:** Critical (a tenant-bound session reads ZERO rows, including
-  rows it wrote itself; silent wrong-answer, not an error)
-- **Component:** this DRIVER (`quic_pool.go`, the anchor stream) - NOT the engine
-- **Status:** **Open** (filed 2026-09-16, Lane D Task 16). **Blocks v0.2.0.**
-- **Introduced by:** `05b4653 fix(pool): anchor each QUIC connection on a
-  dedicated HELLO stream (SONNY-1219)`
-- **Reproducers:** `TestIntegration_ParamsBindInPropertyMaps`
-  (`MATCH with bound param: sql: no rows in result set`),
-  `TestIntegration_CrossTenantReadIsDenied`
-  (`tenant-a saw 0 of its own nodes, want 1`),
-  `TestIntegration_ParamsAreNotInQueryText`,
-  `TestIntegration_ParamsBindTimeValue`,
-  `TestIntegration_ProfileTimingsAreSyntheticOnTheTenantBoundPath`
-
-**Observed.** Before `05b4653`, every request stream performed its own HELLO
-(`pooledHello`). HELLO is what carries `tenant` and the bound graph. `05b4653`
-moved HELLO onto a dedicated anchor stream held for the connection's life and
-made request streams skip it - the commit describes removing "the burst of
-up-to-8 concurrent redundant HELLOs" as a benefit. Those HELLOs were not
-redundant: they were what put the session's tenant and graph scope on each
-request stream. Without them the engine serves request streams with no
-concrete scope, and a scoped read matches nothing.
-
-**Bisected against the engine**, so the engine bump is excluded as a cause:
-
-| driver commit | engine | `ParamsBindInPropertyMaps` | `CrossTenantReadIsDenied` |
-|---|---|---|---|
-| `29d373b` (pre-anchor) | 0.8.15 | PASS | FAIL - the old cross-tenant LEAK |
-| `29d373b` (pre-anchor) | **0.8.18** | **PASS** | **PASS** |
-| `05b4653` (anchor) | 0.8.15 | FAIL - `no rows in result set` | FAIL - `saw 0 of its own nodes` |
-| `3c14794` (current) | 0.8.18 | FAIL - `no rows in result set` | FAIL - `saw 0 of its own nodes` |
-
-**Why it hid.** The failure only shows on a SCOPED session. The lane's
-unit tests do not bind a tenant, and the SONNY-1219 review that approved
-`05b4653` ran targeted `-race` unit tests plus a burst load test, none of which
-bind a tenant. The full integration lane was never re-run on a quiet host
-against a scoped session between `05b4653` and this task.
-
-**Fix options.** (a) Revert the anchor stream. The engine reason for it is gone:
-0.8.18 keeps a QUIC connection alive until its LAST stream drains
-(`f80a812d`), which is exactly what the anchor was working around. (b) Keep the
-anchor and re-send HELLO (or an equivalent scope-binding message) on each
-request stream, which restores the per-stream cost the anchor removed.
-Option (a) is the smaller change and is now correct by construction.
-
 ### GAP-SONNY806-07 (SONNY-1560): a gRPC result stalls after roughly 64 KiB of pushed payload
 
 - **Severity:** High (functional cap on an entire transport; a caller sees a
@@ -118,12 +76,14 @@ Option (a) is the smaller change and is now correct by construction.
   of parking ~30 s, and `TestIntegration_GRPCBatchExecPastOnePage` PASSES
   immediately after it (it used to fail around statement 29), so the
   cross-session blast radius is gone. The measurements below describe 0.8.15
-  and are kept as the record of what was found there. **Follow-up:**
-  `TestIntegration_GRPCLargePushedResultFailsLoudly` is RED because its
-  `switch` accepts only `io.EOF`-with-every-row or `context.DeadlineExceeded`
-  and has no arm for a promptly surfaced typed error; the no-silent-truncation
-  invariant it protects still holds. (Filed 2026-09-14, SONNY-806 /
-  GEO-GO-UP-001 Lane D Task 14c.)
+  and are kept as the record of what was found there. **Follow-up, done
+  2026-09-16 (Task 16b):** `TestIntegration_GRPCLargePushedResultFailsLoudly`
+  was RED because its `switch` accepted only `io.EOF`-with-every-row or
+  `context.DeadlineExceeded` and had no arm for a promptly surfaced typed
+  error. It now has one, keyed on the driver's own `*TransportError` rather
+  than on message text, and the no-silent-truncation invariant is unchanged: a
+  short result reported as a clean `io.EOF` is still a hard failure. (Filed
+  2026-09-14, SONNY-806 / GEO-GO-UP-001 Lane D Task 14c.)
 - **Reproducer:** `TestIntegration_GRPCLargePushedResultFailsLoudly` logs the
   stall point; any oversized result reproduces it, e.g.
   `FOR i IN range(0, 19999) RETURN i` over gRPC.
@@ -222,22 +182,20 @@ requested address is not the one that will be bound.
 - **Severity:** Critical
 - **Component:** geode ENGINE 0.8.15 (read path) — not the Go driver
 - **Status:** **FIXED at the pinned engine 0.8.18**, verified 2026-09-16:
-  `TestIntegration_CrossTenantReadIsDenied` PASSES against 0.8.18 with a
-  pre-anchor driver (`29d373b`). It is RED on the current branch only because
-  of GAP-SONNY806-08 above, which is a driver defect with the opposite
-  symptom (no rows at all, rather than another tenant's rows). The fix landed in
+  `TestIntegration_CrossTenantReadIsDenied` PASSES against 0.8.18 — first with
+  a pre-anchor driver (`29d373b`), and then on the branch itself once
+  GAP-SONNY806-08 was fixed (Task 16b). The fix landed in
   geode **0.8.16** and ships in 0.8.18 (`0beb108b` applies tenant scope to engine-direct reads;
   `d0fe80fb`/`afcdbd6f`/`97bd9b83` extend it to graph procedures and
   introspection under SONNY-1318; `9ea03ccc`/`1d99e0e0` cover shortestPath,
   `COUNT{}`, `EXISTS{}` and pattern comprehensions and advertise
-  `graph_procedure_tenancy` under SONNY-1326). This driver is still pinned to
-  0.8.15 and has not re-measured isolation, so the finding stays open here
-  until the lane re-runs against 0.8.16 — note that the capability golden
-  below will change when it does. (Filed 2026-09-13, SONNY-806 /
+  `graph_procedure_tenancy` under SONNY-1326). The lane is pinned to 0.8.18 and
+  has re-measured isolation; the capability golden moved with it
+  (`testdata/capabilities_0.8.18.golden`). (Filed 2026-09-13, SONNY-806 /
   GEO-GO-UP-001.)
 - **Reproducer:** `integration_tenancy_test.go` →
-  `TestIntegration_CrossTenantReadIsDenied` (RED; this is the P0 evidence and is
-  deliberately not skipped)
+  `TestIntegration_CrossTenantReadIsDenied` (now GREEN; this is the P0 evidence
+  and is deliberately not skipped)
 
 **Observed.** With the engine started as `GEODE_STRICT_TENANCY=1` and two
 tenants registered via `CALL geode.tenant.create('tenant-a'/'tenant-b')`, a node
@@ -447,6 +405,64 @@ for `.Param`. Plus documented `CALL` syntax for `algo.bfs`/`dfs`/`dijkstra`.
     surfacing, and it is why the lane is not yet reliably green at 0 failures.
 
 ## Closed Findings
+
+### GAP-SONNY806-08: the SONNY-1219 anchor stream dropped the session's tenant and graph scope
+
+- **Severity:** Critical (a tenant-bound session read ZERO rows, including rows
+  it wrote itself; a silent wrong answer, not an error)
+- **Component:** this DRIVER (`conn.go` `pooledHello`, the SONNY-1219 anchor
+  stream) — NOT the engine
+- **Status:** **Closed** 2026-09-16, Lane D Task 16b, commit
+  `fix(driver): bind every pooled request stream with its own HELLO`
+- **Introduced by:** `05b4653 fix(pool): anchor each QUIC connection on a
+  dedicated HELLO stream (SONNY-1219)`
+
+**Observed.** Before `05b4653` every request stream performed its own HELLO.
+HELLO is what carries `tenant` and the bound graph, and the engine applies both
+PER STREAM. `05b4653` moved HELLO onto a dedicated anchor stream and made
+request streams skip it — its commit message counts removing "the burst of
+up-to-8 concurrent redundant HELLOs" as a benefit. They were not redundant.
+Without them the engine served request streams with no concrete scope while the
+driver reported the anchor's binding client-side, so a scoped read matched
+nothing and a scoped write was invisible to the session that made it.
+
+**Bisected against the engine**, which excludes the 0.8.18 bump as a cause:
+
+| driver commit | engine | `ParamsBindInPropertyMaps` | `CrossTenantReadIsDenied` |
+|---|---|---|---|
+| `29d373b` (pre-anchor) | 0.8.15 | PASS | FAIL - the old cross-tenant LEAK |
+| `29d373b` (pre-anchor) | **0.8.18** | **PASS** | **PASS** |
+| `05b4653` (anchor) | 0.8.15 | FAIL - `no rows in result set` | FAIL - `saw 0 of its own nodes` |
+| `7fe7b25` (anchor) | 0.8.18 | FAIL - `no rows in result set` | FAIL - `saw 0 of its own nodes` |
+| **fix** | **0.8.18** | **PASS** | **PASS** |
+
+**Why it hid.** The failure only shows on a SCOPED session. No unit test bound a
+tenant, and the SONNY-1219 review that approved `05b4653` ran targeted `-race`
+unit tests plus a burst load test, none of which bind one. The full integration
+lane was never re-run on a quiet host between `05b4653` and Task 16.
+
+**Fixed (DECISION-D-16b-01).** `pooledHello` performs an **unconditional**
+HELLO on every request stream — no `isAuthed` fast path remains on that path —
+and `pooledGraphInit` reads the binding from that stream's own HELLO response
+rather than from the pooled connection's. `Conn.adoptHelloState` is deleted with
+the assumption it encoded. The anchor stream is kept for the one thing it is
+for: owning the QUIC connection's lifetime so a finished request cannot take its
+siblings down with it (SONNY-1219).
+
+Reverting the anchor was rejected on evidence. At 0.8.15 a revert would have
+been correct only by accident — the engine destroyed a pooled connection the
+moment its first request stream closed, so nearly every request stream WAS a
+first stream doing its own handshake. Engine 0.8.18 `f80a812d` keeps a
+connection alive until its LAST stream drains, so siblings now survive, and a
+revert would leave them alive AND unbound: the same defect.
+
+**Regression coverage.** `TestIntegration_TenantBoundSessionReadsItsOwnWritesOnEveryStream`
+(a tenant-bound session writes and reads across four simultaneously held request
+streams; a second tenant sees none of it) and, with no engine needed,
+`TestAnchor_RequestStreamCarriesTenantAndGraphBinding` /
+`TestAnchor_EveryRequestStreamBindsItself`, which assert on the wire that each
+request stream's own transport carries a `HelloRequest` naming the configured
+tenant, graph and role.
 
 ### GAP-SONNY806-05: an abandoned gRPC result wedged the next statement on the same session
 
