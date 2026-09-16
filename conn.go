@@ -811,7 +811,7 @@ func (c *Conn) ExecContext(ctx context.Context, query string, args []driver.Name
 	resp, err := c.transport.ReceiveProto(ctx)
 	if err != nil {
 		c.markConnFailed()
-		return nil, transportErrBadConn(err)
+		return nil, transportErrBadConn(stillRunningOnTheEngine(err))
 	}
 
 	execResp := resp.GetExecute()
@@ -854,6 +854,35 @@ func (c *Conn) ExecContext(ctx context.Context, query string, args []driver.Name
 	finishExecStream(c.transport)
 
 	return &Result{}, nil
+}
+
+// stillRunningOnTheEngine annotates the error of a statement the caller gave up
+// on while the engine was executing it.
+//
+// A context deadline on a statement whose bytes are already on the wire does
+// NOT mean the statement did not happen, and on QUIC it does not even mean it
+// stopped: QuicClientMessage carries no cancel message
+// (proto/geode.proto), and closing the stream does not help — quic-go's
+// Stream.Close closes only the SEND direction. The engine runs the statement to
+// completion, and every statement that follows it on that graph waits behind
+// it. Measured against geode 0.8.18: a `MATCH (n) DETACH DELETE n` over 8,000
+// nodes, abandoned by the client at a 2s deadline, reported `context deadline
+// exceeded` to the caller — and the next CREATE, on a different pool and a
+// different QUIC connection, took 10.5s while the engine finished the delete
+// nobody could cancel. The next seven took 3ms each.
+//
+// Callers that read this as "it did not run" write cleanup helpers that ignore
+// the error, which is how one over-budget delete cascaded through forty later
+// tests in pipeline 2855806396. The wrap is %w on the original, so
+// errors.Is(err, context.DeadlineExceeded) and every classification built on it
+// are unchanged; only what a human reads is different.
+func stillRunningOnTheEngine(err error) error {
+	if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+		return err
+	}
+	return fmt.Errorf("%w — the statement was abandoned by this client, not "+
+		"cancelled: the engine is still executing it and later statements on "+
+		"this graph queue behind it", err)
 }
 
 // execStreamFinisher is implemented by transports whose every request rides its own
