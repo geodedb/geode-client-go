@@ -1220,12 +1220,22 @@ func TestIntegration_GRPCLargePushedResultFailsLoudly(t *testing.T) {
 		read++
 	}
 
+	// A surfaced transport error is the shape engine 0.8.18 produces: it no
+	// longer parks until the caller's deadline but refuses the push promptly
+	// with a typed gRPC ResourceExhausted ("stream window exhausted: peer
+	// stopped draining the pushed result"), which reaches the caller through
+	// GRPCTransport.ReceiveProto as a *TransportError. See the arm below.
+	var te *TransportError
+
 	switch {
 	case errors.Is(stop, io.EOF) && read == want:
 		t.Logf("engine delivered all %d rows: GAP-SONNY806-07 appears fixed — "+
 			"revisit grpcPushedRowCeiling and the gRPC caveats in README/CHANGELOG",
 			read)
 	case errors.Is(stop, io.EOF):
+		// THE INVARIANT. It is not relaxed by anything below: a short result
+		// set reported as a clean end of stream is the one outcome this test
+		// exists to forbid, whatever the engine version.
 		t.Fatalf("SILENT TRUNCATION: %d of %d rows, reported as a clean EOF. A short "+
 			"result set must never reach the caller as a complete one", read, want)
 	case errors.Is(stop, context.DeadlineExceeded):
@@ -1235,9 +1245,28 @@ func TestIntegration_GRPCLargePushedResultFailsLoudly(t *testing.T) {
 			t.Logf("note: %d rows is well past the recorded ceiling of %d; the "+
 				"measurement may need refreshing", read, grpcPushedRowCeiling)
 		}
+	case errors.As(stop, &te):
+		// Engine 0.8.18 (SONNY-1560): the ~64 KiB ceiling is still there, but
+		// the engine now refuses LOUDLY and IMMEDIATELY instead of parking for
+		// ~30 s and poisoning a different session's transaction on the way out.
+		// The caller gets a typed error long before its deadline — which is a
+		// strictly better answer than the DeadlineExceeded arm above, and still
+		// satisfies the invariant: the truncation is reported, not hidden.
+		//
+		// The arm is deliberately keyed on the driver's own *TransportError
+		// rather than on the message text, so it accepts the engine's refusal
+		// without accepting an untyped error of unknown provenance — which
+		// still falls through to the fatal default.
+		if read >= want {
+			t.Fatalf("engine surfaced %v after delivering all %d rows; a complete "+
+				"result must end in io.EOF", stop, read)
+		}
+		t.Logf("engine refused the push after %d of %d rows with a surfaced transport "+
+			"error in %v: %v (GAP-SONNY806-07 now fails fast at 0.8.18)",
+			read, want, time.Since(started).Round(time.Millisecond), stop)
 	default:
-		t.Fatalf("after %d of %d rows the read stopped with %v; want either every row "+
-			"or a surfaced error", read, want, stop)
+		t.Fatalf("after %d of %d rows the read stopped with %T %v; want either every "+
+			"row, a surfaced transport error, or the context error", read, want, stop, stop)
 	}
 
 	_ = rows.Close()
