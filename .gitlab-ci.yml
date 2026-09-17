@@ -167,9 +167,20 @@ integration:geode:
   script:
     - go test -race -v -tags=integration -timeout=20m ./...
   allow_failure: false
+  # Pin to the OVH Dedicated Runners, not the shared Company Cluster Runner.
+  # Task 16g triage: the QUIC lane's TestLoad_BurstExceedsPoolSize_NoDeadlock
+  # is CI-contention-only -- it passes 64/64 on a dedicated engine and the
+  # whole lane passes in CI order there, but on the shared cluster runner a
+  # 693s co-tenant-contended job pushes the anchor-HELLO handshake (run under
+  # the pool lock, SONNY-1219 F3) past the burst's 20s/caller deadline on the
+  # tail. The dedicated fleet gives the load path the headroom; the 20s budget
+  # is NOT relaxed. Same tag set as sonny-upstream's integration-test lane.
   tags:
     - company
+    - dedicated
+    - docker
     - linux
+    - x86
 
 # =============================================================================
 # gRPC parity lane (SONNY-806 / GEO-GO-UP-001, Lane D Task 14).
