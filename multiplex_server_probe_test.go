@@ -88,10 +88,12 @@ func resolveProbeGeodeBinary(t *testing.T) string {
 		if info.IsDir() {
 			t.Fatalf("%s=%q is a directory, not an engine binary", env, v)
 		}
+		t.Logf("probe engine binary resolved from %s: %s", env, v)
 		return v
 	}
 
 	if resolved, err := exec.LookPath(probeGeodeBinaryName); err == nil {
+		t.Logf("probe engine binary resolved from PATH (%q): %s", probeGeodeBinaryName, resolved)
 		return resolved
 	}
 
