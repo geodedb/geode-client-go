@@ -28,6 +28,7 @@ include:
 
   - component: gitlab.com/devnw/ci-catalog/go-test@v1.55.0
     inputs:
+      tags: [company, linux, x86]
       go_version: "1.27.1"
       stage: test
       # Unit tests (with -short flag) must pass. Integration tests that
@@ -37,10 +38,12 @@ include:
   # Security scanning - pinned to v1.11.0
   - component: gitlab.com/devnw/ci-catalog/security-sast@v1.48.0
     inputs:
+      tags: [company, linux, x86]
       stage: security
 
   - component: gitlab.com/devnw/ci-catalog/security-dependency-scanning@v1.48.0
     inputs:
+      tags: [company, linux, x86]
       stage: security
 
   - component: gitlab.com/devnw/ci-catalog/security-secrets@v1.48.0
@@ -76,9 +79,7 @@ sbom-scan:
 
 default:
   tags:
-    - company
-    - linux
-
+    [company, linux, x86]
 stages:
   - lint
   - build
