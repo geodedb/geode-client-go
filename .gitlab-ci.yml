@@ -12,23 +12,23 @@
 
 include:
   # Pinned to v1.11.0 for supply chain security
-  - component: gitlab.com/devnw/ci-catalog/go-lint@v1.48.0
+  - component: gitlab.com/devnw/ci-catalog/go-lint@v1.55.0
     inputs:
       stage: lint
       # Lint includes gosec security checks - must not allow failure
       allow_failure: false
       # go.mod targets go 1.27; the component default (v2.11.3) is built
       # with go 1.26 and refuses to load the config.
-      golangci_version: 'v2.13.1'
+      golangci_version: 'v2.14.0'
 
-  - component: gitlab.com/devnw/ci-catalog/go-build@v1.48.0
+  - component: gitlab.com/devnw/ci-catalog/go-build@v1.55.0
     inputs:
-      go_version: "1.25.8"
+      go_version: "1.27.1"
       stage: build
 
-  - component: gitlab.com/devnw/ci-catalog/go-test@v1.48.0
+  - component: gitlab.com/devnw/ci-catalog/go-test@v1.55.0
     inputs:
-      go_version: "1.25.8"
+      go_version: "1.27.1"
       stage: test
       # Unit tests (with -short flag) must pass. Integration tests that
       # require a running Geode server are skipped with -short.
@@ -101,7 +101,7 @@ stages:
 # =============================================================================
 proto-check:
   stage: lint
-  image: golang:1.27
+  image: golang:1.27.1
   script:
     - make proto-check
   allow_failure: false
@@ -120,7 +120,7 @@ proto-check:
 # =============================================================================
 integration:geode:
   stage: integration
-  image: golang:1.27
+  image: golang:1.27.1
   services:
     - name: geodedb/geode:0.8.18@sha256:5ebbc7c5b8d13375749e7c1df8a77e54935bc609321cd4d8107d8e26f370c6f1
       alias: geode

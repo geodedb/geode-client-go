@@ -1,3 +1,5 @@
+default_language_version:
+  golang: 1.27.1
 # Pre-commit configuration for Geode Go Client
 # https://pre-commit.com/
 #
@@ -91,15 +93,21 @@ repos:
   # =============================================================================
   # Go linting and formatting
   # =============================================================================
-- repo: https://github.com/golangci/golangci-lint
+- repo: local
   # go.mod targets go 1.27. Releases before v2.13.x are built with an older Go
   # and cannot read its export data ("export data version 4 is greater than
   # maximum supported version 2"), so every hook run failed on typecheck.
   # Matches the golangci_version pinned for go-lint in .gitlab-ci.yml.
-  rev: v2.13.1
   hooks:
   - id: golangci-lint
     args: [--fix]
+    name: golangci-lint (maintained Go toolchain)
+    entry: python3 scripts/golangci-lint.py run
+    language: system
+    pass_filenames: false
+    require_serial: true
+    types:
+    - go
 
   # =============================================================================
   # Commit message validation (Conventional Commits)

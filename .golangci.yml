@@ -21,7 +21,7 @@ linters:
   - gocritic
   - gocyclo
   - gomoddirectives
-  - gomodguard
+  - gomodguard_v2
   - goprintffuncname
   - gosec
   - govet
@@ -73,21 +73,6 @@ linters:
           paramsOnly: false
         underef:
           skipRecvDeref: false
-    gomodguard:
-      blocked:
-        modules:
-        - github.com/golang/protobuf:
-            recommendations:
-            - google.golang.org/protobuf
-            reason: see https://developers.google.com/protocol-buffers/docs/reference/go/faq#modules
-        - github.com/satori/go.uuid:
-            recommendations:
-            - github.com/google/uuid
-            reason: satori's package is not maintained
-        - github.com/gofrs/uuid:
-            recommendations:
-            - github.com/google/uuid
-            reason: 'see recommendation from dev-infra team: https://confluence.gtforge.com/x/gQI6Aw'
     govet:
       disable:
       - fieldalignment
@@ -121,6 +106,22 @@ linters:
           json: snake
           xml: camel
           yaml: camel
+    gosec:
+      concurrency: 1
+    gomodguard_v2:
+      blocked:
+      - module: github.com/golang/protobuf
+        recommendations:
+        - google.golang.org/protobuf
+        reason: see https://developers.google.com/protocol-buffers/docs/reference/go/faq#modules
+      - module: github.com/satori/go.uuid
+        recommendations:
+        - github.com/google/uuid
+        reason: satori's package is not maintained
+      - module: github.com/gofrs/uuid
+        recommendations:
+        - github.com/google/uuid
+        reason: 'see recommendation from dev-infra team: https://confluence.gtforge.com/x/gQI6Aw'
   exclusions:
     generated: lax
     presets:
@@ -197,3 +198,5 @@ formatters:
     - third_party$
     - builtin$
     - examples$
+run:
+  concurrency: 4

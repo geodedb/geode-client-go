@@ -13,6 +13,7 @@ import (
 // read-only mode and field 5 (idempotency_key) is the write-dedup mechanism;
 // neither can be used while the vendored copy stops at field 3.
 func TestExecuteRequest_HasCanonicalFields(t *testing.T) {
+	//nolint:exhaustive // This table lists message fields; reserved wire numbers are not fields.
 	want := map[protoreflect.FieldNumber]string{
 		1: "session_id",
 		2: "query",

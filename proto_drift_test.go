@@ -22,6 +22,8 @@ import (
 
 // requiredHelloFields is the canonical HelloRequest field set the vendored proto
 // must contain. Keep this in sync with geode/src/proto/geode.proto HelloRequest.
+//
+//nolint:exhaustive // This table lists message fields; reserved wire numbers are not fields.
 var requiredHelloFields = map[protoreflect.FieldNumber]struct {
 	name     string
 	optional bool

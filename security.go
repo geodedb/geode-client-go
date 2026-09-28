@@ -150,7 +150,7 @@ func loadClientCertificate(certPath, keyPath string) (tls.Certificate, error) {
 
 func readLimitedFile(path, label string) ([]byte, error) {
 	path = filepath.Clean(path)
-	info, err := os.Stat(path)
+	info, err := os.Stat(path) // #nosec G703 -- the caller explicitly selects its TLS credential file.
 	if err != nil {
 		return nil, &SecurityError{
 			Type:    paramTLS,
@@ -171,7 +171,7 @@ func readLimitedFile(path, label string) ([]byte, error) {
 		}
 	}
 
-	f, err := os.Open(path)
+	f, err := os.Open(path) // #nosec G703 -- the caller explicitly selects its TLS credential file.
 	if err != nil {
 		return nil, &SecurityError{
 			Type:    paramTLS,

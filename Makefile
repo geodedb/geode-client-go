@@ -5,7 +5,7 @@
 
 GO ?= go
 GOFLAGS ?=
-GOLANGCI_LINT ?= golangci-lint
+GOLANGCI_LINT ?= python3 scripts/golangci-lint.py
 
 # Docker settings for integration tests
 DOCKER ?= docker

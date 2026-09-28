@@ -23,6 +23,7 @@ func TestCdcBackupRestoreUploadFields(t *testing.T) {
 		{
 			name: "CdcDiagnosticsRequest",
 			msg:  &proto.CdcDiagnosticsRequest{},
+			//nolint:exhaustive // This table lists message fields; reserved wire numbers are not fields.
 			want: map[protoreflect.FieldNumber]string{
 				1: "session_id",
 			},
@@ -30,6 +31,7 @@ func TestCdcBackupRestoreUploadFields(t *testing.T) {
 		{
 			name: "CdcControlRequest",
 			msg:  &proto.CdcControlRequest{},
+			//nolint:exhaustive // This table lists message fields; reserved wire numbers are not fields.
 			want: map[protoreflect.FieldNumber]string{
 				1: "action",
 				2: "session_id",
@@ -38,6 +40,7 @@ func TestCdcBackupRestoreUploadFields(t *testing.T) {
 		{
 			name: "BackupRequest",
 			msg:  &proto.BackupRequest{},
+			//nolint:exhaustive // This table lists message fields; reserved wire numbers are not fields.
 			want: map[protoreflect.FieldNumber]string{
 				1: "backup_type",
 				2: "session_id",
@@ -47,6 +50,7 @@ func TestCdcBackupRestoreUploadFields(t *testing.T) {
 		{
 			name: "RestoreRequest",
 			msg:  &proto.RestoreRequest{},
+			//nolint:exhaustive // This table lists message fields; reserved wire numbers are not fields.
 			want: map[protoreflect.FieldNumber]string{
 				1: "target_time",
 				2: "confirm",
@@ -56,6 +60,7 @@ func TestCdcBackupRestoreUploadFields(t *testing.T) {
 		{
 			name: "UploadBackupRequest",
 			msg:  &proto.UploadBackupRequest{},
+			//nolint:exhaustive // This table lists message fields; reserved wire numbers are not fields.
 			want: map[protoreflect.FieldNumber]string{
 				1: "size_bytes",
 				2: "checksum",
