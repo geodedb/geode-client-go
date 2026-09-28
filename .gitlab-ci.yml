@@ -14,6 +14,7 @@ include:
   # Pinned to v1.11.0 for supply chain security
   - component: gitlab.com/devnw/ci-catalog/go-lint@v1.55.0
     inputs:
+      go_version: "1.27.1"
       stage: lint
       # Lint includes gosec security checks - must not allow failure
       allow_failure: false
