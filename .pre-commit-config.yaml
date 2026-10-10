@@ -1,5 +1,5 @@
 default_language_version:
-  golang: 1.27.1
+  golang: 1.27.2
 # Pre-commit configuration for Geode Go Client
 # https://pre-commit.com/
 #
@@ -74,7 +74,7 @@ repos:
   # Markdown linting
   # =============================================================================
 - repo: https://github.com/igorshubovych/markdownlint-cli
-  rev: v0.44.0
+  rev: v0.49.1
   hooks:
   - id: markdownlint
     args: [--fix, --disable, MD013, MD033, MD041, MD024, --]
@@ -113,7 +113,7 @@ repos:
   # Commit message validation (Conventional Commits)
   # =============================================================================
 - repo: https://github.com/commitizen-tools/commitizen
-  rev: v4.12.1
+  rev: v4.19.2
   hooks:
   - id: commitizen
     stages: [commit-msg]

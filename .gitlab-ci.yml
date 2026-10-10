@@ -12,9 +12,9 @@
 
 include:
   # Pinned to v1.11.0 for supply chain security
-  - component: gitlab.com/devnw/ci-catalog/go-lint@v1.55.6
+  - component: gitlab.com/devnw/ci-catalog/go-lint@v1.55.8
     inputs:
-      go_version: "1.27.1"
+      go_version: "1.27.2"
       stage: lint
       # Lint includes gosec security checks - must not allow failure
       allow_failure: false
@@ -22,52 +22,52 @@ include:
       # with go 1.26 and refuses to load the config.
       golangci_version: 'v2.14.0'
 
-  - component: gitlab.com/devnw/ci-catalog/go-build@v1.55.6
+  - component: gitlab.com/devnw/ci-catalog/go-build@v1.55.8
     inputs:
-      go_version: "1.27.1"
+      go_version: "1.27.2"
       stage: build
 
-  - component: gitlab.com/devnw/ci-catalog/go-test@v1.55.6
+  - component: gitlab.com/devnw/ci-catalog/go-test@v1.55.8
     inputs:
       tags: [company, linux, x86]
-      go_version: "1.27.1"
+      go_version: "1.27.2"
       stage: test
       # Unit tests (with -short flag) must pass. Integration tests that
       # require a running Geode server are skipped with -short.
       allow_failure: false
 
   # Security scanning - pinned to v1.11.0
-  - component: gitlab.com/devnw/ci-catalog/security-sast@v1.55.6
+  - component: gitlab.com/devnw/ci-catalog/security-sast@v1.55.8
     inputs:
       tags: [company, linux, x86]
       stage: security
 
-  - component: gitlab.com/devnw/ci-catalog/security-dependency-scanning@v1.55.6
+  - component: gitlab.com/devnw/ci-catalog/security-dependency-scanning@v1.55.8
     inputs:
       tags: [company, linux, x86]
       stage: security
 
-  - component: gitlab.com/devnw/ci-catalog/security-secrets@v1.55.6
+  - component: gitlab.com/devnw/ci-catalog/security-secrets@v1.55.8
     inputs:
       stage: security
 
-  - component: gitlab.com/devnw/ci-catalog/security-gitleaks@v1.55.6
+  - component: gitlab.com/devnw/ci-catalog/security-gitleaks@v1.55.8
 
   # SBOM generation and scanning - pinned to v1.11.0
   # allow_failure: external syft download may fail due to DNS/network issues
-  - component: gitlab.com/devnw/ci-catalog/sbom-generate@v1.55.6
+  - component: gitlab.com/devnw/ci-catalog/sbom-generate@v1.55.8
 
-  - component: gitlab.com/devnw/ci-catalog/sbom-scan@v1.55.6
+  - component: gitlab.com/devnw/ci-catalog/sbom-scan@v1.55.8
 
   # Release creation - pinned to v1.11.0
-  - component: gitlab.com/devnw/ci-catalog/release-semantic@v1.55.6
+  - component: gitlab.com/devnw/ci-catalog/release-semantic@v1.55.8
     inputs:
       stage: release
 
 # SBOM jobs may fail due to DNS/network issues downloading syft
   # Security findings -> auto-triaged Jira SEC issues (.post; reads gl-*-report
   # artifacts). component_id 12496 = SEC > Vuln Mgmt.
-  - component: gitlab.com/devnw/ci-catalog/jira-event-intake@v1.55.6
+  - component: gitlab.com/devnw/ci-catalog/jira-event-intake@v1.55.8
     inputs:
       project_key: SEC
       component_id: "12496"
@@ -103,7 +103,7 @@ stages:
 # =============================================================================
 proto-check:
   stage: lint
-  image: golang:1.27.1
+  image: golang:1.27.2
   script:
     - make proto-check
   allow_failure: false
@@ -122,7 +122,7 @@ proto-check:
 # =============================================================================
 integration:geode:
   stage: integration
-  image: golang:1.27.1
+  image: golang:1.27.2
   services:
     - name: geodedb/geode:0.8.18@sha256:5ebbc7c5b8d13375749e7c1df8a77e54935bc609321cd4d8107d8e26f370c6f1
       alias: geode
