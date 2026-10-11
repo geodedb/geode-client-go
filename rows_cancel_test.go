@@ -323,7 +323,7 @@ func TestRows_Next_UncancelledPagingUnaffected(t *testing.T) {
 	ctx := context.Background()
 
 	c, rows, m := openMidStreamRows(ctx, t, []string{"a", "b"})
-	m.push(mockPageMsgFinal([]string{"c", "d"}, true))
+	m.push(pullPage([]string{"c", "d"}, true))
 
 	dest := make([]driver.Value, 1)
 	got := make([]string, 0, 4)
