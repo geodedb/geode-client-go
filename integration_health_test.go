@@ -338,7 +338,7 @@ func TestIntegration_RecoversFromServerRestart(t *testing.T) {
 
 	// The wait strategy matches the pre-restart log line immediately, so prove
 	// the engine is back with a FRESH pool of our own before timing anything.
-	waitForEngine(t, ctx)
+	waitForEngine(ctx, t)
 	t.Logf("engine back after %v", time.Since(killedAt))
 
 	// ── The probed pool: detection, eviction, prompt recovery ──────────────
@@ -434,8 +434,10 @@ const statementDeadline = 6 * time.Second
 // waitForEngine blocks until a FRESH pool can query the restarted engine, so
 // the restart test measures the old pool's recovery and not the engine's
 // startup. It uses its own pool because the point is to reach the engine
-// without any pre-restart connection in the way.
-func waitForEngine(t *testing.T, ctx context.Context) {
+// without any pre-restart connection in the way. A protocol PING can answer
+// while the first data query still waits on engine startup; prove the same
+// query the recovery assertion times, including its result.
+func waitForEngine(ctx context.Context, t *testing.T) {
 	t.Helper()
 	deadline := time.Now().Add(90 * time.Second)
 	var lastErr error
@@ -444,13 +446,21 @@ func waitForEngine(t *testing.T, ctx context.Context) {
 		if err != nil {
 			t.Fatalf("sql.Open: %v", err)
 		}
-		pingCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		lastErr = db.PingContext(pingCtx)
+		queryCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		started := time.Now()
+		var one int64
+		lastErr = db.QueryRowContext(queryCtx, "RETURN 1").Scan(&one)
+		elapsed := time.Since(started)
 		cancel()
 		_ = db.Close()
 		if lastErr == nil {
+			if one != 1 {
+				t.Fatalf("fresh readiness query returned %d, want 1", one)
+			}
+			t.Logf("fresh post-restart readiness query succeeded in %v", elapsed)
 			return
 		}
+		t.Logf("fresh post-restart readiness query not ready after %v: %v", elapsed, lastErr)
 		time.Sleep(250 * time.Millisecond)
 	}
 	t.Fatalf("engine did not come back within 90s; last error: %v", lastErr)
