@@ -34,6 +34,11 @@ type Rows struct {
 	final       bool
 	ordered     bool
 	orderKeys   []string
+	// QUIC may push the remaining Execute pages before answering the first
+	// PULL. Once observed, read those pages without issuing further PULLs and
+	// finish the one outstanding request before returning the stream to reuse.
+	inlinePushed bool
+	pullPending  bool
 
 	mu     sync.Mutex
 	closed bool
@@ -107,6 +112,7 @@ func (r *Rows) Close() error {
 	// fetchNextPage writes r.final without holding r.mu, so reading it
 	// after unlocking would race with an in-flight page fetch.
 	final := r.final
+	pullPending := r.pullPending
 	r.mu.Unlock()
 
 	// A Rows abandoned before its final page under a cancelled context leaves
@@ -114,7 +120,7 @@ func (r *Rows) Close() error {
 	// desynchronised stream to the pool. Rows that reached their final page
 	// are clean and stay poolable even if the context has since been
 	// cancelled.
-	if !final && r.ctx != nil && r.ctx.Err() != nil {
+	if (!final && r.ctx != nil && r.ctx.Err() != nil) || pullPending {
 		r.conn.markConnFailed()
 	}
 
@@ -217,6 +223,9 @@ func (r *Rows) Next(dest []driver.Value) error {
 
 		// No more buffered rows
 		if r.final {
+			if err := r.finishPendingPull(); err != nil {
+				return err
+			}
 			return io.EOF
 		}
 
@@ -352,8 +361,9 @@ func convertProtoValue(v *proto.Value) driver.Value {
 //
 // Who moves the page depends on the transport (Transport.PagesArePushed):
 //
-//   - PULL-driven (QUIC): the driver asks with a PullRequest and reads the
-//     answer.
+//   - QUIC: initially ask with a PullRequest. If Execute pages arrive instead
+//     of its PullResponse, the engine is pushing this result; read subsequent
+//     pages without further PULLs and complete the outstanding request at EOF.
 //   - server-pushed (gRPC): the page is already in flight — geode 0.8.15
 //     serves Execute as a server-streaming RPC and pushes every page until one
 //     is final (src/transport/grpc_server.zig:1009-1101 handleExecuteStreaming)
@@ -370,7 +380,7 @@ func (r *Rows) fetchNextPage() error {
 		return err
 	}
 
-	if !r.conn.transport.PagesArePushed() {
+	if !r.conn.transport.PagesArePushed() && !r.inlinePushed {
 		// Send a PullRequest to get the next page
 		r.requestID++
 		pullMsg := proto.NewPullMessage(&proto.PullRequest{
@@ -383,8 +393,10 @@ func (r *Rows) fetchNextPage() error {
 			if cancelled := r.abortOnCancel(); cancelled != nil {
 				return cancelled
 			}
+			r.conn.markConnFailed()
 			return err
 		}
+		r.pullPending = true
 	}
 
 	// This read blocks until the page arrives. Both transports honour r.ctx
@@ -397,20 +409,28 @@ func (r *Rows) fetchNextPage() error {
 		if cancelled := r.abortOnCancel(); cancelled != nil {
 			return cancelled
 		}
+		r.conn.markConnFailed()
 		return err
 	}
 
 	// Server sends pull data in pull.response, not execute
 	var execResp *proto.ExecutionResponse
 	if resp.GetPull() != nil {
+		if !r.pullPending {
+			r.conn.markConnFailed()
+			return fmt.Errorf("geode: received PULL response without an outstanding request")
+		}
+		r.pullPending = false
 		execResp = resp.GetPull().GetResponse()
-	}
-	if execResp == nil {
+	} else {
 		execResp = resp.GetExecute()
+		if execResp != nil && r.pullPending {
+			r.inlinePushed = true
+		}
 	}
 	if execResp == nil {
-		r.final = true
-		return io.EOF
+		r.conn.markConnFailed()
+		return fmt.Errorf("geode: expected result page, got %s", describeServerMessage(resp))
 	}
 
 	if execResp.GetError() != nil {
@@ -429,7 +449,60 @@ func (r *Rows) fetchNextPage() error {
 
 	// No more data
 	r.final = true
+	r.conn.markConnFailed()
 	return fmt.Errorf("unexpected response type")
+}
+
+// finishPendingPull completes the single PULL displaced by inline Execute
+// pages. It uses the query context, not a speculative drain timeout. Only the
+// response to that known request is accepted; unrelated frames are a protocol
+// error. A fully pushed result leaves no active cursor, so SQLSTATE 02000 is
+// the engine's expected completion of the redundant PULL.
+func (r *Rows) finishPendingPull() error {
+	if !r.pullPending {
+		return nil
+	}
+	err := r.receivePullCompletion()
+	if err != nil {
+		r.conn.markConnFailed()
+		if cancelled := r.abortOnCancel(); cancelled != nil {
+			return cancelled
+		}
+		return err
+	}
+	r.pullPending = false
+	return nil
+}
+
+func (r *Rows) receivePullCompletion() error {
+	// Bound optional metrics/heartbeat frames without buffering them. A peer
+	// cannot keep the connection busy indefinitely by emitting metadata.
+	const maxCompletionFrames = 64
+	for range maxCompletionFrames {
+		msg, err := r.conn.transport.ReceiveProto(r.ctx)
+		if err != nil {
+			return err
+		}
+		if exec := msg.GetExecute(); exec != nil && (exec.GetMetrics() != nil || exec.GetHeartbeat() != nil) {
+			continue
+		}
+		pull := msg.GetPull()
+		if pull == nil || pull.GetResponse() == nil {
+			return fmt.Errorf("geode: expected outstanding PULL completion, got %s", describeServerMessage(msg))
+		}
+		response := pull.GetResponse()
+		if refusal := response.GetError(); refusal != nil {
+			if refusal.GetCode() == "02000" {
+				return nil
+			}
+			return &DriverError{Code: refusal.GetCode(), Message: refusal.GetMessage()}
+		}
+		if page := response.GetPage(); page != nil && page.GetFinal() && len(page.GetRows()) == 0 {
+			return nil
+		}
+		return fmt.Errorf("geode: outstanding PULL returned data after the final result page")
+	}
+	return fmt.Errorf("geode: too many metadata frames before outstanding PULL completion")
 }
 
 // ColumnTypeDatabaseTypeName returns the database type name for a column.

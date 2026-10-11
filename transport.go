@@ -523,14 +523,15 @@ func (t *QUICTransport) IsClosed() bool {
 	return t.closed
 }
 
-// PagesArePushed reports false: the QUIC surface is PULL-driven.
+// PagesArePushed reports false: QUIC does not guarantee one paging mode for
+// every execution path.
 //
 // geode 0.8.15 answers EXECUTE over QUIC with a schema frame and the first
 // data page, and then waits. Every further page is fetched by a PullRequest
 // the driver sends (geode src/server/quic_connection_handler.zig:7726-7743).
-// The server does also push remaining pages inline on some paths and still
-// answers a PULL on top of them (see Rows.abortOnCancel), so the PULL-driven
-// reading below remains the correct and the only supported QUIC behaviour.
+// Some paths instead push the remaining Execute pages inline and still answer
+// a PULL. Rows detects that per result, stops sending further PULLs, and waits
+// for the already-issued request's response before reporting EOF (SONNY-1324).
 func (t *QUICTransport) PagesArePushed() bool { return false }
 
 // RemoteClosed reports whether the underlying QUIC connection can no longer
