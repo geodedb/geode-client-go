@@ -38,6 +38,12 @@ func openLoadDB(t *testing.T, maxOpen, maxIdle int) *sql.DB {
 	}
 	db, err := sql.Open("geode", sharedDSN)
 	require.NoError(t, err)
+	// Registered before fixture cleanup, so the pool closes after it (LIFO).
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close load-test pool: %v", err)
+		}
+	})
 	db.SetMaxOpenConns(maxOpen)
 	db.SetMaxIdleConns(maxIdle)
 	db.SetConnMaxLifetime(2 * time.Minute)
@@ -63,6 +69,12 @@ func openLoadDBWithPageSize(t *testing.T, maxOpen, maxIdle, pageSize int) *sql.D
 
 	db, err := sql.Open("geode", dsn)
 	require.NoError(t, err)
+	// Registered before fixture cleanup, so the pool closes after it (LIFO).
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close load-test pool: %v", err)
+		}
+	})
 	db.SetMaxOpenConns(maxOpen)
 	db.SetMaxIdleConns(maxIdle)
 	db.SetConnMaxLifetime(2 * time.Minute)
@@ -99,16 +111,14 @@ func warmPool(t *testing.T, db *sql.DB, maxOpen int) {
 // 30,000 nodes reported `context deadline exceeded` to the caller and left 0
 // nodes behind), and until it does, every later statement queues behind it.
 // A silent `_, _ =` here is what let one over-budget delete cascade through
-// forty later tests in pipeline 2855806396. Logging it names the test that
-// made the mess at the moment it made it.
+// forty later tests in pipeline 2855806396. Failing the test names the fixture that
+// could not be cleaned without claiming that a rejected request executed.
 func cleanupLabel(t *testing.T, db *sql.DB, label string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if _, err := db.ExecContext(ctx, fmt.Sprintf("MATCH (n:%s) DETACH DELETE n", label)); err != nil {
-		t.Logf("CLEANUP INCOMPLETE: MATCH (n:%s) DETACH DELETE n: %v — "+
-			"the engine is still executing it and the statements after this "+
-			"one queue behind it", label, err)
+		t.Errorf("cleanup label %q failed: %v", label, err)
 	}
 }
 
@@ -156,7 +166,6 @@ func TestLoad_HighParallelismReads(t *testing.T) {
 	)
 
 	db := openLoadDB(t, poolSize, poolSize/2)
-	defer db.Close()
 
 	warmPool(t, db, poolSize)
 
@@ -230,7 +239,6 @@ func TestLoad_BurstExceedsPoolSize_NoDeadlock(t *testing.T) {
 
 	// MaxOpenConns far above the default pool_size (16); MaxIdleConns=0.
 	db := openLoadDB(t, burst, 0)
-	defer db.Close()
 
 	var (
 		wg     sync.WaitGroup
@@ -293,7 +301,6 @@ func TestLoad_HighParallelismWrites(t *testing.T) {
 	)
 
 	db := openLoadDB(t, poolSize, poolSize/2)
-	defer db.Close()
 	t.Cleanup(func() { cleanupLabel(t, db, label) })
 	cleanupLabel(t, db, label)
 
@@ -358,7 +365,6 @@ func TestLoad_LargeDataset(t *testing.T) {
 	)
 
 	db := openLoadDB(t, poolSize, poolSize/2)
-	defer db.Close()
 	t.Cleanup(func() { cleanupLabel(t, db, label) })
 	cleanupLabel(t, db, label)
 
@@ -446,7 +452,6 @@ func TestLoad_ConnectionPoolContention(t *testing.T) {
 	)
 
 	db := openLoadDB(t, poolSize, poolSize)
-	defer db.Close()
 	db.SetConnMaxIdleTime(30 * time.Second)
 
 	warmPool(t, db, poolSize)
@@ -510,7 +515,6 @@ func TestLoad_SequentialQueryStreamSync(t *testing.T) {
 
 	// Single connection — all queries share one QUIC stream.
 	db := openLoadDB(t, 1, 1)
-	defer db.Close()
 	t.Cleanup(func() { cleanupLabel(t, db, label) })
 	cleanupLabel(t, db, label)
 
@@ -620,7 +624,6 @@ func TestLoad_MixedReadWrite(t *testing.T) {
 	)
 
 	db := openLoadDB(t, poolSize, poolSize/2)
-	defer db.Close()
 	t.Cleanup(func() { cleanupLabel(t, db, label) })
 	cleanupLabel(t, db, label)
 
@@ -714,7 +717,6 @@ func TestLoad_ConcurrentTransactions(t *testing.T) {
 	)
 
 	db := openLoadDB(t, poolSize, poolSize/2)
-	defer db.Close()
 	t.Cleanup(func() { cleanupLabel(t, db, label) })
 	cleanupLabel(t, db, label)
 
@@ -799,7 +801,6 @@ func TestLoad_PreparedStatementStorm(t *testing.T) {
 	)
 
 	db := openLoadDB(t, poolSize, poolSize/2)
-	defer db.Close()
 
 	warmPool(t, db, poolSize)
 
@@ -865,7 +866,6 @@ func TestLoad_MultiPageResults(t *testing.T) {
 	)
 
 	db := openLoadDBWithPageSize(t, poolSize, poolSize/2, pageSize)
-	defer db.Close()
 	t.Cleanup(func() { cleanupLabel(t, db, label) })
 	cleanupLabel(t, db, label)
 
@@ -913,7 +913,6 @@ func TestLoad_MultiPageResults(t *testing.T) {
 // sets without returning "58000: Internal Server Error".
 func TestLoad_GAP0257_OrderByLarge(t *testing.T) {
 	db := openTestDB(t)
-	defer db.Close()
 
 	const label = "GAP0257OrderBy"
 	const nodeCount = 1000
@@ -950,7 +949,6 @@ func TestLoad_GAP0257_OrderByLarge(t *testing.T) {
 // TestLoad_GAP0257_OrderByDesc verifies ORDER BY DESC on 1000 nodes.
 func TestLoad_GAP0257_OrderByDesc(t *testing.T) {
 	db := openTestDB(t)
-	defer db.Close()
 
 	const label = "GAP0257Desc"
 	const nodeCount = 1000
@@ -985,7 +983,6 @@ func TestLoad_GAP0257_OrderByDesc(t *testing.T) {
 // multiple pages (default page_size=1000, so 3 pages).
 func TestLoad_GAP0257_MultiPageOrderBy(t *testing.T) {
 	db := openTestDB(t)
-	defer db.Close()
 
 	const label = "GAP0257MultiPage"
 	const nodeCount = 2500
@@ -1022,7 +1019,6 @@ func TestLoad_GAP0257_MultiPageOrderBy(t *testing.T) {
 // TestLoad_GAP0257_OrderByMultiKey verifies multi-key ORDER BY on large data.
 func TestLoad_GAP0257_OrderByMultiKey(t *testing.T) {
 	db := openTestDB(t)
-	defer db.Close()
 
 	const label = "GAP0257MultiKey"
 	const nodeCount = 1000

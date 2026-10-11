@@ -35,9 +35,8 @@ import (
 //
 // This test writes 30,000 twenty-property nodes, and on the shared engine CI
 // runs (one `services:` container for the whole job, not a fresh container per
-// test) its data outlives it: cleanupLabel deletes them under a fixed 30s
-// budget and SWALLOWS the result, so on a runner where that delete does not fit
-// in 30s the nodes simply stay. Every later test that cleans the graph it runs
+// test) its data could outlive it: cleanupLabel previously logged failures
+// without failing the test. Every later test that cleans the graph it runs
 // in then inherits them — cleanupTestData's `MATCH (n) DETACH DELETE n`
 // (integration_test.go) is the one that pays, and it has the same fixed budget.
 // That is what turned pipeline 2855806396's QUIC lane red: TestDocker_CreateNode
@@ -85,7 +84,12 @@ func TestConn_SustainedSingleConnIngest_NoWedge(t *testing.T) {
 
 	db, err := sql.Open("geode", nomuxWedgeDSN())
 	require.NoError(t, err, "open db")
-	defer db.Close()
+	// Register pool closure first: fixture cleanup below must finish before it.
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close sustained-ingest pool: %v", err)
+		}
+	})
 
 	// Single connection: force every op onto one QUIC stream (workers=1).
 	db.SetMaxOpenConns(1)
