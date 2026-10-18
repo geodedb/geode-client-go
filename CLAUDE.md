@@ -245,8 +245,8 @@ The gRPC parity lane lives in `integration_grpc_test.go`
 property asserted again on the gRPC wire, with a `GRPC` infix so the pairing is
 greppable.
 
-Engine pin: the lane runs `geodedb/geode:0.8.18` (manifest-list digest
-`sha256:5ebbc7c5b8d13375749e7c1df8a77e54935bc609321cd4d8107d8e26f370c6f1`;
+Engine pin: the lane runs `geodedb/geode:0.8.22` (manifest-list digest
+`sha256:867d93375470fd18c60336036196a9ef9715a1922e063e8787dc05d8e798ddce`;
 `v0.8.16`/`v0.8.17` are tags with no published image and are NOT pinnable), and
 `engine_pin_test.go` asserts the running server reports it. One integration
 test is known-RED and is NOT a regression:

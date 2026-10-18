@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Engine pin moved to **geode 0.8.22** (`geodedb/geode:0.8.22`, manifest-list
+  digest `sha256:867d93375470fd18c60336036196a9ef9715a1922e063e8787dc05d8e798ddce`).
+  Renovate moved the `.gitlab-ci.yml` service on 2026-10-12 but not the other
+  pin sites, so `TestIntegration_PinnedEngineVersion`, `ServerInfo*` and
+  `GRPCServerInfo` failed on main. The Makefile default, `defaultGeodeImage` and
+  `pinnedEngineVersion` now match it. The capability golden passed unchanged
+  against 0.8.22.
+
 ## [v0.2.0] - 2026-09-16
 
 The GraphRAG driver surface (SONNY-806 / GEO-GO-UP-001).

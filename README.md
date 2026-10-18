@@ -492,9 +492,9 @@ rollback_to, backup, restore, upload_backup — and are refused with the typed
 
 ## Engine support
 
-This driver is developed and tested against **geode 0.8.18**
-(`geodedb/geode:0.8.18`, manifest-list digest
-`sha256:5ebbc7c5b8d13375749e7c1df8a77e54935bc609321cd4d8107d8e26f370c6f1`). The
+This driver is developed and tested against **geode 0.8.22**
+(`geodedb/geode:0.8.22`, manifest-list digest
+`sha256:867d93375470fd18c60336036196a9ef9715a1922e063e8787dc05d8e798ddce`). The
 integration lane pins that image, and `engine_pin_test.go` asserts the running
 server reports it.
 
