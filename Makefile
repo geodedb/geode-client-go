@@ -11,12 +11,12 @@ GOLANGCI_LINT ?= python3 scripts/golangci-lint.py
 DOCKER ?= docker
 # SECURITY: Pin to a specific version to prevent supply chain attacks via
 # mutable tags. The digest is the multi-arch index digest of
-# docker.io/geodedb/geode:0.8.18 and makes the pin immutable even if the tag
+# docker.io/geodedb/geode:0.8.22 and makes the pin immutable even if the tag
 # is republished. This MUST match `pinnedEngineVersion` in
 # engine_pin_test.go, the integration:geode service in
 # .gitlab-ci.yml, and the .version field of ../geode/build.zig.zon.
 # Update all of them together.
-GEODE_IMAGE ?= geodedb/geode:0.8.18@sha256:5ebbc7c5b8d13375749e7c1df8a77e54935bc609321cd4d8107d8e26f370c6f1
+GEODE_IMAGE ?= geodedb/geode:0.8.22@sha256:867d93375470fd18c60336036196a9ef9715a1922e063e8787dc05d8e798ddce
 GEODE_CONTAINER ?= geode-go-test
 # Dev-only HMAC key for the local container. Never used outside `make
 # docker-start`; the CI job and the testcontainers harness set their own.
@@ -157,7 +157,7 @@ help:
 	@echo "  GOFLAGS             - Additional flags for go commands"
 	@echo "  GEODE_HOST          - Geode server host (default: 127.0.0.1)"
 	@echo "  GEODE_PORT          - Geode server port (default: 3141)"
-	@echo "  GEODE_IMAGE         - Docker image (default: pinned geodedb/geode:0.8.18 by digest)"
+	@echo "  GEODE_IMAGE         - Docker image (default: pinned geodedb/geode:0.8.22 by digest)"
 	@echo "  GEODE_GRPC_PORT     - Geode gRPC port (default: 50051)"
 	@echo "  GEODE_TEST_DSN      - DSN for manual server tests"
 	@echo "  GEODE_TEST_GRPC_DSN - gRPC DSN for manual server tests (gRPC parity lane)"
