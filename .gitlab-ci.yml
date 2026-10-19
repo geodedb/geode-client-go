@@ -45,6 +45,29 @@ include:
       # require a running Geode server are skipped with -short.
       allow_failure: false
 
+  # Native Go fuzzing with an explicit cadence (SRE-178). go-fuzz first
+  # ships in v1.57.0, so it is pinned there while the rest stay on v1.56.1.
+  #   MR that touches Go, fuzz corpora, go.mod/go.sum or this file:
+  #     short mode, every target for 200 iterations (blocking).
+  #   schedule / web / GO_FUZZ_MODE=extended: extended mode, every target
+  #     (16 today) for extended_fuzztime. The weekly schedule lives in
+  #     infra/org devnw-governance (gitlab_go_extended_fuzz.tf).
+  #   tag, branch push: never.
+  # Each target's result is in the job log; crashers are uploaded as
+  # artifacts (testdata/fuzz) so they can be committed as seeds.
+  - component: gitlab.com/devnw/ci-catalog/go-fuzz@v1.57.0
+    inputs:
+      tags: [company, linux, x86]
+      go_version: "1.27.2"
+      stage: test
+      extended_fuzztime: '5m'
+      changes:
+        - '**/*.go'
+        - '**/testdata/fuzz/**/*'
+        - 'go.mod'
+        - 'go.sum'
+        - '.gitlab-ci.yml'
+
   # Security scanning - pinned to v1.11.0
   - component: gitlab.com/devnw/ci-catalog/security-sast@v1.56.1
     inputs:
@@ -86,6 +109,11 @@ sbom-generate:
 
 sbom-scan:
   allow_failure: true
+
+# Extended mode: 16 targets x 5m = 80m of fuzzing plus compile time, above
+# the 1h project default.
+go-fuzz:
+  timeout: 2h 30m
 
 default:
   interruptible: true
