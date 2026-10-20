@@ -1,219 +1,49 @@
-# Pre-commit configuration for Geode Go Client
-# https://pre-commit.com/
-#
-# Install: pip install pre-commit && pre-commit install
-# Run manually: pre-commit run --all-files
-# Update hooks: pre-commit autoupdate
-
+minimum_pre_commit_version: '4.6.0'
+default_install_hook_types: [pre-commit, commit-msg, pre-push]
 default_stages: [pre-commit]
 fail_fast: false
+exclude: |
+  (?x)^(
+    vendor/|
+    legacy/|
+    dist/|
+    build/|
+    node_modules/|
+    .*/.terraform/|
+    .*/zig-cache/|
+    .*/zig-out/
+  )
 
 repos:
-  # =============================================================================
-  # Standard pre-commit hooks (best practices)
-  # =============================================================================
-- repo: https://github.com/pre-commit/pre-commit-hooks
-  rev: v6.0.0
-  hooks:
-      # Formatting
-  - id: trailing-whitespace
-    args: [--markdown-linebreak-ext=md]
-    exclude: ^(vendor/|dist/)
-  - id: end-of-file-fixer
-    exclude: ^(vendor/|dist/|.*\.bin$|.*\.der$|.*\.pem$)
-  - id: mixed-line-ending
-    args: [--fix=lf]
-    exclude: ^(vendor/|dist/)
-
-      # Syntax validation
-      # --unsafe flag rationale: Required for GitLab CI files which use custom
-      # YAML tags like !reference. Without --unsafe, the YAML parser rejects
-      # these tags as potential code execution vectors. This is safe because:
-      # 1. We only validate YAML syntax, not execute it
-      # 2. GitLab CI files require these tags for template inheritance
-      # 3. The check runs locally, not on untrusted input
-  - id: check-yaml
-    args: [--unsafe]
-    exclude: ^(vendor/|dist/)
-  - id: check-json
-    exclude: ^(vendor/|dist/)
-  - id: check-toml
-
-      # Security
-  - id: detect-private-key
-    exclude: ^(certs/|test.*certs/|.*test.*\.pem$)
-  - id: check-added-large-files
-    args: [--maxkb=1024]
-    exclude: ^(vendor/|dist/)
-
-      # Git hygiene
-  - id: check-merge-conflict
-  - id: check-case-conflict
-  - id: check-symlinks
-  - id: destroyed-symlinks
-
-      # Code quality
-  - id: check-executables-have-shebangs
-    exclude: ^(vendor/|dist/)
-  - id: check-shebang-scripts-are-executable
-    exclude: ^(vendor/|dist/)
-
-  # =============================================================================
-  # Shell script linting
-  # =============================================================================
-- repo: https://github.com/shellcheck-py/shellcheck-py
-  rev: v0.11.0.1
-  hooks:
-  - id: shellcheck
-    args: [--severity=warning]
-    exclude: ^(vendor/|dist/)
-
-  # =============================================================================
-  # Markdown linting
-  # =============================================================================
-- repo: https://github.com/igorshubovych/markdownlint-cli
-  rev: v0.44.0
-  hooks:
-  - id: markdownlint
-    args: [--fix, --disable, MD013, MD033, MD041, MD024, --]
-    exclude: ^(vendor/|dist/|CHANGELOG\.md)
-
-  # =============================================================================
-  # YAML formatting
-  # =============================================================================
-- repo: https://github.com/macisamuele/language-formatters-pre-commit-hooks
-  rev: v2.16.0
-  hooks:
-  - id: pretty-format-yaml
-    args: [--autofix, --indent, '2']
-    exclude: ^(vendor/|dist/|\.gitlab-ci\.yml)
-
-  # =============================================================================
-  # Go linting and formatting
-  # =============================================================================
-- repo: https://github.com/golangci/golangci-lint
-  rev: v2.11.4
-  hooks:
-  - id: golangci-lint
-    args: [--fix]
-
-  # =============================================================================
-  # Commit message validation (Conventional Commits)
-  # =============================================================================
-- repo: https://github.com/commitizen-tools/commitizen
-  rev: v4.12.1
-  hooks:
-  - id: commitizen
-    stages: [commit-msg]
-
-  # =============================================================================
-  # Local/Custom hooks for Go
-  # =============================================================================
-- repo: local
-  hooks:
-      # Go formatting check
-  - id: go-fmt
-    name: go fmt (check)
-    entry: bash
-    args:
-    - -c
-    - |
-      unformatted=$(gofmt -l .)
-      if [ -n "$unformatted" ]; then
-        echo "Files not formatted:"
-        echo "$unformatted"
-        echo ""
-        echo "Run 'gofmt -w .' or 'make fmt' to fix"
-        exit 1
-      fi
-    language: system
-    files: \.go$
-    exclude: ^(vendor/|dist/)
-    pass_filenames: false
-
-      # Go vet
-  - id: go-vet
-    name: go vet
-    entry: go vet ./...
-    language: system
-    files: \.go$
-    exclude: ^(vendor/|dist/)
-    pass_filenames: false
-
-      # Go mod tidy check
-  - id: go-mod-tidy
-    name: go mod tidy (check)
-    entry: bash
-    args:
-    - -c
-    - |
-      cp go.mod go.mod.bak
-      cp go.sum go.sum.bak
-      go mod tidy
-      if ! diff -q go.mod go.mod.bak > /dev/null 2>&1 || ! diff -q go.sum go.sum.bak > /dev/null 2>&1; then
-        mv go.mod.bak go.mod
-        mv go.sum.bak go.sum
-        echo "go.mod or go.sum is not tidy"
-        echo "Run 'go mod tidy' to fix"
-        exit 1
-      fi
-      rm -f go.mod.bak go.sum.bak
-    language: system
-    files: (\.go$|go\.mod$|go\.sum$)
-    exclude: ^(vendor/|dist/)
-    pass_filenames: false
-
-      # Go build check
-  - id: go-build
-    name: go build (compilation check)
-    entry: go build ./...
-    language: system
-    files: \.go$
-    exclude: ^(vendor/|dist/)
-    pass_filenames: false
-
-      # Go unit tests (pre-push only, may be slow)
-  - id: go-test
-    name: go test (unit tests)
-    entry: go test -short ./...
-    language: system
-    files: \.go$
-    exclude: ^(vendor/|dist/)
-    pass_filenames: false
-    stages: [pre-push]
-
-      # Check for TODO/FIXME in committed code (warning only)
-  - id: check-todos
-    name: check for TODOs/FIXMEs
-    entry: bash
-    args:
-    - -c
-    - |
-      git diff --cached --name-only | xargs grep -l -E "(TODO|FIXME|XXX|HACK)" 2>/dev/null && echo "Warning: Found TODO/FIXME markers in staged files" && exit 0 || exit 0
-    language: system
-    pass_filenames: false
-    verbose: true
-
-# =============================================================================
-# CI configuration for pre-commit.ci service
-# =============================================================================
-# Note: Go-specific hooks are skipped in pre-commit.ci because it doesn't have
-# the Go toolchain installed. These checks are instead run by GitLab CI which:
-# - Runs golangci-lint (includes gosec security linter) with allow_failure: false
-# - Runs go-test with -short flag for unit tests
-# - Runs security-sast and security-dependency-scanning stages
-#
-# IMPORTANT: Developers MUST run `pre-commit run --all-files` locally before
-# pushing to ensure all Go checks pass, especially golangci-lint for security.
-ci:
-  autofix_prs: true
-  autofix_commit_msg: |
-    [pre-commit.ci] auto fixes from pre-commit hooks
-
-    For more info see https://pre-commit.ci
-  autoupdate_branch: ''
-  autoupdate_commit_msg: '[pre-commit.ci] pre-commit autoupdate'
-  autoupdate_schedule: weekly
-  # Go hooks skipped in pre-commit.ci (no Go toolchain) - handled by GitLab CI
-  skip: [go-fmt, go-vet, go-mod-tidy, go-build, go-test, golangci-lint]
-  submodules: false
+  - repo: git@gitlab.com:devnw/utility-projects/org-pre-commit-hooks
+    rev: v0.1.5
+    hooks:
+      - id: org-trailing-whitespace
+      - id: org-end-of-file-fixer
+      - id: org-mixed-line-ending
+        args: ["--fix=lf"]
+      - id: org-check-yaml
+      - id: org-check-json
+      - id: org-check-toml
+      - id: org-check-xml
+      - id: org-check-merge-conflict
+      - id: org-check-case-conflict
+      - id: org-check-symlinks
+      - id: org-check-shebang-scripts-are-executable
+      - id: org-check-executables-have-shebangs
+      - id: org-check-added-large-files
+        args: ["--maxkb=1024"]
+      - id: org-detect-private-key
+      - id: org-check-todos
+      - id: org-conventional-commit
+      - id: org-conventional-branch
+      - id: org-shellcheck
+      - id: org-shfmt
+      - id: org-markdownlint-cli2
+      - id: org-make-pre-commit
+      - id: org-go-fmt
+      - id: org-go-mod-tidy-check
+      - id: org-go-vet
+      - id: org-go-test
+      - id: org-golangci-lint
+      - id: org-gitlab-ci-lint
