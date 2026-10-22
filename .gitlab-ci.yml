@@ -21,9 +21,9 @@ workflow:
 
 include:
   # Pinned to v1.11.0 for supply chain security
-  - component: gitlab.com/devnw/ci-catalog/go-lint@v1.56.1
+  - component: gitlab.com/devnw/ci-catalog/go-lint@aad997d40e358eeef7ec943f761498341c37c724
     inputs:
-      go_version: "1.27.2"
+      go_version: "1.27.3"
       stage: lint
       # Lint includes gosec security checks - must not allow failure
       allow_failure: false
@@ -31,15 +31,15 @@ include:
       # with go 1.26 and refuses to load the config.
       golangci_version: 'v2.14.0'
 
-  - component: gitlab.com/devnw/ci-catalog/go-build@v1.56.1
+  - component: gitlab.com/devnw/ci-catalog/go-build@aad997d40e358eeef7ec943f761498341c37c724
     inputs:
-      go_version: "1.27.2"
+      go_version: "1.27.3"
       stage: build
 
-  - component: gitlab.com/devnw/ci-catalog/go-test@v1.56.1
+  - component: gitlab.com/devnw/ci-catalog/go-test@aad997d40e358eeef7ec943f761498341c37c724
     inputs:
       tags: [company, linux, x86]
-      go_version: "1.27.2"
+      go_version: "1.27.3"
       stage: test
       # Unit tests (with -short flag) must pass. Integration tests that
       # require a running Geode server are skipped with -short.
@@ -55,10 +55,10 @@ include:
   #   tag, branch push: never.
   # Each target's result is in the job log; crashers are uploaded as
   # artifacts (testdata/fuzz) so they can be committed as seeds.
-  - component: gitlab.com/devnw/ci-catalog/go-fuzz@v1.57.0
+  - component: gitlab.com/devnw/ci-catalog/go-fuzz@aad997d40e358eeef7ec943f761498341c37c724
     inputs:
       tags: [company, linux, x86]
-      go_version: "1.27.2"
+      go_version: "1.27.3"
       stage: test
       extended_fuzztime: '5m'
       changes:
@@ -69,41 +69,22 @@ include:
         - '.gitlab-ci.yml'
 
   # Security scanning - pinned to v1.11.0
-  - component: gitlab.com/devnw/ci-catalog/security-sast@v1.56.1
-    inputs:
-      tags: [company, linux, x86]
-      stage: security
-
-  - component: gitlab.com/devnw/ci-catalog/security-dependency-scanning@v1.56.1
-    inputs:
-      tags: [company, linux, x86]
-      stage: security
-
-  - component: gitlab.com/devnw/ci-catalog/security-secrets@v1.56.1
-    inputs:
-      stage: security
-
-  - component: gitlab.com/devnw/ci-catalog/security-gitleaks@v1.56.1
+  - component: gitlab.com/devnw/ci-catalog/security-gitleaks@aad997d40e358eeef7ec943f761498341c37c724
 
   # SBOM generation and scanning - pinned to v1.11.0
   # allow_failure: external syft download may fail due to DNS/network issues
-  - component: gitlab.com/devnw/ci-catalog/sbom-generate@v1.56.1
+  - component: gitlab.com/devnw/ci-catalog/sbom-generate@aad997d40e358eeef7ec943f761498341c37c724
 
-  - component: gitlab.com/devnw/ci-catalog/sbom-scan@v1.56.1
+  - component: gitlab.com/devnw/ci-catalog/sbom-scan@aad997d40e358eeef7ec943f761498341c37c724
 
   # Release creation - pinned to v1.11.0
-  - component: gitlab.com/devnw/ci-catalog/release-semantic@v1.56.1
+  - component: gitlab.com/devnw/ci-catalog/release-semantic@aad997d40e358eeef7ec943f761498341c37c724
     inputs:
       stage: release
 
 # SBOM jobs may fail due to DNS/network issues downloading syft
   # Security findings -> auto-triaged Jira SEC issues (.post; reads gl-*-report
   # artifacts). component_id 12496 = SEC > Vuln Mgmt.
-  - component: gitlab.com/devnw/ci-catalog/jira-event-intake@v1.56.1
-    inputs:
-      project_key: SEC
-      component_id: "12496"
-
 sbom-generate:
   allow_failure: true
 
@@ -117,8 +98,7 @@ go-fuzz:
 
 default:
   interruptible: true
-  tags:
-    [company, linux, x86]
+  tags: [company, linux, x86]
 stages:
   - lint
   - build
