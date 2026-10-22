@@ -386,17 +386,17 @@ lint:
 
 fmt:
 	@echo "Formatting code..."
-	$(GO) fmt ./...
+	python3 scripts/golangci-lint.py fmt
 	@echo "✓ Format complete"
 
 fmt-check:
 	@echo "Checking code format..."
-	@test -z "$$(gofmt -l .)" || (echo "Code not formatted. Run 'make fmt'" && gofmt -l . && exit 1)
+	python3 scripts/golangci-lint.py fmt --diff
 	@echo "✓ Format check complete"
 
 vet:
 	@echo "Running go vet..."
-	$(GO) vet $(GOFLAGS) ./...
+	python3 scripts/golangci-lint.py run ./...
 	@echo "✓ Vet complete"
 
 # =============================================================================
