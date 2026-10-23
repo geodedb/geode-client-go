@@ -39,7 +39,7 @@ include:
       go_version: "1.27.3"
       stage: build
 
-  - component: gitlab.com/devnw/ci-catalog/go-test@aad997d40e358eeef7ec943f761498341c37c724
+  - component: gitlab.com/devnw/ci-catalog/go-test@402e8986ef2d220db1c2591a461ba60850c59e5b
     inputs:
       tags: [company, linux, x86]
       go_version: "1.27.3"
