@@ -5,6 +5,8 @@ workflow:
     - if: $CI_COMMIT_TAG
       auto_cancel:
         on_new_commit: none
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
     - when: always
 
 # =============================================================================
@@ -55,7 +57,7 @@ include:
   #   tag, branch push: never.
   # Each target's result is in the job log; crashers are uploaded as
   # artifacts (testdata/fuzz) so they can be committed as seeds.
-  - component: gitlab.com/devnw/ci-catalog/go-fuzz@aad997d40e358eeef7ec943f761498341c37c724
+  - component: gitlab.com/devnw/ci-catalog/go-fuzz@2620a60038c32a3745b5d09606c32a2a4943fc90
     inputs:
       tags: [company, linux, x86]
       go_version: "1.27.3"
@@ -96,6 +98,21 @@ sbom-scan:
 go-fuzz:
   timeout: 2h 30m
 
+# Custom Go jobs read the same module and race-build cache that go-test
+# publishes. Keeping only cache paths without these variables caches nothing.
+.go-validation-cache:
+  variables:
+    GOMODCACHE: "$CI_PROJECT_DIR/.go/pkg/mod"
+    GOCACHE: "$CI_PROJECT_DIR/.go/build"
+  cache:
+    key:
+      prefix: go-mod
+      files: [go.sum]
+    paths:
+      - .go/pkg/mod/
+      - .go/build/
+    policy: pull
+
 default:
   interruptible: true
   tags: [company, linux, x86]
@@ -120,8 +137,9 @@ stages:
 # pinned in the Makefile (PROTOC_GEN_GO_VERSION / PROTOC_GEN_GO_GRPC_VERSION).
 # =============================================================================
 proto-check:
+  extends: .go-validation-cache
   stage: lint
-  image: golang:1.27.2
+  image: golang:1.27.3
   script:
     - make proto-check
   allow_failure: false
@@ -138,9 +156,10 @@ proto-check:
 # the Makefile and pinnedEngineVersion in integration_version_test.go;
 # TestIntegration_PinnedEngineVersion fails the lane if they drift apart.
 # =============================================================================
-integration:geode:
+.integration-geode-base:
+  extends: .go-validation-cache
   stage: integration
-  image: golang:1.27.2
+  image: golang:1.27.3
   services:
     - name: geodedb/geode:0.8.22@sha256:867d93375470fd18c60336036196a9ef9715a1922e063e8787dc05d8e798ddce
       alias: geode
@@ -184,10 +203,11 @@ integration:geode:
     # Keep the tenant id in sync with harnessTenant (integration_main_test.go)
     # and GEODE_TEST_TENANT (Makefile).
     GEODE_TEST_DSN: "geode:3141?insecure=true&user=geode&pass=Correct%20horse%20battery%20staple&tenant=it-harness"
-  script:
-    - go test -race -v -tags=integration -timeout=20m ./...
   allow_failure: false
-  # Pin to the OVH Dedicated Runners, not the shared Company Cluster Runner.
+  # Use the dedicated Linux AMD64 fleets, including AWS Spot overflow.
+  # The Spot runner uses Docker services (also validated by the other Geode
+  # clients) but advertises amd64 instead of docker. Requiring docker here
+  # stranded both integration jobs behind the always-warm Sonny queue.
   # Task 16g triage: the QUIC lane's TestLoad_BurstExceedsPoolSize_NoDeadlock
   # is CI-contention-only -- it passes 64/64 on a dedicated engine and the
   # whole lane passes in CI order there, but on the shared cluster runner a
@@ -198,9 +218,31 @@ integration:geode:
   tags:
     - company
     - dedicated
-    - docker
+    - amd64
     - linux
     - x86
+
+# Keep each suite below the existing 20-minute test timeout, with a fresh
+# service for each job. The 30,000-operation regression remains unchanged;
+# the other two selections are disjoint and together cover every other test,
+# example and fuzz seed, including tests added in the future.
+integration:geode:
+  extends: .integration-geode-base
+  parallel:
+    matrix:
+      - GEODE_INTEGRATION_SUITE: [sustained-ingest, load, other]
+  script:
+    - |
+      case "$GEODE_INTEGRATION_SUITE" in
+        sustained-ingest)
+          run='^TestConn_SustainedSingleConnIngest_NoWedge$'; skip='^$' ;;
+        load)
+          run='^TestLoad_'; skip='^$' ;;
+        other)
+          run='.'; skip='^(TestConn_SustainedSingleConnIngest_NoWedge$|TestLoad_)' ;;
+        *) echo "Unknown integration suite: $GEODE_INTEGRATION_SUITE" >&2; exit 2 ;;
+      esac
+      go test -vet=off -race -v -tags=integration -timeout=20m -run "$run" -skip "$skip" ./...
 
 # =============================================================================
 # gRPC parity lane (SONNY-806 / GEO-GO-UP-001, Lane D Task 14).
@@ -222,8 +264,8 @@ integration:geode:
 # these do), so -run '^TestIntegration_GRPC' executes them one at a time.
 # =============================================================================
 integration:geode:grpc:
-  extends: integration:geode
+  extends: .integration-geode-base
   variables:
     GEODE_TEST_GRPC_DSN: "grpc://geode:50051?insecure_tls_skip_verify=true&user=geode&pass=Correct%20horse%20battery%20staple&tenant=it-harness"
   script:
-    - go test -race -v -tags=integration -timeout=20m -run '^TestIntegration_GRPC' ./...
+    - go test -vet=off -race -v -tags=integration -timeout=20m -run '^TestIntegration_GRPC' ./...

@@ -17,6 +17,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"fmt"
 	"net/url"
 	"runtime"
 	"sync"
@@ -83,7 +84,10 @@ func ensureCancelTenant(ctx context.Context, t *testing.T) {
 // cancelSeedOnce keeps the seed to one pass per test binary. The rows live in
 // the shared engine's canceltest graph, so every test in this file sees them;
 // re-MERGEing 2500 nodes per test would cost seconds for nothing.
-var cancelSeedOnce sync.Once
+var (
+	cancelSeedOnce sync.Once
+	errCancelSeed  error
+)
 
 // seedCancelRowsTimeout bounds the one-time cancel-probe seed. It is
 // deliberately its own timeout rather than a parameter drawn from whichever
@@ -96,22 +100,28 @@ const seedCancelRowsTimeout = 60 * time.Second
 
 func seedCancelRows(t *testing.T, db *sql.DB, n int) {
 	t.Helper()
-	var seedErr error
 	cancelSeedOnce.Do(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), seedCancelRowsTimeout)
 		defer cancel()
-		stmts := make([]Statement, 0, n)
-		for i := 0; i < n; i++ {
-			stmts = append(stmts, Statement{
-				Query: "MERGE (n:CancelProbe {i: ?})",
-				Args:  []any{int64(i)},
-			})
+		// Seed in one request instead of 2500 sequential network round trips.
+		// range's upper bound is exclusive on the pinned engine. MERGE keeps
+		// repeated manual-server runs idempotent without reducing the dataset.
+		_, errCancelSeed = db.ExecContext(ctx,
+			"FOR i IN range(0, ?) MERGE (n:CancelProbe {i: i})", int64(n))
+		if errCancelSeed != nil {
+			return
 		}
-		p := &Pool{db: db}
-		seedErr = p.BatchExec(ctx, stmts)
+		var count int64
+		errCancelSeed = db.QueryRowContext(ctx,
+			"MATCH (n:CancelProbe) RETURN count(n)").Scan(&count)
+		if errCancelSeed == nil && count != int64(n) {
+			errCancelSeed = fmt.Errorf("seeded %d CancelProbe rows, want %d", count, n)
+		}
 	})
-	if seedErr != nil {
-		t.Fatalf("seed: %v", seedErr)
+	// Once remembers completion even after failure. Preserve its error too,
+	// so later tests cannot mistake a partial fixture for a successful seed.
+	if errCancelSeed != nil {
+		t.Fatalf("seed: %v", errCancelSeed)
 	}
 }
 

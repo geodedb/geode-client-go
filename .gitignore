@@ -40,3 +40,6 @@ example/example
 
 # Protoc toolchain
 .tools/
+
+# Shared CI module and build cache
+/.go/
