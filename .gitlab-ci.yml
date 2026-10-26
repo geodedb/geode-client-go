@@ -23,7 +23,7 @@ workflow:
 
 include:
   # Pinned to v1.11.0 for supply chain security
-  - component: gitlab.com/devnw/ci-catalog/go-lint@2e152f9e89aa7c3f6516f7ae32a97b79be5815b3
+  - component: gitlab.com/devnw/ci-catalog/go-lint@d70a313e1c1a3d3a4383d1ee65a2482571426ec0
     inputs:
       git_depth: "1"
       go_version: "1.27.3"
@@ -34,12 +34,12 @@ include:
       # with go 1.26 and refuses to load the config.
       golangci_version: 'v2.14.0'
 
-  - component: gitlab.com/devnw/ci-catalog/go-build@aad997d40e358eeef7ec943f761498341c37c724
+  - component: gitlab.com/devnw/ci-catalog/go-build@d70a313e1c1a3d3a4383d1ee65a2482571426ec0
     inputs:
       go_version: "1.27.3"
       stage: build
 
-  - component: gitlab.com/devnw/ci-catalog/go-test@402e8986ef2d220db1c2591a461ba60850c59e5b
+  - component: gitlab.com/devnw/ci-catalog/go-test@d70a313e1c1a3d3a4383d1ee65a2482571426ec0
     inputs:
       tags: [company, linux, x86]
       go_version: "1.27.3"
@@ -58,7 +58,7 @@ include:
   #   tag, branch push: never.
   # Each target's result is in the job log; crashers are uploaded as
   # artifacts (testdata/fuzz) so they can be committed as seeds.
-  - component: gitlab.com/devnw/ci-catalog/go-fuzz@54402280a3ae3c5343f85e477be4c14d58971f06
+  - component: gitlab.com/devnw/ci-catalog/go-fuzz@d70a313e1c1a3d3a4383d1ee65a2482571426ec0
     inputs:
       tags: [company, linux, x86]
       go_version: "1.27.3"
