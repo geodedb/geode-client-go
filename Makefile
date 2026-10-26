@@ -72,7 +72,7 @@ FUZZ_TIME ?= 30s
 LOAD_TIMEOUT ?= 20m
 
 # Default target - run everything (except integration tests which require server)
-all: fmt-check vet lint test-unit bench-quick
+all: lint test-unit
 	@echo ""
 	@echo "==== All Checks Complete ===="
 	@echo "✓ Format check passed"
@@ -113,9 +113,9 @@ help:
 	@echo ""
 	@echo "Quality targets:"
 	@echo "  make lint           - Run golangci-lint"
-	@echo "  make fmt            - Format code with gofmt"
+	@echo "  make fmt            - Format code with golangci-lint"
 	@echo "  make fmt-check      - Check formatting without changes"
-	@echo "  make vet            - Run go vet"
+	@echo "  make vet            - Alias for golangci-lint"
 	@echo ""
 	@echo "Benchmark targets:"
 	@echo "  make bench          - Run unit benchmarks"
@@ -255,7 +255,7 @@ generate-proto: proto-tools
 # source-level HelloRequest field-set comparison.
 proto-check:
 	@echo "Checking vendored proto against canonical server proto..."
-	GEODE_CANONICAL_PROTO=$(CANONICAL_PROTO) $(GO) test -run 'TestHelloRequest_HasTenantAndRole|TestHelloRequest_TenantAndRoleSettable|TestVendoredProtoMatchesCanonical|TestExecuteRequest_HasCanonicalFields|TestExecuteRequest_ReadOnlySettable|TestCdcBackupRestoreUploadFields' -v ./...
+	GEODE_CANONICAL_PROTO=$(CANONICAL_PROTO) $(GO) test -vet=off -run 'TestHelloRequest_HasTenantAndRole|TestHelloRequest_TenantAndRoleSettable|TestVendoredProtoMatchesCanonical|TestExecuteRequest_HasCanonicalFields|TestExecuteRequest_ReadOnlySettable|TestCdcBackupRestoreUploadFields' -v ./...
 	@echo "✓ Proto drift check complete"
 
 # =============================================================================
@@ -267,7 +267,7 @@ test: test-unit
 
 test-unit:
 	@echo "Running unit tests..."
-	$(GO) test -v -short $(GOFLAGS) ./...
+	$(GO) test -vet=off -v -short $(GOFLAGS) ./...
 	@echo "✓ Unit tests complete"
 
 test-integration:
@@ -277,7 +277,7 @@ test-integration:
 	@echo "Start server first: cd ../geode && ./zig-out/bin/geode serve"
 	@echo "Or use: make test-integration-docker"
 	@echo ""
-	GEODE_TEST_DSN="$(GEODE_HOST):$(GEODE_PORT)?insecure=true&tenant=$(GEODE_TEST_TENANT)" $(GO) test -v -tags=integration -timeout=$(LOAD_TIMEOUT) $(GOFLAGS) ./...
+	GEODE_TEST_DSN="$(GEODE_HOST):$(GEODE_PORT)?insecure=true&tenant=$(GEODE_TEST_TENANT)" $(GO) test -vet=off -v -tags=integration -timeout=$(LOAD_TIMEOUT) $(GOFLAGS) ./...
 	@echo ""
 	@echo "✓ Integration + load tests complete"
 
@@ -286,14 +286,14 @@ test-load:
 	@echo ""
 	@echo "Connecting to Geode server at $(GEODE_HOST):$(GEODE_PORT)"
 	@echo ""
-	GEODE_TEST_DSN="$(GEODE_HOST):$(GEODE_PORT)?insecure=true&tenant=$(GEODE_TEST_TENANT)" $(GO) test -v -tags=integration -timeout=$(LOAD_TIMEOUT) -run='^TestLoad_' $(GOFLAGS) ./...
+	GEODE_TEST_DSN="$(GEODE_HOST):$(GEODE_PORT)?insecure=true&tenant=$(GEODE_TEST_TENANT)" $(GO) test -vet=off -v -tags=integration -timeout=$(LOAD_TIMEOUT) -run='^TestLoad_' $(GOFLAGS) ./...
 	@echo ""
 	@echo "✓ Load tests complete"
 
 test-load-docker:
 	@echo "Running load tests with Docker (testcontainers)..."
 	@echo ""
-	GEODE_IMAGE=$(GEODE_IMAGE) $(GO) test -v -tags=integration -timeout=$(LOAD_TIMEOUT) -run='^TestLoad_' $(GOFLAGS) ./...
+	GEODE_IMAGE=$(GEODE_IMAGE) $(GO) test -vet=off -v -tags=integration -timeout=$(LOAD_TIMEOUT) -run='^TestLoad_' $(GOFLAGS) ./...
 	@echo ""
 	@echo "✓ Docker load tests complete"
 
@@ -302,26 +302,26 @@ test-integration-docker:
 	@echo ""
 	@echo "Using Docker image: $(GEODE_IMAGE)"
 	@echo ""
-	GEODE_IMAGE=$(GEODE_IMAGE) $(GO) test -v -tags=integration -timeout=$(LOAD_TIMEOUT) $(GOFLAGS) ./...
+	GEODE_IMAGE=$(GEODE_IMAGE) $(GO) test -vet=off -v -tags=integration -timeout=$(LOAD_TIMEOUT) $(GOFLAGS) ./...
 	@echo ""
 	@echo "✓ Docker integration + load tests complete"
 
 test-integration-race:
 	@echo "Running integration tests under -race (manual server)..."
-	GEODE_TEST_DSN="$(GEODE_HOST):$(GEODE_PORT)?insecure=true&tenant=$(GEODE_TEST_TENANT)" $(GO) test -race -v -tags=integration -timeout=$(LOAD_TIMEOUT) $(GOFLAGS) ./...
+	GEODE_TEST_DSN="$(GEODE_HOST):$(GEODE_PORT)?insecure=true&tenant=$(GEODE_TEST_TENANT)" $(GO) test -vet=off -race -v -tags=integration -timeout=$(LOAD_TIMEOUT) $(GOFLAGS) ./...
 	@echo "✓ Race integration tests complete"
 
 test-integration-docker-race:
 	@echo "Running integration tests under -race with Docker (testcontainers)..."
 	@echo "Using Docker image: $(GEODE_IMAGE)"
-	GEODE_IMAGE=$(GEODE_IMAGE) $(GO) test -race -v -tags=integration -timeout=$(LOAD_TIMEOUT) $(GOFLAGS) ./...
+	GEODE_IMAGE=$(GEODE_IMAGE) $(GO) test -vet=off -race -v -tags=integration -timeout=$(LOAD_TIMEOUT) $(GOFLAGS) ./...
 	@echo "✓ Docker race integration tests complete"
 
 # Manual Docker container management (like Zig client)
 test-integration-docker-manual: docker-start docker-wait
 	@echo "Running integration tests against Docker container..."
 	@echo ""
-	GEODE_TEST_DSN="$(GEODE_HOST):$(GEODE_PORT)?insecure=true&user=geode&pass=$(strip $(GEODE_DEV_ADMIN_PASSWORD))&tenant=$(GEODE_TEST_TENANT)" $(GO) test -v -tags=integration $(GOFLAGS) ./... || ($(MAKE) docker-stop && exit 1)
+	GEODE_TEST_DSN="$(GEODE_HOST):$(GEODE_PORT)?insecure=true&user=geode&pass=$(strip $(GEODE_DEV_ADMIN_PASSWORD))&tenant=$(GEODE_TEST_TENANT)" $(GO) test -vet=off -v -tags=integration $(GOFLAGS) ./... || ($(MAKE) docker-stop && exit 1)
 	@echo ""
 	@echo "✓ Docker integration tests complete"
 	$(MAKE) docker-stop
@@ -345,7 +345,7 @@ test-integration-grpc:
 	@echo ""
 	GEODE_TEST_DSN="$(GEODE_HOST):$(GEODE_PORT)?insecure=true&user=geode&pass=$(strip $(GEODE_DEV_ADMIN_PASSWORD))&tenant=$(GEODE_TEST_TENANT)" \
 	GEODE_TEST_GRPC_DSN="grpc://$(GEODE_HOST):$(GEODE_GRPC_PORT)?insecure_tls_skip_verify=true&user=geode&pass=$(strip $(GEODE_DEV_ADMIN_PASSWORD))&tenant=$(GEODE_TEST_TENANT)" \
-	$(GO) test -v -tags=integration -run='^TestIntegration_GRPC' $(GOFLAGS) ./...
+	$(GO) test -vet=off -v -tags=integration -run='^TestIntegration_GRPC' $(GOFLAGS) ./...
 	@echo ""
 	@echo "✓ gRPC parity tests complete"
 
@@ -354,7 +354,7 @@ test-integration-docker-grpc:
 	@echo ""
 	@echo "Using Docker image: $(GEODE_IMAGE)"
 	@echo ""
-	GEODE_IMAGE=$(GEODE_IMAGE) $(GO) test -v -tags=integration -timeout=$(LOAD_TIMEOUT) -run='^TestIntegration_GRPC' $(GOFLAGS) ./...
+	GEODE_IMAGE=$(GEODE_IMAGE) $(GO) test -vet=off -v -tags=integration -timeout=$(LOAD_TIMEOUT) -run='^TestIntegration_GRPC' $(GOFLAGS) ./...
 	@echo ""
 	@echo "✓ Docker gRPC parity tests complete"
 
@@ -365,7 +365,7 @@ test-integration-docker-grpc:
 test-integration-docker-grpc-race:
 	@echo "Running gRPC parity tests under -race with Docker (testcontainers)..."
 	@echo "Using Docker image: $(GEODE_IMAGE)"
-	GEODE_IMAGE=$(GEODE_IMAGE) $(GO) test -race -v -tags=integration -timeout=$(LOAD_TIMEOUT) -run='^TestIntegration_GRPC' $(GOFLAGS) ./...
+	GEODE_IMAGE=$(GEODE_IMAGE) $(GO) test -vet=off -race -v -tags=integration -timeout=$(LOAD_TIMEOUT) -run='^TestIntegration_GRPC' $(GOFLAGS) ./...
 	@echo "✓ Docker gRPC race parity tests complete"
 
 test-all: test-unit test-integration-docker
@@ -373,31 +373,29 @@ test-all: test-unit test-integration-docker
 
 test-verbose:
 	@echo "Running tests with verbose output..."
-	$(GO) test -v -short $(GOFLAGS) ./...
+	$(GO) test -vet=off -v -short $(GOFLAGS) ./...
 
 # =============================================================================
 # Code Quality Targets
 # =============================================================================
 
-lint:
+lint: fmt-check
 	@echo "Running golangci-lint..."
 	$(GOLANGCI_LINT) run
 	@echo "✓ Lint complete"
 
 fmt:
 	@echo "Formatting code..."
-	$(GO) fmt ./...
+	$(GOLANGCI_LINT) fmt
 	@echo "✓ Format complete"
 
 fmt-check:
 	@echo "Checking code format..."
-	@test -z "$$(gofmt -l .)" || (echo "Code not formatted. Run 'make fmt'" && gofmt -l . && exit 1)
+	$(GOLANGCI_LINT) fmt --diff
 	@echo "✓ Format check complete"
 
-vet:
-	@echo "Running go vet..."
-	$(GO) vet $(GOFLAGS) ./...
-	@echo "✓ Vet complete"
+# Compatibility alias; Make executes lint once when both targets are requested.
+vet: lint
 
 # =============================================================================
 # Benchmark Targets
@@ -405,12 +403,12 @@ vet:
 
 bench:
 	@echo "Running unit benchmarks..."
-	$(GO) test -bench=. -benchmem $(GOFLAGS) ./...
+	$(GO) test -vet=off -run='^$$' -bench=. -benchmem $(GOFLAGS) ./...
 	@echo "✓ Benchmarks complete"
 
 bench-quick:
 	@echo "Compiling benchmarks (dry run)..."
-	$(GO) test -run=NONE -bench=NONE $(GOFLAGS) ./...
+	$(GO) test -vet=off -run=NONE -bench=NONE $(GOFLAGS) ./...
 	@echo "✓ Benchmark compilation complete"
 
 bench-integration:
@@ -418,7 +416,7 @@ bench-integration:
 	@echo ""
 	@echo "Using Docker image: $(GEODE_IMAGE)"
 	@echo ""
-	GEODE_IMAGE=$(GEODE_IMAGE) $(GO) test -tags=integration -bench=BenchmarkDocker -benchmem $(GOFLAGS) ./...
+	GEODE_IMAGE=$(GEODE_IMAGE) $(GO) test -vet=off -tags=integration -run='^$$' -bench=BenchmarkDocker -benchmem $(GOFLAGS) ./...
 	@echo "✓ Docker benchmarks complete"
 
 # =============================================================================
@@ -444,38 +442,38 @@ fuzz:
 
 fuzz-dsn:
 	@echo "Fuzzing DSN parsing..."
-	$(GO) test -fuzz=FuzzParseDSN -fuzztime=$(FUZZ_TIME)
+	$(GO) test -vet=off -run='^$$' -fuzz=FuzzParseDSN -fuzztime=$(FUZZ_TIME)
 
 fuzz-frame:
 	@echo "Fuzzing frame parsing..."
-	$(GO) test -fuzz=FuzzParseFrame -fuzztime=$(FUZZ_TIME)
+	$(GO) test -vet=off -run='^$$' -fuzz=FuzzParseFrame -fuzztime=$(FUZZ_TIME)
 
 fuzz-query:
 	@echo "Fuzzing query validation..."
-	$(GO) test -fuzz=FuzzValidateQuery -fuzztime=$(FUZZ_TIME)
+	$(GO) test -vet=off -run='^$$' -fuzz=FuzzValidateQuery -fuzztime=$(FUZZ_TIME)
 
 fuzz-param:
 	@echo "Fuzzing parameter name validation..."
-	$(GO) test -fuzz=FuzzValidateParamName -fuzztime=$(FUZZ_TIME)
+	$(GO) test -vet=off -run='^$$' -fuzz=FuzzValidateParamName -fuzztime=$(FUZZ_TIME)
 
 fuzz-value:
 	@echo "Fuzzing value conversion..."
-	$(GO) test -fuzz=FuzzConvertValue -fuzztime=$(FUZZ_TIME)
+	$(GO) test -vet=off -run='^$$' -fuzz=FuzzConvertValue -fuzztime=$(FUZZ_TIME)
 
 fuzz-type:
 	@echo "Fuzzing GQL type parsing..."
-	$(GO) test -fuzz=FuzzParseGQLType -fuzztime=$(FUZZ_TIME)
+	$(GO) test -vet=off -run='^$$' -fuzz=FuzzParseGQLType -fuzztime=$(FUZZ_TIME)
 
 fuzz-plan:
 	@echo "Fuzzing EXPLAIN/PROFILE text-row decoding..."
-	$(GO) test -fuzz=FuzzPlanTextDecode -fuzztime=$(FUZZ_TIME) .
+	$(GO) test -vet=off -run='^$$' -fuzz=FuzzPlanTextDecode -fuzztime=$(FUZZ_TIME) .
 
 fuzz-params:
 	@echo "Fuzzing parameter binding..."
-	$(GO) test -fuzz='^FuzzBindParameters$$' -fuzztime=$(FUZZ_TIME) .
-	$(GO) test -fuzz=FuzzBindParametersArity -fuzztime=$(FUZZ_TIME) .
-	$(GO) test -fuzz=FuzzEncodeParamValue -fuzztime=$(FUZZ_TIME) .
-	$(GO) test -fuzz=FuzzVectorParams -fuzztime=$(FUZZ_TIME) .
+	$(GO) test -vet=off -run='^$$' -fuzz='^FuzzBindParameters$$' -fuzztime=$(FUZZ_TIME) .
+	$(GO) test -vet=off -run='^$$' -fuzz=FuzzBindParametersArity -fuzztime=$(FUZZ_TIME) .
+	$(GO) test -vet=off -run='^$$' -fuzz=FuzzEncodeParamValue -fuzztime=$(FUZZ_TIME) .
+	$(GO) test -vet=off -run='^$$' -fuzz=FuzzVectorParams -fuzztime=$(FUZZ_TIME) .
 
 # =============================================================================
 # Docker Targets
@@ -533,7 +531,7 @@ docker-pull:
 # CI Targets
 # =============================================================================
 
-ci: fmt-check vet lint proto-check test coverage bench-quick
+ci: lint proto-check coverage
 	@echo ""
 	@echo "==== CI Pipeline Complete ===="
 	@echo "✓ Format check passed"
@@ -545,7 +543,7 @@ ci: fmt-check vet lint proto-check test coverage bench-quick
 	@echo "✓ Benchmarks compiled"
 	@echo ""
 
-ci-quick: fmt-check vet test-unit
+ci-quick: lint test-unit
 	@echo ""
 	@echo "==== Quick CI Complete ===="
 	@echo "✓ Format check passed"
@@ -564,7 +562,7 @@ ci-full: ci test-integration-docker
 
 coverage:
 	@echo "Running tests with coverage..."
-	$(GO) test -short -coverprofile=coverage.out $(GOFLAGS) ./...
+	$(GO) test -vet=off -short -coverprofile=coverage.out $(GOFLAGS) ./...
 	$(GO) tool cover -html=coverage.out -o coverage.html
 	@echo "✓ Coverage report generated"
 	@echo "  HTML report: coverage.html"

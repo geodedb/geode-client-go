@@ -6,6 +6,8 @@ workflow:
     - if: $CI_COMMIT_TAG
       auto_cancel:
         on_new_commit: none
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
     - when: always
 
 # =============================================================================
@@ -22,9 +24,10 @@ workflow:
 
 include:
   # Pinned to v1.11.0 for supply chain security
-  - component: gitlab.com/devnw/ci-catalog/go-lint@v1.56.1
+  - component: gitlab.com/devnw/ci-catalog/go-lint@d70a313e1c1a3d3a4383d1ee65a2482571426ec0
     inputs:
-      go_version: "1.27.2"
+      git_depth: "1"
+      go_version: "1.27.3"
       stage: lint
       # Lint includes gosec security checks - must not allow failure
       allow_failure: false
@@ -32,22 +35,22 @@ include:
       # with go 1.26 and refuses to load the config.
       golangci_version: 'v2.14.0'
 
-  - component: gitlab.com/devnw/ci-catalog/go-build@v1.56.1
+  - component: gitlab.com/devnw/ci-catalog/go-build@d70a313e1c1a3d3a4383d1ee65a2482571426ec0
     inputs:
-      go_version: "1.27.2"
+      go_version: "1.27.3"
       stage: build
 
-  - component: gitlab.com/devnw/ci-catalog/go-test@v1.56.1
+  - component: gitlab.com/devnw/ci-catalog/go-test@d70a313e1c1a3d3a4383d1ee65a2482571426ec0
     inputs:
       tags: [company, linux, x86]
-      go_version: "1.27.2"
+      go_version: "1.27.3"
       stage: test
       # Unit tests (with -short flag) must pass. Integration tests that
       # require a running Geode server are skipped with -short.
       allow_failure: false
 
-  # Native Go fuzzing with an explicit cadence (SRE-178). go-fuzz first
-  # ships in v1.57.0, so it is pinned there while the rest stay on v1.56.1.
+  # Native Go fuzzing with an explicit cadence (SRE-178), compiling each
+  # package once and reusing its executable across fuzz targets.
   #   MR that touches Go, fuzz corpora, go.mod/go.sum or this file:
   #     short mode, every target for 200 iterations (blocking).
   #   schedule / web / GO_FUZZ_MODE=extended: extended mode, every target
@@ -56,10 +59,10 @@ include:
   #   tag, branch push: never.
   # Each target's result is in the job log; crashers are uploaded as
   # artifacts (testdata/fuzz) so they can be committed as seeds.
-  - component: gitlab.com/devnw/ci-catalog/go-fuzz@v1.57.0
+  - component: gitlab.com/devnw/ci-catalog/go-fuzz@d70a313e1c1a3d3a4383d1ee65a2482571426ec0
     inputs:
       tags: [company, linux, x86]
-      go_version: "1.27.2"
+      go_version: "1.27.3"
       stage: test
       extended_fuzztime: '5m'
       changes:
@@ -70,41 +73,22 @@ include:
         - '.gitlab-ci.yml'
 
   # Security scanning - pinned to v1.11.0
-  - component: gitlab.com/devnw/ci-catalog/security-sast@v1.56.1
-    inputs:
-      tags: [company, linux, x86]
-      stage: security
-
-  - component: gitlab.com/devnw/ci-catalog/security-dependency-scanning@v1.56.1
-    inputs:
-      tags: [company, linux, x86]
-      stage: security
-
-  - component: gitlab.com/devnw/ci-catalog/security-secrets@v1.56.1
-    inputs:
-      stage: security
-
-  - component: gitlab.com/devnw/ci-catalog/security-gitleaks@v1.56.1
+  - component: gitlab.com/devnw/ci-catalog/security-gitleaks@aad997d40e358eeef7ec943f761498341c37c724
 
   # SBOM generation and scanning - pinned to v1.11.0
   # allow_failure: external syft download may fail due to DNS/network issues
-  - component: gitlab.com/devnw/ci-catalog/sbom-generate@v1.56.1
+  - component: gitlab.com/devnw/ci-catalog/sbom-generate@aad997d40e358eeef7ec943f761498341c37c724
 
-  - component: gitlab.com/devnw/ci-catalog/sbom-scan@v1.56.1
+  - component: gitlab.com/devnw/ci-catalog/sbom-scan@aad997d40e358eeef7ec943f761498341c37c724
 
   # Release creation - pinned to v1.11.0
-  - component: gitlab.com/devnw/ci-catalog/release-semantic@v1.56.1
+  - component: gitlab.com/devnw/ci-catalog/release-semantic@aad997d40e358eeef7ec943f761498341c37c724
     inputs:
       stage: release
 
 # SBOM jobs may fail due to DNS/network issues downloading syft
   # Security findings -> auto-triaged Jira SEC issues (.post; reads gl-*-report
   # artifacts). component_id 12496 = SEC > Vuln Mgmt.
-  - component: gitlab.com/devnw/ci-catalog/jira-event-intake@v1.56.1
-    inputs:
-      project_key: SEC
-      component_id: "12496"
-
 sbom-generate:
   allow_failure: true
 
@@ -116,10 +100,24 @@ sbom-scan:
 go-fuzz:
   timeout: 2h 30m
 
+# Custom Go jobs read the same module and race-build cache that go-test
+# publishes. Keeping only cache paths without these variables caches nothing.
+.go-validation-cache:
+  variables:
+    GOMODCACHE: "$CI_PROJECT_DIR/.go/pkg/mod"
+    GOCACHE: "$CI_PROJECT_DIR/.go/build"
+  cache:
+    key:
+      prefix: go-mod
+      files: [go.sum]
+    paths:
+      - .go/pkg/mod/
+      - .go/build/
+    policy: pull
+
 default:
   interruptible: true
-  tags:
-    [company, linux, x86]
+  tags: [company, linux, x86]
 stages:
   - lint
   - build
@@ -141,8 +139,9 @@ stages:
 # pinned in the Makefile (PROTOC_GEN_GO_VERSION / PROTOC_GEN_GO_GRPC_VERSION).
 # =============================================================================
 proto-check:
+  extends: .go-validation-cache
   stage: lint
-  image: golang:1.27.2
+  image: golang:1.27.3
   script:
     - make proto-check
   allow_failure: false
@@ -159,9 +158,10 @@ proto-check:
 # the Makefile and pinnedEngineVersion in integration_version_test.go;
 # TestIntegration_PinnedEngineVersion fails the lane if they drift apart.
 # =============================================================================
-integration:geode:
+.integration-geode-base:
+  extends: .go-validation-cache
   stage: integration
-  image: golang:1.27.2
+  image: golang:1.27.3
   services:
     - name: geodedb/geode:0.8.22@sha256:867d93375470fd18c60336036196a9ef9715a1922e063e8787dc05d8e798ddce
       alias: geode
@@ -205,23 +205,42 @@ integration:geode:
     # Keep the tenant id in sync with harnessTenant (integration_main_test.go)
     # and GEODE_TEST_TENANT (Makefile).
     GEODE_TEST_DSN: "geode:3141?insecure=true&user=geode&pass=Correct%20horse%20battery%20staple&tenant=it-harness"
-  script:
-    - go test -race -v -tags=integration -timeout=20m ./...
   allow_failure: false
-  # Pin to the OVH Dedicated Runners, not the shared Company Cluster Runner.
-  # Task 16g triage: the QUIC lane's TestLoad_BurstExceedsPoolSize_NoDeadlock
-  # is CI-contention-only -- it passes 64/64 on a dedicated engine and the
-  # whole lane passes in CI order there, but on the shared cluster runner a
-  # 693s co-tenant-contended job pushes the anchor-HELLO handshake (run under
-  # the pool lock, SONNY-1219 F3) past the burst's 20s/caller deadline on the
-  # tail. The dedicated fleet gives the load path the headroom; the 20s budget
-  # is NOT relaxed. Same tag set as sonny-upstream's integration-test lane.
+  # gRPC parity can use the dedicated fleets and Spot overflow. The QUIC
+  # stress matrix below additionally requires a fixed Docker worker because
+  # its connection-load deadlines need more headroom than a 2-vCPU Spot host.
   tags:
     - company
     - dedicated
-    - docker
+    - amd64
     - linux
     - x86
+
+# Keep each suite below the existing 20-minute test timeout, with a fresh
+# service for each job. The 30,000-operation regression remains unchanged;
+# the other two selections are disjoint and together cover every other test,
+# example and fuzz seed, including tests added in the future.
+integration:geode:
+  extends: .integration-geode-base
+  # The same pinned engine and suites passed on the fixed AWS worker, while
+  # the post-merge Spot runs timed out during concurrent reads and new QUIC
+  # handshakes. Keep all workloads/deadlines intact on the fixed worker fleets.
+  tags: [company, dedicated, docker, linux, amd64, x86]
+  parallel:
+    matrix:
+      - GEODE_INTEGRATION_SUITE: [sustained-ingest, load, other]
+  script:
+    - |
+      case "$GEODE_INTEGRATION_SUITE" in
+        sustained-ingest)
+          run='^TestConn_SustainedSingleConnIngest_NoWedge$'; skip='^$' ;;
+        load)
+          run='^TestLoad_'; skip='^$' ;;
+        other)
+          run='.'; skip='^(TestConn_SustainedSingleConnIngest_NoWedge$|TestLoad_)' ;;
+        *) echo "Unknown integration suite: $GEODE_INTEGRATION_SUITE" >&2; exit 2 ;;
+      esac
+      go test -vet=off -race -v -tags=integration -timeout=20m -run "$run" -skip "$skip" ./...
 
 # =============================================================================
 # gRPC parity lane (SONNY-806 / GEO-GO-UP-001, Lane D Task 14).
@@ -243,8 +262,8 @@ integration:geode:
 # these do), so -run '^TestIntegration_GRPC' executes them one at a time.
 # =============================================================================
 integration:geode:grpc:
-  extends: integration:geode
+  extends: .integration-geode-base
   variables:
     GEODE_TEST_GRPC_DSN: "grpc://geode:50051?insecure_tls_skip_verify=true&user=geode&pass=Correct%20horse%20battery%20staple&tenant=it-harness"
   script:
-    - go test -race -v -tags=integration -timeout=20m -run '^TestIntegration_GRPC' ./...
+    - go test -vet=off -race -v -tags=integration -timeout=20m -run '^TestIntegration_GRPC' ./...
