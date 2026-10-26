@@ -1,5 +1,6 @@
 workflow:
   auto_cancel:
+    on_job_failure: all
     on_new_commit: interruptible
   rules:
     - if: $CI_COMMIT_TAG
@@ -205,17 +206,9 @@ proto-check:
     # and GEODE_TEST_TENANT (Makefile).
     GEODE_TEST_DSN: "geode:3141?insecure=true&user=geode&pass=Correct%20horse%20battery%20staple&tenant=it-harness"
   allow_failure: false
-  # Use the dedicated Linux AMD64 fleets, including AWS Spot overflow.
-  # The Spot runner uses Docker services (also validated by the other Geode
-  # clients) but advertises amd64 instead of docker. Requiring docker here
-  # stranded both integration jobs behind the always-warm Sonny queue.
-  # Task 16g triage: the QUIC lane's TestLoad_BurstExceedsPoolSize_NoDeadlock
-  # is CI-contention-only -- it passes 64/64 on a dedicated engine and the
-  # whole lane passes in CI order there, but on the shared cluster runner a
-  # 693s co-tenant-contended job pushes the anchor-HELLO handshake (run under
-  # the pool lock, SONNY-1219 F3) past the burst's 20s/caller deadline on the
-  # tail. The dedicated fleet gives the load path the headroom; the 20s budget
-  # is NOT relaxed. Same tag set as sonny-upstream's integration-test lane.
+  # gRPC parity can use the dedicated fleets and Spot overflow. The QUIC
+  # stress matrix below additionally requires a fixed Docker worker because
+  # its connection-load deadlines need more headroom than a 2-vCPU Spot host.
   tags:
     - company
     - dedicated
@@ -229,6 +222,10 @@ proto-check:
 # example and fuzz seed, including tests added in the future.
 integration:geode:
   extends: .integration-geode-base
+  # The same pinned engine and suites passed on the fixed AWS worker, while
+  # the post-merge Spot runs timed out during concurrent reads and new QUIC
+  # handshakes. Keep all workloads/deadlines intact on the fixed worker fleets.
+  tags: [company, dedicated, docker, linux, amd64, x86]
   parallel:
     matrix:
       - GEODE_INTEGRATION_SUITE: [sustained-ingest, load, other]
