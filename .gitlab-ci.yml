@@ -209,3 +209,7 @@ integration:geode:grpc:
     GEODE_TEST_GRPC_DSN: "grpc://geode:50051?insecure_tls_skip_verify=true&user=geode&pass=Correct%20horse%20battery%20staple&tenant=it-harness"
   script:
     - go test -race -v -tags=integration -timeout=20m -run '^TestIntegration_GRPC' ./...
+
+workflow:
+  auto_cancel:
+    on_job_failure: all
