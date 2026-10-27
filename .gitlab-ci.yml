@@ -33,7 +33,7 @@ include:
       allow_failure: false
       # go.mod targets go 1.27; the component default (v2.11.3) is built
       # with go 1.26 and refuses to load the config.
-      golangci_version: 'v2.14.0'
+      golangci_version: 'v2.15.0'
 
   - component: gitlab.com/devnw/ci-catalog/go-build@d70a313e1c1a3d3a4383d1ee65a2482571426ec0
     inputs:
@@ -73,16 +73,16 @@ include:
         - '.gitlab-ci.yml'
 
   # Security scanning - pinned to v1.11.0
-  - component: gitlab.com/devnw/ci-catalog/security-gitleaks@aad997d40e358eeef7ec943f761498341c37c724
+  - component: gitlab.com/devnw/ci-catalog/security-gitleaks@v1.58.0
 
   # SBOM generation and scanning - pinned to v1.11.0
   # allow_failure: external syft download may fail due to DNS/network issues
-  - component: gitlab.com/devnw/ci-catalog/sbom-generate@aad997d40e358eeef7ec943f761498341c37c724
+  - component: gitlab.com/devnw/ci-catalog/sbom-generate@v1.58.0
 
-  - component: gitlab.com/devnw/ci-catalog/sbom-scan@aad997d40e358eeef7ec943f761498341c37c724
+  - component: gitlab.com/devnw/ci-catalog/sbom-scan@v1.58.0
 
   # Release creation - pinned to v1.11.0
-  - component: gitlab.com/devnw/ci-catalog/release-semantic@aad997d40e358eeef7ec943f761498341c37c724
+  - component: gitlab.com/devnw/ci-catalog/release-semantic@v1.58.0
     inputs:
       stage: release
 

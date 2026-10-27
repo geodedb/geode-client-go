@@ -546,7 +546,7 @@ func TestRetryPolicy_Allows(t *testing.T) {
 
 	// An empty (non-nil) map retries nothing, which is a legitimate "classify
 	// but never retry" configuration.
-	none := RetryPolicy{Classes: map[RetryClass]bool{}}
+	none := RetryPolicy{Classes: map[RetryClass]bool{}} //nolint:exhaustive // deliberately empty: this policy retries nothing
 	for _, c := range all {
 		if none.allows(c) {
 			t.Errorf("empty Classes: allows(%v) = true, want false", c)
@@ -634,7 +634,7 @@ func TestRetryPolicy_ClassBackoffIsJitteredAndBounded(t *testing.T) {
 
 	// RetryBackoff is drawn from [floor*d, d] — bounded above by the policy and
 	// below by the floor, so the delay is spread but never skipped.
-	seen := map[time.Duration]bool{}
+	seen := map[time.Duration]bool{} //nolint:exhaustive // a set of observed delays, not a table keyed by every unit
 	for range 200 {
 		d := policy.classBackoff(RetryBackoff, 2)
 		bound := policy.backoff(2)
