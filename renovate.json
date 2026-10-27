@@ -45,6 +45,13 @@
       ],
       "groupName": "Geode engine pin",
       "groupSlug": "geode-engine-pin"
+    },
+    {
+      "description": "Hold the geode engine image off 0.8.23: TestConn_SustainedSingleConnIngest_NoWedge (integration:geode [sustained-ingest]) wedges and hits the 20m test timeout against 0.8.23 in 3 of 3 CI runs (jobs 17335145556, 17518564299, 17520452179; the last with quic-go v0.63.0), while the same branch against 0.8.22 passes in 178 s (job 17520452208). Newer engine releases are still proposed, at every pin site (see the Geode engine pin group).",
+      "matchPackageNames": [
+        "geodedb/geode"
+      ],
+      "allowedVersions": "!/^0\\.8\\.23(-.*)?$/"
     }
   ],
   "customManagers": [
