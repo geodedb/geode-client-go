@@ -37,9 +37,33 @@
       "commitMessageSuffix": "(SONNY-2928)",
       "semanticCommitType": "chore",
       "semanticCommitScope": null
+    },
+    {
+      "description": "The Geode engine pin lives in .gitlab-ci.yml (integration:geode service), the Makefile GEODE_IMAGE default, and engine_pin_test.go (defaultGeodeImage and pinnedEngineVersion). TestEnginePinIsImmutable fails unless they move together, so every site updates in one MR.",
+      "matchPackageNames": [
+        "geodedb/geode"
+      ],
+      "groupName": "Geode engine pin",
+      "groupSlug": "geode-engine-pin"
     }
   ],
   "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Geode engine pin sites outside .gitlab-ci.yml: Makefile GEODE_IMAGE, engine_pin_test.go defaultGeodeImage (tag@digest) and pinnedEngineVersion (v-prefixed tag). Same depName and datasource as the gitlabci service so all sites group together.",
+      "managerFilePatterns": [
+        "/^Makefile$/",
+        "/^engine_pin_test\\.go$/"
+      ],
+      "matchStrings": [
+        "GEODE_IMAGE \\?= geodedb/geode:(?<currentValue>\\d+\\.\\d+\\.\\d+)@(?<currentDigest>sha256:[a-f0-9]{64})",
+        "defaultGeodeImage = \"geodedb/geode:(?<currentValue>\\d+\\.\\d+\\.\\d+)@(?<currentDigest>sha256:[a-f0-9]{64})\"",
+        "pinnedEngineVersion = \"v(?<currentValue>\\d+\\.\\d+\\.\\d+)\""
+      ],
+      "depNameTemplate": "geodedb/geode",
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "docker"
+    },
     {
       "customType": "regex",
       "managerFilePatterns": [
