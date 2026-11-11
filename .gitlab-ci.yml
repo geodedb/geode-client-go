@@ -141,7 +141,7 @@ stages:
 proto-check:
   extends: .go-validation-cache
   stage: lint
-  image: golang:1.27.3
+  image: golang:1.27.4
   script:
     - make proto-check
   allow_failure: false
@@ -161,7 +161,7 @@ proto-check:
 .integration-geode-base:
   extends: .go-validation-cache
   stage: integration
-  image: golang:1.27.3
+  image: golang:1.27.4
   services:
     - name: geodedb/geode:0.8.22@sha256:867d93375470fd18c60336036196a9ef9715a1922e063e8787dc05d8e798ddce
       alias: geode
