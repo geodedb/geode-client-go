@@ -4,11 +4,11 @@ go 1.27.4
 
 require (
 	github.com/docker/docker v28.5.2+incompatible
-	github.com/moby/moby/api v1.56.1
-	github.com/moby/moby/client v0.6.2
-	github.com/quic-go/quic-go v0.64.1
+	github.com/moby/moby/api v1.57.0
+	github.com/moby/moby/client v0.6.3
+	github.com/quic-go/quic-go v0.65.0
 	github.com/stretchr/testify v1.12.1
-	github.com/testcontainers/testcontainers-go v0.44.0
+	github.com/testcontainers/testcontainers-go v0.45.0
 	golang.org/x/crypto v0.58.0
 	google.golang.org/grpc v1.85.0
 	google.golang.org/protobuf v1.36.12
