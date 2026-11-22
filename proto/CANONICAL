@@ -1,6 +1,6 @@
 # Provenance of proto/geode.proto. Regenerate with `make generate-proto`.
 source: src/proto/geode.proto
-engine_commit: ebfd88129c9f47ebeba5ebb53b7c4f6178633ea3
-sha256: ab73ef312d43f78aeede1791767376c74c8d3423eff9360a242863d4056365df
+engine_commit: c4bd96acc09ff6d60ff7d87a12f29294fc24c1b7
+sha256: 466602f2649fe6807377649c558f16d49400730adb21e638f264c3d3acdbbb9d
 protoc_gen_go: v1.36.12
 protoc_gen_go_grpc: v1.6.1
