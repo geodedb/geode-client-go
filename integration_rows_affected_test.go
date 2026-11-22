@@ -104,7 +104,10 @@ func assertRowsAffectedContract(t *testing.T, db *sql.DB) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	const n = 3
+	// More rows than one gRPC pushed page (grpcStreamPageSize), so the
+	// statement's matched rows span several pages and the counts must be read
+	// from the final one, not the first.
+	const n = 2*grpcStreamPageSize + 3
 	// A run id keeps repeated manual-server runs from matching each other's
 	// nodes.
 	run := strconv.FormatInt(time.Now().UnixNano(), 36)

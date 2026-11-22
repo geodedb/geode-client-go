@@ -7,7 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `sql.Result.RowsAffected()` now reports what an `Exec` changed instead of
+  always 0 (SONNY-2822), so a conditional `MATCH ... SET` can tell a match from
+  a miss. It reads `DataPage.update_counts`, which the engine sends on the
+  final page from geode a6de87812 (first release after 0.8.25): nodes and
+  relationships created plus deleted, or, for a statement that only sets
+  properties or labels, property assignments plus label changes. The per-kind
+  counts are available from `(*geode.Result).UpdateCounts()`. Against an
+  engine that sends no counts the result is 0, as before.
+
 ### Changed
+
+- The vendored `proto/geode.proto` is synced with geode main c4bd96acc
+  (`UpdateCounts`, `CancelRequest`/`CancelResponse`, savepoint response
+  errors, and the Savepoint, RollbackTo, Backup, Restore and UploadBackup
+  RPCs).
 
 - Engine pin moved to **geode 0.8.22** (`geodedb/geode:0.8.22`, manifest-list
   digest `sha256:867d93375470fd18c60336036196a9ef9715a1922e063e8787dc05d8e798ddce`).

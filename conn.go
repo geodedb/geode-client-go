@@ -172,29 +172,35 @@ func (c *Conn) ConnID() uint64 { return c.id }
 // until the execution is complete (final data page + optional metrics/heartbeat).
 // This MUST be called when ExecContext gets a schema or non-final page to keep
 // the single bidirectional QUIC stream in sync.
-func (c *Conn) drainExecStream(ctx context.Context, first *proto.ExecutionResponse) error {
+//
+// It returns the update counts the final page carries (SONNY-2822), or nil
+// when the engine sent none.
+func (c *Conn) drainExecStream(ctx context.Context, first *proto.ExecutionResponse) (*proto.UpdateCounts, error) {
+	var counts *proto.UpdateCounts
 	gotFinal := first.GetPage() != nil && first.GetPage().GetFinal()
-
-	// Check if the first response already has a final page
+	if gotFinal {
+		counts = first.GetPage().GetUpdateCounts()
+	}
 
 	for !gotFinal {
 		// Blocking read for data page (server always sends one after schema)
 		resp, err := c.transport.ReceiveProto(ctx)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		execResp := resp.GetExecute()
 		if execResp == nil {
 			break // Non-execute response, stop
 		}
 		if execResp.GetError() != nil {
-			return &DriverError{
+			return nil, &DriverError{
 				Code:    execResp.GetError().GetCode(),
 				Message: execResp.GetError().GetMessage(),
 			}
 		}
 		if execResp.GetPage() != nil && execResp.GetPage().GetFinal() {
 			gotFinal = true
+			counts = execResp.GetPage().GetUpdateCounts()
 		}
 		// If it's metrics or heartbeat, loop to read next
 		if execResp.GetMetrics() != nil || execResp.GetHeartbeat() != nil {
@@ -207,7 +213,7 @@ func (c *Conn) drainExecStream(ctx context.Context, first *proto.ExecutionRespon
 	for {
 		msg, ok, err := c.transport.TryReceiveProtoBuffered()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if !ok {
 			break // No more buffered data
@@ -223,7 +229,7 @@ func (c *Conn) drainExecStream(ctx context.Context, first *proto.ExecutionRespon
 		break
 	}
 
-	return nil
+	return counts, nil
 }
 
 // Compile-time interface checks.
@@ -474,7 +480,7 @@ func (c *Conn) execInit(ctx context.Context, query string) error {
 
 	// Drain the full execution stream.
 	if execResp.GetSchema() != nil || execResp.GetPage() != nil {
-		if err := c.drainExecStream(ctx, execResp); err != nil {
+		if _, err := c.drainExecStream(ctx, execResp); err != nil {
 			return err
 		}
 	}
@@ -842,8 +848,12 @@ func (c *Conn) ExecContext(ctx context.Context, query string, args []driver.Name
 	// Drain the full execution response stream (schema → data page → metrics).
 	// The server always sends at least a data page after schema.
 	// After the final data page, the server may send a metrics frame.
+	// The final page carries what the statement changed (SONNY-2822); it is
+	// what RowsAffected reports.
+	var counts *proto.UpdateCounts
 	if execResp.GetSchema() != nil || execResp.GetPage() != nil {
-		if err := c.drainExecStream(ctx, execResp); err != nil {
+		counts, err = c.drainExecStream(ctx, execResp)
+		if err != nil {
 			c.markConnFailed()
 			return nil, transportErrBadConn(err)
 		}
@@ -853,7 +863,7 @@ func (c *Conn) ExecContext(ctx context.Context, query string, args []driver.Name
 	// than leaving it for the next one to reset. See FinishExecStream.
 	finishExecStream(c.transport)
 
-	return &Result{}, nil
+	return newExecResult(counts), nil
 }
 
 // stillRunningOnTheEngine annotates the error of a statement the caller gave up
