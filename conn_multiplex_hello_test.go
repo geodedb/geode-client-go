@@ -43,7 +43,7 @@ func TestPooledHello_ConcurrentFirstStreams(t *testing.T) {
 		Host:               "127.0.0.1",
 		Port:               fmt.Sprintf("%d", port),
 		Username:           "geode",
-		Password:           "seed",
+		Password:           testAdminPassphrase,
 		InsecureSkipVerify: true,
 		PageSize:           DefaultPageSize,
 		HelloName:          DefaultHelloName,

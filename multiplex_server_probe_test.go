@@ -35,6 +35,8 @@ const (
 	probeGoroutines = 8
 	probeDuration   = 20 * time.Second
 	probeWedge      = 15 * time.Second
+	// probeGraph is the graph the connection HELLO binds for every stream.
+	probeGraph = "mux_probe"
 
 	// probeGeodeBinaryEnv names a built geode engine binary for the probe
 	// tests to launch.
@@ -134,7 +136,10 @@ func startProbeServer(t *testing.T, port, metricsPort int, tmpDir string) {
 		"--data-dir", tmpDir,
 	)
 	cmd.Env = append(os.Environ(),
-		"GEODE_ADMIN_PASSWORD=seed",
+		// The seed must meet the engine's password policy: since SONNY-6331 a
+		// non-compliant seed is accepted with a FORCED reset, and every
+		// statement then fails 08P01 "Password reset required".
+		"GEODE_ADMIN_PASSWORD="+testAdminPassphrase,
 		"GEODE_WAL_SYNC=deferred",
 		"GEODE_INDEX_MERGE_KEYS_ONLY=1",
 		// REQ-QUIC-HC-030 / server_init.zig: stream multiplexing is DISABLED by
@@ -257,6 +262,10 @@ func (s *probeSession) hello(ctx context.Context, cfg *Config) (string, error) {
 		ClientVersion:     cfg.HelloVersion,
 		WantedConformance: cfg.Conformance,
 	}
+	if cfg.Graph != "" {
+		graph := cfg.Graph
+		req.Graph = &graph
+	}
 	if err := s.send(ctx, proto.NewHelloMessage(req)); err != nil {
 		return "", fmt.Errorf("hello send: %w", err)
 	}
@@ -378,12 +387,18 @@ func TestMultiplexServerProbe(t *testing.T) {
 		Host:               "127.0.0.1",
 		Port:               fmt.Sprintf("%d", port),
 		Username:           "geode",
-		Password:           "seed",
+		Password:           testAdminPassphrase,
 		InsecureSkipVerify: true,
 		PageSize:           DefaultPageSize,
 		HelloName:          DefaultHelloName,
 		HelloVersion:       DefaultHelloVersion,
 		Conformance:        DefaultConformance,
+		// The connection HELLO binds a graph so the sibling streams below
+		// inherit it. Since SONNY-1835 the engine refuses a sibling stream that
+		// has no binding from either the connection HELLO or its own HELLO
+		// (08003 unbound stream), so a HELLO without a graph would make every
+		// sibling fail before the probe measured anything.
+		Graph: probeGraph,
 	}
 
 	// ── 2. Dial ONE QUIC connection ──────────────────────────────────────────
@@ -411,8 +426,9 @@ func TestMultiplexServerProbe(t *testing.T) {
 	dialCancel()
 
 	// ── 3. HELLO on stream 0 ─────────────────────────────────────────────────
-	// The server authenticates at the QUIC connection level (not per-stream),
-	// so HELLO on one stream authenticates all subsequent streams on this conn.
+	// The server authenticates at the QUIC connection level (not per-stream):
+	// HELLO on one stream authenticates every later stream on this connection,
+	// and the graph it binds is inherited by those siblings.
 	helloCtx, helloCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer helloCancel()
 
@@ -455,7 +471,7 @@ func TestMultiplexServerProbe(t *testing.T) {
 			// Each goroutine opens its own stream on the SHARED qConn and runs
 			// queries DIRECTLY — no per-stream HELLO. This probes the ENGINE's
 			// multiplexing: whether a sibling stream is usable at all once the
-			// connection is authenticated. It deliberately does NOT mirror the
+			// connection is authenticated and bound to a graph. It deliberately does NOT mirror the
 			// driver any more. The driver sends a HELLO on every request stream
 			// (conn.go pooledHello) because HELLO carries the session's tenant and
 			// graph binding and the engine applies both per stream — skipping it,
