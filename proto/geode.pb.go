@@ -382,6 +382,7 @@ type QuicClientMessage struct {
 	//	*QuicClientMessage_Backup
 	//	*QuicClientMessage_Restore
 	//	*QuicClientMessage_UploadBackup
+	//	*QuicClientMessage_Cancel
 	Msg           isQuicClientMessage_Msg `protobuf_oneof:"msg"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -550,6 +551,15 @@ func (x *QuicClientMessage) GetUploadBackup() *UploadBackupRequest {
 	return nil
 }
 
+func (x *QuicClientMessage) GetCancel() *CancelRequest {
+	if x != nil {
+		if x, ok := x.Msg.(*QuicClientMessage_Cancel); ok {
+			return x.Cancel
+		}
+	}
+	return nil
+}
+
 type isQuicClientMessage_Msg interface {
 	isQuicClientMessage_Msg()
 }
@@ -610,6 +620,15 @@ type QuicClientMessage_UploadBackup struct {
 	UploadBackup *UploadBackupRequest `protobuf:"bytes,14,opt,name=upload_backup,json=uploadBackup,proto3,oneof"`
 }
 
+type QuicClientMessage_Cancel struct {
+	// SONNY-1841: per-stream statement cancellation. Backward-compatible
+	// addition (old clients simply never send it); existing tags 1-14 are
+	// unchanged. Honoured by aborting the target stream's in-flight statement
+	// so it releases the per-graph write lock instead of running to its own
+	// deadline.
+	Cancel *CancelRequest `protobuf:"bytes,15,opt,name=cancel,proto3,oneof"`
+}
+
 func (*QuicClientMessage_Hello) isQuicClientMessage_Msg() {}
 
 func (*QuicClientMessage_Execute) isQuicClientMessage_Msg() {}
@@ -638,6 +657,8 @@ func (*QuicClientMessage_Restore) isQuicClientMessage_Msg() {}
 
 func (*QuicClientMessage_UploadBackup) isQuicClientMessage_Msg() {}
 
+func (*QuicClientMessage_Cancel) isQuicClientMessage_Msg() {}
+
 type QuicServerMessage struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Msg:
@@ -656,6 +677,7 @@ type QuicServerMessage struct {
 	//	*QuicServerMessage_Backup
 	//	*QuicServerMessage_Restore
 	//	*QuicServerMessage_UploadBackup
+	//	*QuicServerMessage_Cancel
 	Msg           isQuicServerMessage_Msg `protobuf_oneof:"msg"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -824,6 +846,15 @@ func (x *QuicServerMessage) GetUploadBackup() *UploadBackupResponse {
 	return nil
 }
 
+func (x *QuicServerMessage) GetCancel() *CancelResponse {
+	if x != nil {
+		if x, ok := x.Msg.(*QuicServerMessage_Cancel); ok {
+			return x.Cancel
+		}
+	}
+	return nil
+}
+
 type isQuicServerMessage_Msg interface {
 	isQuicServerMessage_Msg()
 }
@@ -884,6 +915,12 @@ type QuicServerMessage_UploadBackup struct {
 	UploadBackup *UploadBackupResponse `protobuf:"bytes,14,opt,name=upload_backup,json=uploadBackup,proto3,oneof"`
 }
 
+type QuicServerMessage_Cancel struct {
+	// SONNY-1841: acknowledgement for a per-stream CANCEL. Backward-compatible
+	// addition; existing tags 1-14 are unchanged.
+	Cancel *CancelResponse `protobuf:"bytes,15,opt,name=cancel,proto3,oneof"`
+}
+
 func (*QuicServerMessage_Hello) isQuicServerMessage_Msg() {}
 
 func (*QuicServerMessage_Execute) isQuicServerMessage_Msg() {}
@@ -911,6 +948,8 @@ func (*QuicServerMessage_Backup) isQuicServerMessage_Msg() {}
 func (*QuicServerMessage_Restore) isQuicServerMessage_Msg() {}
 
 func (*QuicServerMessage_UploadBackup) isQuicServerMessage_Msg() {}
+
+func (*QuicServerMessage_Cancel) isQuicServerMessage_Msg() {}
 
 // ============================================================================
 // Authentication (HELLO)
@@ -1680,11 +1719,15 @@ func (x *ColumnDefinition) GetType() string {
 }
 
 type DataPage struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Rows          []*Row                 `protobuf:"bytes,1,rep,name=rows,proto3" json:"rows,omitempty"`
-	Final         bool                   `protobuf:"varint,2,opt,name=final,proto3" json:"final,omitempty"`
-	Ordered       bool                   `protobuf:"varint,3,opt,name=ordered,proto3" json:"ordered,omitempty"`
-	OrderKeys     []string               `protobuf:"bytes,4,rep,name=order_keys,json=orderKeys,proto3" json:"order_keys,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Rows      []*Row                 `protobuf:"bytes,1,rep,name=rows,proto3" json:"rows,omitempty"`
+	Final     bool                   `protobuf:"varint,2,opt,name=final,proto3" json:"final,omitempty"`
+	Ordered   bool                   `protobuf:"varint,3,opt,name=ordered,proto3" json:"ordered,omitempty"`
+	OrderKeys []string               `protobuf:"bytes,4,rep,name=order_keys,json=orderKeys,proto3" json:"order_keys,omitempty"`
+	// SONNY-2822: what the statement changed. Set on the final page
+	// (final = true) of every successful result, all zeros for a read; absent
+	// on other pages and from servers that predate it.
+	UpdateCounts  *UpdateCounts `protobuf:"bytes,5,opt,name=update_counts,json=updateCounts,proto3" json:"update_counts,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1747,6 +1790,107 @@ func (x *DataPage) GetOrderKeys() []string {
 	return nil
 }
 
+func (x *DataPage) GetUpdateCounts() *UpdateCounts {
+	if x != nil {
+		return x.UpdateCounts
+	}
+	return nil
+}
+
+// SONNY-2822: per-statement update counts (openCypher / Bolt query
+// statistics semantics; see docs/BINARY_PROTOCOL.md "Update counts").
+type UpdateCounts struct {
+	state                protoimpl.MessageState `protogen:"open.v1"`
+	NodesCreated         uint64                 `protobuf:"varint,1,opt,name=nodes_created,json=nodesCreated,proto3" json:"nodes_created,omitempty"`
+	NodesDeleted         uint64                 `protobuf:"varint,2,opt,name=nodes_deleted,json=nodesDeleted,proto3" json:"nodes_deleted,omitempty"`
+	RelationshipsCreated uint64                 `protobuf:"varint,3,opt,name=relationships_created,json=relationshipsCreated,proto3" json:"relationships_created,omitempty"`
+	RelationshipsDeleted uint64                 `protobuf:"varint,4,opt,name=relationships_deleted,json=relationshipsDeleted,proto3" json:"relationships_deleted,omitempty"`
+	PropertiesSet        uint64                 `protobuf:"varint,5,opt,name=properties_set,json=propertiesSet,proto3" json:"properties_set,omitempty"`
+	LabelsAdded          uint64                 `protobuf:"varint,6,opt,name=labels_added,json=labelsAdded,proto3" json:"labels_added,omitempty"`
+	LabelsRemoved        uint64                 `protobuf:"varint,7,opt,name=labels_removed,json=labelsRemoved,proto3" json:"labels_removed,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
+}
+
+func (x *UpdateCounts) Reset() {
+	*x = UpdateCounts{}
+	mi := &file_proto_geode_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpdateCounts) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpdateCounts) ProtoMessage() {}
+
+func (x *UpdateCounts) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_geode_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpdateCounts.ProtoReflect.Descriptor instead.
+func (*UpdateCounts) Descriptor() ([]byte, []int) {
+	return file_proto_geode_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *UpdateCounts) GetNodesCreated() uint64 {
+	if x != nil {
+		return x.NodesCreated
+	}
+	return 0
+}
+
+func (x *UpdateCounts) GetNodesDeleted() uint64 {
+	if x != nil {
+		return x.NodesDeleted
+	}
+	return 0
+}
+
+func (x *UpdateCounts) GetRelationshipsCreated() uint64 {
+	if x != nil {
+		return x.RelationshipsCreated
+	}
+	return 0
+}
+
+func (x *UpdateCounts) GetRelationshipsDeleted() uint64 {
+	if x != nil {
+		return x.RelationshipsDeleted
+	}
+	return 0
+}
+
+func (x *UpdateCounts) GetPropertiesSet() uint64 {
+	if x != nil {
+		return x.PropertiesSet
+	}
+	return 0
+}
+
+func (x *UpdateCounts) GetLabelsAdded() uint64 {
+	if x != nil {
+		return x.LabelsAdded
+	}
+	return 0
+}
+
+func (x *UpdateCounts) GetLabelsRemoved() uint64 {
+	if x != nil {
+		return x.LabelsRemoved
+	}
+	return 0
+}
+
 type Row struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Values        []*Value               `protobuf:"bytes,1,rep,name=values,proto3" json:"values,omitempty"`
@@ -1756,7 +1900,7 @@ type Row struct {
 
 func (x *Row) Reset() {
 	*x = Row{}
-	mi := &file_proto_geode_proto_msgTypes[15]
+	mi := &file_proto_geode_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1768,7 +1912,7 @@ func (x *Row) String() string {
 func (*Row) ProtoMessage() {}
 
 func (x *Row) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[15]
+	mi := &file_proto_geode_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1781,7 +1925,7 @@ func (x *Row) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Row.ProtoReflect.Descriptor instead.
 func (*Row) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{15}
+	return file_proto_geode_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *Row) GetValues() []*Value {
@@ -1818,7 +1962,7 @@ type Value struct {
 
 func (x *Value) Reset() {
 	*x = Value{}
-	mi := &file_proto_geode_proto_msgTypes[16]
+	mi := &file_proto_geode_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1830,7 +1974,7 @@ func (x *Value) String() string {
 func (*Value) ProtoMessage() {}
 
 func (x *Value) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[16]
+	mi := &file_proto_geode_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1843,7 +1987,7 @@ func (x *Value) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Value.ProtoReflect.Descriptor instead.
 func (*Value) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{16}
+	return file_proto_geode_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *Value) GetKind() isValue_Kind {
@@ -2060,7 +2204,7 @@ type NullValue struct {
 
 func (x *NullValue) Reset() {
 	*x = NullValue{}
-	mi := &file_proto_geode_proto_msgTypes[17]
+	mi := &file_proto_geode_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2072,7 +2216,7 @@ func (x *NullValue) String() string {
 func (*NullValue) ProtoMessage() {}
 
 func (x *NullValue) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[17]
+	mi := &file_proto_geode_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2085,7 +2229,7 @@ func (x *NullValue) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NullValue.ProtoReflect.Descriptor instead.
 func (*NullValue) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{17}
+	return file_proto_geode_proto_rawDescGZIP(), []int{18}
 }
 
 type IntValue struct {
@@ -2098,7 +2242,7 @@ type IntValue struct {
 
 func (x *IntValue) Reset() {
 	*x = IntValue{}
-	mi := &file_proto_geode_proto_msgTypes[18]
+	mi := &file_proto_geode_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2110,7 +2254,7 @@ func (x *IntValue) String() string {
 func (*IntValue) ProtoMessage() {}
 
 func (x *IntValue) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[18]
+	mi := &file_proto_geode_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2123,7 +2267,7 @@ func (x *IntValue) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IntValue.ProtoReflect.Descriptor instead.
 func (*IntValue) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{18}
+	return file_proto_geode_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *IntValue) GetValue() int64 {
@@ -2150,7 +2294,7 @@ type DoubleValue struct {
 
 func (x *DoubleValue) Reset() {
 	*x = DoubleValue{}
-	mi := &file_proto_geode_proto_msgTypes[19]
+	mi := &file_proto_geode_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2162,7 +2306,7 @@ func (x *DoubleValue) String() string {
 func (*DoubleValue) ProtoMessage() {}
 
 func (x *DoubleValue) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[19]
+	mi := &file_proto_geode_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2175,7 +2319,7 @@ func (x *DoubleValue) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DoubleValue.ProtoReflect.Descriptor instead.
 func (*DoubleValue) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{19}
+	return file_proto_geode_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *DoubleValue) GetValue() float64 {
@@ -2202,7 +2346,7 @@ type StringValue struct {
 
 func (x *StringValue) Reset() {
 	*x = StringValue{}
-	mi := &file_proto_geode_proto_msgTypes[20]
+	mi := &file_proto_geode_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2214,7 +2358,7 @@ func (x *StringValue) String() string {
 func (*StringValue) ProtoMessage() {}
 
 func (x *StringValue) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[20]
+	mi := &file_proto_geode_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2227,7 +2371,7 @@ func (x *StringValue) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StringValue.ProtoReflect.Descriptor instead.
 func (*StringValue) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{20}
+	return file_proto_geode_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *StringValue) GetValue() string {
@@ -2256,7 +2400,7 @@ type DecimalValue struct {
 
 func (x *DecimalValue) Reset() {
 	*x = DecimalValue{}
-	mi := &file_proto_geode_proto_msgTypes[21]
+	mi := &file_proto_geode_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2268,7 +2412,7 @@ func (x *DecimalValue) String() string {
 func (*DecimalValue) ProtoMessage() {}
 
 func (x *DecimalValue) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[21]
+	mi := &file_proto_geode_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2281,7 +2425,7 @@ func (x *DecimalValue) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DecimalValue.ProtoReflect.Descriptor instead.
 func (*DecimalValue) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{21}
+	return file_proto_geode_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *DecimalValue) GetCoeff() string {
@@ -2322,7 +2466,7 @@ type BytesValue struct {
 
 func (x *BytesValue) Reset() {
 	*x = BytesValue{}
-	mi := &file_proto_geode_proto_msgTypes[22]
+	mi := &file_proto_geode_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2334,7 +2478,7 @@ func (x *BytesValue) String() string {
 func (*BytesValue) ProtoMessage() {}
 
 func (x *BytesValue) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[22]
+	mi := &file_proto_geode_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2347,7 +2491,7 @@ func (x *BytesValue) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BytesValue.ProtoReflect.Descriptor instead.
 func (*BytesValue) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{22}
+	return file_proto_geode_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *BytesValue) GetValue() []byte {
@@ -2373,7 +2517,7 @@ type ListValue struct {
 
 func (x *ListValue) Reset() {
 	*x = ListValue{}
-	mi := &file_proto_geode_proto_msgTypes[23]
+	mi := &file_proto_geode_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2385,7 +2529,7 @@ func (x *ListValue) String() string {
 func (*ListValue) ProtoMessage() {}
 
 func (x *ListValue) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[23]
+	mi := &file_proto_geode_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2398,7 +2542,7 @@ func (x *ListValue) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListValue.ProtoReflect.Descriptor instead.
 func (*ListValue) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{23}
+	return file_proto_geode_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *ListValue) GetValues() []*Value {
@@ -2418,7 +2562,7 @@ type MapEntry struct {
 
 func (x *MapEntry) Reset() {
 	*x = MapEntry{}
-	mi := &file_proto_geode_proto_msgTypes[24]
+	mi := &file_proto_geode_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2430,7 +2574,7 @@ func (x *MapEntry) String() string {
 func (*MapEntry) ProtoMessage() {}
 
 func (x *MapEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[24]
+	mi := &file_proto_geode_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2443,7 +2587,7 @@ func (x *MapEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MapEntry.ProtoReflect.Descriptor instead.
 func (*MapEntry) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{24}
+	return file_proto_geode_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *MapEntry) GetKey() string {
@@ -2469,7 +2613,7 @@ type MapValue struct {
 
 func (x *MapValue) Reset() {
 	*x = MapValue{}
-	mi := &file_proto_geode_proto_msgTypes[25]
+	mi := &file_proto_geode_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2481,7 +2625,7 @@ func (x *MapValue) String() string {
 func (*MapValue) ProtoMessage() {}
 
 func (x *MapValue) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[25]
+	mi := &file_proto_geode_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2494,7 +2638,7 @@ func (x *MapValue) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MapValue.ProtoReflect.Descriptor instead.
 func (*MapValue) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{25}
+	return file_proto_geode_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *MapValue) GetEntries() []*MapEntry {
@@ -2515,7 +2659,7 @@ type NodeValue struct {
 
 func (x *NodeValue) Reset() {
 	*x = NodeValue{}
-	mi := &file_proto_geode_proto_msgTypes[26]
+	mi := &file_proto_geode_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2527,7 +2671,7 @@ func (x *NodeValue) String() string {
 func (*NodeValue) ProtoMessage() {}
 
 func (x *NodeValue) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[26]
+	mi := &file_proto_geode_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2540,7 +2684,7 @@ func (x *NodeValue) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NodeValue.ProtoReflect.Descriptor instead.
 func (*NodeValue) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{26}
+	return file_proto_geode_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *NodeValue) GetId() uint64 {
@@ -2577,7 +2721,7 @@ type EdgeValue struct {
 
 func (x *EdgeValue) Reset() {
 	*x = EdgeValue{}
-	mi := &file_proto_geode_proto_msgTypes[27]
+	mi := &file_proto_geode_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2589,7 +2733,7 @@ func (x *EdgeValue) String() string {
 func (*EdgeValue) ProtoMessage() {}
 
 func (x *EdgeValue) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[27]
+	mi := &file_proto_geode_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2602,7 +2746,7 @@ func (x *EdgeValue) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EdgeValue.ProtoReflect.Descriptor instead.
 func (*EdgeValue) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{27}
+	return file_proto_geode_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *EdgeValue) GetId() uint64 {
@@ -2650,7 +2794,7 @@ type PathValue struct {
 
 func (x *PathValue) Reset() {
 	*x = PathValue{}
-	mi := &file_proto_geode_proto_msgTypes[28]
+	mi := &file_proto_geode_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2662,7 +2806,7 @@ func (x *PathValue) String() string {
 func (*PathValue) ProtoMessage() {}
 
 func (x *PathValue) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[28]
+	mi := &file_proto_geode_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2675,7 +2819,7 @@ func (x *PathValue) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PathValue.ProtoReflect.Descriptor instead.
 func (*PathValue) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{28}
+	return file_proto_geode_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *PathValue) GetNodes() []*NodeValue {
@@ -2709,7 +2853,7 @@ type ExtendedValue struct {
 
 func (x *ExtendedValue) Reset() {
 	*x = ExtendedValue{}
-	mi := &file_proto_geode_proto_msgTypes[29]
+	mi := &file_proto_geode_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2721,7 +2865,7 @@ func (x *ExtendedValue) String() string {
 func (*ExtendedValue) ProtoMessage() {}
 
 func (x *ExtendedValue) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[29]
+	mi := &file_proto_geode_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2734,7 +2878,7 @@ func (x *ExtendedValue) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExtendedValue.ProtoReflect.Descriptor instead.
 func (*ExtendedValue) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{29}
+	return file_proto_geode_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *ExtendedValue) GetTypeName() string {
@@ -2842,7 +2986,7 @@ type Error struct {
 
 func (x *Error) Reset() {
 	*x = Error{}
-	mi := &file_proto_geode_proto_msgTypes[30]
+	mi := &file_proto_geode_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2854,7 +2998,7 @@ func (x *Error) String() string {
 func (*Error) ProtoMessage() {}
 
 func (x *Error) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[30]
+	mi := &file_proto_geode_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2867,7 +3011,7 @@ func (x *Error) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Error.ProtoReflect.Descriptor instead.
 func (*Error) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{30}
+	return file_proto_geode_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *Error) GetCode() string {
@@ -2910,7 +3054,7 @@ type ExecutionMetrics struct {
 
 func (x *ExecutionMetrics) Reset() {
 	*x = ExecutionMetrics{}
-	mi := &file_proto_geode_proto_msgTypes[31]
+	mi := &file_proto_geode_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2922,7 +3066,7 @@ func (x *ExecutionMetrics) String() string {
 func (*ExecutionMetrics) ProtoMessage() {}
 
 func (x *ExecutionMetrics) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[31]
+	mi := &file_proto_geode_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2935,7 +3079,7 @@ func (x *ExecutionMetrics) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecutionMetrics.ProtoReflect.Descriptor instead.
 func (*ExecutionMetrics) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{31}
+	return file_proto_geode_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *ExecutionMetrics) GetParseDurationNs() int64 {
@@ -2978,7 +3122,7 @@ type ExplainOp struct {
 
 func (x *ExplainOp) Reset() {
 	*x = ExplainOp{}
-	mi := &file_proto_geode_proto_msgTypes[32]
+	mi := &file_proto_geode_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2990,7 +3134,7 @@ func (x *ExplainOp) String() string {
 func (*ExplainOp) ProtoMessage() {}
 
 func (x *ExplainOp) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[32]
+	mi := &file_proto_geode_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3003,7 +3147,7 @@ func (x *ExplainOp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExplainOp.ProtoReflect.Descriptor instead.
 func (*ExplainOp) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{32}
+	return file_proto_geode_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *ExplainOp) GetIdx() uint32 {
@@ -3044,7 +3188,7 @@ type ExplainTotals struct {
 
 func (x *ExplainTotals) Reset() {
 	*x = ExplainTotals{}
-	mi := &file_proto_geode_proto_msgTypes[33]
+	mi := &file_proto_geode_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3056,7 +3200,7 @@ func (x *ExplainTotals) String() string {
 func (*ExplainTotals) ProtoMessage() {}
 
 func (x *ExplainTotals) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[33]
+	mi := &file_proto_geode_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3069,7 +3213,7 @@ func (x *ExplainTotals) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExplainTotals.ProtoReflect.Descriptor instead.
 func (*ExplainTotals) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{33}
+	return file_proto_geode_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *ExplainTotals) GetEstRows() int64 {
@@ -3100,7 +3244,7 @@ type ExplainProperties struct {
 
 func (x *ExplainProperties) Reset() {
 	*x = ExplainProperties{}
-	mi := &file_proto_geode_proto_msgTypes[34]
+	mi := &file_proto_geode_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3112,7 +3256,7 @@ func (x *ExplainProperties) String() string {
 func (*ExplainProperties) ProtoMessage() {}
 
 func (x *ExplainProperties) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[34]
+	mi := &file_proto_geode_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3125,7 +3269,7 @@ func (x *ExplainProperties) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExplainProperties.ProtoReflect.Descriptor instead.
 func (*ExplainProperties) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{34}
+	return file_proto_geode_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *ExplainProperties) GetOrdered() bool {
@@ -3181,7 +3325,7 @@ type ExplainCalibrationEntry struct {
 
 func (x *ExplainCalibrationEntry) Reset() {
 	*x = ExplainCalibrationEntry{}
-	mi := &file_proto_geode_proto_msgTypes[35]
+	mi := &file_proto_geode_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3193,7 +3337,7 @@ func (x *ExplainCalibrationEntry) String() string {
 func (*ExplainCalibrationEntry) ProtoMessage() {}
 
 func (x *ExplainCalibrationEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[35]
+	mi := &file_proto_geode_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3206,7 +3350,7 @@ func (x *ExplainCalibrationEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExplainCalibrationEntry.ProtoReflect.Descriptor instead.
 func (*ExplainCalibrationEntry) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{35}
+	return file_proto_geode_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *ExplainCalibrationEntry) GetIdx() uint32 {
@@ -3240,7 +3384,7 @@ type ExplainCalibration struct {
 
 func (x *ExplainCalibration) Reset() {
 	*x = ExplainCalibration{}
-	mi := &file_proto_geode_proto_msgTypes[36]
+	mi := &file_proto_geode_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3252,7 +3396,7 @@ func (x *ExplainCalibration) String() string {
 func (*ExplainCalibration) ProtoMessage() {}
 
 func (x *ExplainCalibration) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[36]
+	mi := &file_proto_geode_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3265,7 +3409,7 @@ func (x *ExplainCalibration) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExplainCalibration.ProtoReflect.Descriptor instead.
 func (*ExplainCalibration) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{36}
+	return file_proto_geode_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *ExplainCalibration) GetMape() float64 {
@@ -3296,7 +3440,7 @@ type ExplainPayload struct {
 
 func (x *ExplainPayload) Reset() {
 	*x = ExplainPayload{}
-	mi := &file_proto_geode_proto_msgTypes[37]
+	mi := &file_proto_geode_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3308,7 +3452,7 @@ func (x *ExplainPayload) String() string {
 func (*ExplainPayload) ProtoMessage() {}
 
 func (x *ExplainPayload) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[37]
+	mi := &file_proto_geode_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3321,7 +3465,7 @@ func (x *ExplainPayload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExplainPayload.ProtoReflect.Descriptor instead.
 func (*ExplainPayload) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{37}
+	return file_proto_geode_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *ExplainPayload) GetSchema() string {
@@ -3395,7 +3539,7 @@ type ProfileOp struct {
 
 func (x *ProfileOp) Reset() {
 	*x = ProfileOp{}
-	mi := &file_proto_geode_proto_msgTypes[38]
+	mi := &file_proto_geode_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3407,7 +3551,7 @@ func (x *ProfileOp) String() string {
 func (*ProfileOp) ProtoMessage() {}
 
 func (x *ProfileOp) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[38]
+	mi := &file_proto_geode_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3420,7 +3564,7 @@ func (x *ProfileOp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProfileOp.ProtoReflect.Descriptor instead.
 func (*ProfileOp) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{38}
+	return file_proto_geode_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *ProfileOp) GetOp() string {
@@ -3580,7 +3724,7 @@ type ProfilePeakContributor struct {
 
 func (x *ProfilePeakContributor) Reset() {
 	*x = ProfilePeakContributor{}
-	mi := &file_proto_geode_proto_msgTypes[39]
+	mi := &file_proto_geode_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3592,7 +3736,7 @@ func (x *ProfilePeakContributor) String() string {
 func (*ProfilePeakContributor) ProtoMessage() {}
 
 func (x *ProfilePeakContributor) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[39]
+	mi := &file_proto_geode_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3605,7 +3749,7 @@ func (x *ProfilePeakContributor) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProfilePeakContributor.ProtoReflect.Descriptor instead.
 func (*ProfilePeakContributor) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{39}
+	return file_proto_geode_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *ProfilePeakContributor) GetOp() string {
@@ -3632,7 +3776,7 @@ type ProfileTotals struct {
 
 func (x *ProfileTotals) Reset() {
 	*x = ProfileTotals{}
-	mi := &file_proto_geode_proto_msgTypes[40]
+	mi := &file_proto_geode_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3644,7 +3788,7 @@ func (x *ProfileTotals) String() string {
 func (*ProfileTotals) ProtoMessage() {}
 
 func (x *ProfileTotals) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[40]
+	mi := &file_proto_geode_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3657,7 +3801,7 @@ func (x *ProfileTotals) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProfileTotals.ProtoReflect.Descriptor instead.
 func (*ProfileTotals) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{40}
+	return file_proto_geode_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *ProfileTotals) GetTimeNs() uint64 {
@@ -3688,7 +3832,7 @@ type ProfileSpills struct {
 
 func (x *ProfileSpills) Reset() {
 	*x = ProfileSpills{}
-	mi := &file_proto_geode_proto_msgTypes[41]
+	mi := &file_proto_geode_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3700,7 +3844,7 @@ func (x *ProfileSpills) String() string {
 func (*ProfileSpills) ProtoMessage() {}
 
 func (x *ProfileSpills) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[41]
+	mi := &file_proto_geode_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3713,7 +3857,7 @@ func (x *ProfileSpills) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProfileSpills.ProtoReflect.Descriptor instead.
 func (*ProfileSpills) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{41}
+	return file_proto_geode_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *ProfileSpills) GetSortSpills() uint64 {
@@ -3769,7 +3913,7 @@ type ProfileMemory struct {
 
 func (x *ProfileMemory) Reset() {
 	*x = ProfileMemory{}
-	mi := &file_proto_geode_proto_msgTypes[42]
+	mi := &file_proto_geode_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3781,7 +3925,7 @@ func (x *ProfileMemory) String() string {
 func (*ProfileMemory) ProtoMessage() {}
 
 func (x *ProfileMemory) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[42]
+	mi := &file_proto_geode_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3794,7 +3938,7 @@ func (x *ProfileMemory) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProfileMemory.ProtoReflect.Descriptor instead.
 func (*ProfileMemory) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{42}
+	return file_proto_geode_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *ProfileMemory) GetNetBytes() uint64 {
@@ -3835,7 +3979,7 @@ type ProfilePlannerEstimates struct {
 
 func (x *ProfilePlannerEstimates) Reset() {
 	*x = ProfilePlannerEstimates{}
-	mi := &file_proto_geode_proto_msgTypes[43]
+	mi := &file_proto_geode_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3847,7 +3991,7 @@ func (x *ProfilePlannerEstimates) String() string {
 func (*ProfilePlannerEstimates) ProtoMessage() {}
 
 func (x *ProfilePlannerEstimates) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[43]
+	mi := &file_proto_geode_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3860,7 +4004,7 @@ func (x *ProfilePlannerEstimates) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProfilePlannerEstimates.ProtoReflect.Descriptor instead.
 func (*ProfilePlannerEstimates) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{43}
+	return file_proto_geode_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *ProfilePlannerEstimates) GetSumEstimateBytes() uint64 {
@@ -3936,7 +4080,7 @@ type ProfileMemCurvePoint struct {
 
 func (x *ProfileMemCurvePoint) Reset() {
 	*x = ProfileMemCurvePoint{}
-	mi := &file_proto_geode_proto_msgTypes[44]
+	mi := &file_proto_geode_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3948,7 +4092,7 @@ func (x *ProfileMemCurvePoint) String() string {
 func (*ProfileMemCurvePoint) ProtoMessage() {}
 
 func (x *ProfileMemCurvePoint) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[44]
+	mi := &file_proto_geode_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3961,7 +4105,7 @@ func (x *ProfileMemCurvePoint) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProfileMemCurvePoint.ProtoReflect.Descriptor instead.
 func (*ProfileMemCurvePoint) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{44}
+	return file_proto_geode_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *ProfileMemCurvePoint) GetOpIndex() uint32 {
@@ -3992,7 +4136,7 @@ type ProfileSetOp struct {
 
 func (x *ProfileSetOp) Reset() {
 	*x = ProfileSetOp{}
-	mi := &file_proto_geode_proto_msgTypes[45]
+	mi := &file_proto_geode_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4004,7 +4148,7 @@ func (x *ProfileSetOp) String() string {
 func (*ProfileSetOp) ProtoMessage() {}
 
 func (x *ProfileSetOp) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[45]
+	mi := &file_proto_geode_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4017,7 +4161,7 @@ func (x *ProfileSetOp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProfileSetOp.ProtoReflect.Descriptor instead.
 func (*ProfileSetOp) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{45}
+	return file_proto_geode_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *ProfileSetOp) GetType() string {
@@ -4088,7 +4232,7 @@ type ProfilePayload struct {
 
 func (x *ProfilePayload) Reset() {
 	*x = ProfilePayload{}
-	mi := &file_proto_geode_proto_msgTypes[46]
+	mi := &file_proto_geode_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4100,7 +4244,7 @@ func (x *ProfilePayload) String() string {
 func (*ProfilePayload) ProtoMessage() {}
 
 func (x *ProfilePayload) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[46]
+	mi := &file_proto_geode_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4113,7 +4257,7 @@ func (x *ProfilePayload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProfilePayload.ProtoReflect.Descriptor instead.
 func (*ProfilePayload) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{46}
+	return file_proto_geode_proto_rawDescGZIP(), []int{47}
 }
 
 func (x *ProfilePayload) GetProfileVersion() uint32 {
@@ -4250,7 +4394,7 @@ type Heartbeat struct {
 
 func (x *Heartbeat) Reset() {
 	*x = Heartbeat{}
-	mi := &file_proto_geode_proto_msgTypes[47]
+	mi := &file_proto_geode_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4262,7 +4406,7 @@ func (x *Heartbeat) String() string {
 func (*Heartbeat) ProtoMessage() {}
 
 func (x *Heartbeat) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[47]
+	mi := &file_proto_geode_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4275,7 +4419,7 @@ func (x *Heartbeat) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Heartbeat.ProtoReflect.Descriptor instead.
 func (*Heartbeat) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{47}
+	return file_proto_geode_proto_rawDescGZIP(), []int{48}
 }
 
 // ============================================================================
@@ -4289,7 +4433,7 @@ type PingRequest struct {
 
 func (x *PingRequest) Reset() {
 	*x = PingRequest{}
-	mi := &file_proto_geode_proto_msgTypes[48]
+	mi := &file_proto_geode_proto_msgTypes[49]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4301,7 +4445,7 @@ func (x *PingRequest) String() string {
 func (*PingRequest) ProtoMessage() {}
 
 func (x *PingRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[48]
+	mi := &file_proto_geode_proto_msgTypes[49]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4314,7 +4458,7 @@ func (x *PingRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PingRequest.ProtoReflect.Descriptor instead.
 func (*PingRequest) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{48}
+	return file_proto_geode_proto_rawDescGZIP(), []int{49}
 }
 
 type PingResponse struct {
@@ -4326,7 +4470,7 @@ type PingResponse struct {
 
 func (x *PingResponse) Reset() {
 	*x = PingResponse{}
-	mi := &file_proto_geode_proto_msgTypes[49]
+	mi := &file_proto_geode_proto_msgTypes[50]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4338,7 +4482,7 @@ func (x *PingResponse) String() string {
 func (*PingResponse) ProtoMessage() {}
 
 func (x *PingResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[49]
+	mi := &file_proto_geode_proto_msgTypes[50]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4351,7 +4495,7 @@ func (x *PingResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PingResponse.ProtoReflect.Descriptor instead.
 func (*PingResponse) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{49}
+	return file_proto_geode_proto_rawDescGZIP(), []int{50}
 }
 
 func (x *PingResponse) GetOk() bool {
@@ -4374,7 +4518,7 @@ type BeginRequest struct {
 
 func (x *BeginRequest) Reset() {
 	*x = BeginRequest{}
-	mi := &file_proto_geode_proto_msgTypes[50]
+	mi := &file_proto_geode_proto_msgTypes[51]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4386,7 +4530,7 @@ func (x *BeginRequest) String() string {
 func (*BeginRequest) ProtoMessage() {}
 
 func (x *BeginRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[50]
+	mi := &file_proto_geode_proto_msgTypes[51]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4399,7 +4543,7 @@ func (x *BeginRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BeginRequest.ProtoReflect.Descriptor instead.
 func (*BeginRequest) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{50}
+	return file_proto_geode_proto_rawDescGZIP(), []int{51}
 }
 
 func (x *BeginRequest) GetReadOnly() bool {
@@ -4426,7 +4570,7 @@ type BeginResponse struct {
 
 func (x *BeginResponse) Reset() {
 	*x = BeginResponse{}
-	mi := &file_proto_geode_proto_msgTypes[51]
+	mi := &file_proto_geode_proto_msgTypes[52]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4438,7 +4582,7 @@ func (x *BeginResponse) String() string {
 func (*BeginResponse) ProtoMessage() {}
 
 func (x *BeginResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[51]
+	mi := &file_proto_geode_proto_msgTypes[52]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4451,7 +4595,7 @@ func (x *BeginResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BeginResponse.ProtoReflect.Descriptor instead.
 func (*BeginResponse) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{51}
+	return file_proto_geode_proto_rawDescGZIP(), []int{52}
 }
 
 func (x *BeginResponse) GetSessionId() string {
@@ -4477,7 +4621,7 @@ type CommitRequest struct {
 
 func (x *CommitRequest) Reset() {
 	*x = CommitRequest{}
-	mi := &file_proto_geode_proto_msgTypes[52]
+	mi := &file_proto_geode_proto_msgTypes[53]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4489,7 +4633,7 @@ func (x *CommitRequest) String() string {
 func (*CommitRequest) ProtoMessage() {}
 
 func (x *CommitRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[52]
+	mi := &file_proto_geode_proto_msgTypes[53]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4502,7 +4646,7 @@ func (x *CommitRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommitRequest.ProtoReflect.Descriptor instead.
 func (*CommitRequest) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{52}
+	return file_proto_geode_proto_rawDescGZIP(), []int{53}
 }
 
 func (x *CommitRequest) GetSessionId() string {
@@ -4513,15 +4657,18 @@ func (x *CommitRequest) GetSessionId() string {
 }
 
 type CommitResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Success bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	// SONNY-3348 (round 19): why it failed (40000: rolled back; 40003: the
+	// rollback could not undo every change). Unset on success.
+	Error         *Error `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CommitResponse) Reset() {
 	*x = CommitResponse{}
-	mi := &file_proto_geode_proto_msgTypes[53]
+	mi := &file_proto_geode_proto_msgTypes[54]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4533,7 +4680,7 @@ func (x *CommitResponse) String() string {
 func (*CommitResponse) ProtoMessage() {}
 
 func (x *CommitResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[53]
+	mi := &file_proto_geode_proto_msgTypes[54]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4546,7 +4693,7 @@ func (x *CommitResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommitResponse.ProtoReflect.Descriptor instead.
 func (*CommitResponse) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{53}
+	return file_proto_geode_proto_rawDescGZIP(), []int{54}
 }
 
 func (x *CommitResponse) GetSuccess() bool {
@@ -4554,6 +4701,13 @@ func (x *CommitResponse) GetSuccess() bool {
 		return x.Success
 	}
 	return false
+}
+
+func (x *CommitResponse) GetError() *Error {
+	if x != nil {
+		return x.Error
+	}
+	return nil
 }
 
 type RollbackRequest struct {
@@ -4565,7 +4719,7 @@ type RollbackRequest struct {
 
 func (x *RollbackRequest) Reset() {
 	*x = RollbackRequest{}
-	mi := &file_proto_geode_proto_msgTypes[54]
+	mi := &file_proto_geode_proto_msgTypes[55]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4577,7 +4731,7 @@ func (x *RollbackRequest) String() string {
 func (*RollbackRequest) ProtoMessage() {}
 
 func (x *RollbackRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[54]
+	mi := &file_proto_geode_proto_msgTypes[55]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4590,7 +4744,7 @@ func (x *RollbackRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RollbackRequest.ProtoReflect.Descriptor instead.
 func (*RollbackRequest) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{54}
+	return file_proto_geode_proto_rawDescGZIP(), []int{55}
 }
 
 func (x *RollbackRequest) GetSessionId() string {
@@ -4601,15 +4755,18 @@ func (x *RollbackRequest) GetSessionId() string {
 }
 
 type RollbackResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Success bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	// SONNY-3348 (round 19): why it failed (40000: rolled back; 40003: the
+	// rollback could not undo every change). Unset on success.
+	Error         *Error `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *RollbackResponse) Reset() {
 	*x = RollbackResponse{}
-	mi := &file_proto_geode_proto_msgTypes[55]
+	mi := &file_proto_geode_proto_msgTypes[56]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4621,7 +4778,7 @@ func (x *RollbackResponse) String() string {
 func (*RollbackResponse) ProtoMessage() {}
 
 func (x *RollbackResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[55]
+	mi := &file_proto_geode_proto_msgTypes[56]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4634,7 +4791,7 @@ func (x *RollbackResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RollbackResponse.ProtoReflect.Descriptor instead.
 func (*RollbackResponse) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{55}
+	return file_proto_geode_proto_rawDescGZIP(), []int{56}
 }
 
 func (x *RollbackResponse) GetSuccess() bool {
@@ -4642,6 +4799,13 @@ func (x *RollbackResponse) GetSuccess() bool {
 		return x.Success
 	}
 	return false
+}
+
+func (x *RollbackResponse) GetError() *Error {
+	if x != nil {
+		return x.Error
+	}
+	return nil
 }
 
 type SavepointRequest struct {
@@ -4654,7 +4818,7 @@ type SavepointRequest struct {
 
 func (x *SavepointRequest) Reset() {
 	*x = SavepointRequest{}
-	mi := &file_proto_geode_proto_msgTypes[56]
+	mi := &file_proto_geode_proto_msgTypes[57]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4666,7 +4830,7 @@ func (x *SavepointRequest) String() string {
 func (*SavepointRequest) ProtoMessage() {}
 
 func (x *SavepointRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[56]
+	mi := &file_proto_geode_proto_msgTypes[57]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4679,7 +4843,7 @@ func (x *SavepointRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SavepointRequest.ProtoReflect.Descriptor instead.
 func (*SavepointRequest) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{56}
+	return file_proto_geode_proto_rawDescGZIP(), []int{57}
 }
 
 func (x *SavepointRequest) GetName() string {
@@ -4705,7 +4869,7 @@ type SavepointResponse struct {
 
 func (x *SavepointResponse) Reset() {
 	*x = SavepointResponse{}
-	mi := &file_proto_geode_proto_msgTypes[57]
+	mi := &file_proto_geode_proto_msgTypes[58]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4717,7 +4881,7 @@ func (x *SavepointResponse) String() string {
 func (*SavepointResponse) ProtoMessage() {}
 
 func (x *SavepointResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[57]
+	mi := &file_proto_geode_proto_msgTypes[58]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4730,7 +4894,7 @@ func (x *SavepointResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SavepointResponse.ProtoReflect.Descriptor instead.
 func (*SavepointResponse) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{57}
+	return file_proto_geode_proto_rawDescGZIP(), []int{58}
 }
 
 func (x *SavepointResponse) GetSuccess() bool {
@@ -4750,7 +4914,7 @@ type RollbackToRequest struct {
 
 func (x *RollbackToRequest) Reset() {
 	*x = RollbackToRequest{}
-	mi := &file_proto_geode_proto_msgTypes[58]
+	mi := &file_proto_geode_proto_msgTypes[59]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4762,7 +4926,7 @@ func (x *RollbackToRequest) String() string {
 func (*RollbackToRequest) ProtoMessage() {}
 
 func (x *RollbackToRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[58]
+	mi := &file_proto_geode_proto_msgTypes[59]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4775,7 +4939,7 @@ func (x *RollbackToRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RollbackToRequest.ProtoReflect.Descriptor instead.
 func (*RollbackToRequest) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{58}
+	return file_proto_geode_proto_rawDescGZIP(), []int{59}
 }
 
 func (x *RollbackToRequest) GetName() string {
@@ -4801,7 +4965,7 @@ type RollbackToResponse struct {
 
 func (x *RollbackToResponse) Reset() {
 	*x = RollbackToResponse{}
-	mi := &file_proto_geode_proto_msgTypes[59]
+	mi := &file_proto_geode_proto_msgTypes[60]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4813,7 +4977,7 @@ func (x *RollbackToResponse) String() string {
 func (*RollbackToResponse) ProtoMessage() {}
 
 func (x *RollbackToResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[59]
+	mi := &file_proto_geode_proto_msgTypes[60]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4826,7 +4990,7 @@ func (x *RollbackToResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RollbackToResponse.ProtoReflect.Descriptor instead.
 func (*RollbackToResponse) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{59}
+	return file_proto_geode_proto_rawDescGZIP(), []int{60}
 }
 
 func (x *RollbackToResponse) GetSuccess() bool {
@@ -4848,7 +5012,7 @@ type CdcDiagnosticsRequest struct {
 
 func (x *CdcDiagnosticsRequest) Reset() {
 	*x = CdcDiagnosticsRequest{}
-	mi := &file_proto_geode_proto_msgTypes[60]
+	mi := &file_proto_geode_proto_msgTypes[61]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4860,7 +5024,7 @@ func (x *CdcDiagnosticsRequest) String() string {
 func (*CdcDiagnosticsRequest) ProtoMessage() {}
 
 func (x *CdcDiagnosticsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[60]
+	mi := &file_proto_geode_proto_msgTypes[61]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4873,7 +5037,7 @@ func (x *CdcDiagnosticsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CdcDiagnosticsRequest.ProtoReflect.Descriptor instead.
 func (*CdcDiagnosticsRequest) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{60}
+	return file_proto_geode_proto_rawDescGZIP(), []int{61}
 }
 
 func (x *CdcDiagnosticsRequest) GetSessionId() string {
@@ -4899,7 +5063,7 @@ type CdcDiagnosticsConfig struct {
 
 func (x *CdcDiagnosticsConfig) Reset() {
 	*x = CdcDiagnosticsConfig{}
-	mi := &file_proto_geode_proto_msgTypes[61]
+	mi := &file_proto_geode_proto_msgTypes[62]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4911,7 +5075,7 @@ func (x *CdcDiagnosticsConfig) String() string {
 func (*CdcDiagnosticsConfig) ProtoMessage() {}
 
 func (x *CdcDiagnosticsConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[61]
+	mi := &file_proto_geode_proto_msgTypes[62]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4924,7 +5088,7 @@ func (x *CdcDiagnosticsConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CdcDiagnosticsConfig.ProtoReflect.Descriptor instead.
 func (*CdcDiagnosticsConfig) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{61}
+	return file_proto_geode_proto_rawDescGZIP(), []int{62}
 }
 
 func (x *CdcDiagnosticsConfig) GetEnabled() bool {
@@ -4997,7 +5161,7 @@ type CdcDiagnosticsEngine struct {
 
 func (x *CdcDiagnosticsEngine) Reset() {
 	*x = CdcDiagnosticsEngine{}
-	mi := &file_proto_geode_proto_msgTypes[62]
+	mi := &file_proto_geode_proto_msgTypes[63]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5009,7 +5173,7 @@ func (x *CdcDiagnosticsEngine) String() string {
 func (*CdcDiagnosticsEngine) ProtoMessage() {}
 
 func (x *CdcDiagnosticsEngine) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[62]
+	mi := &file_proto_geode_proto_msgTypes[63]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5022,7 +5186,7 @@ func (x *CdcDiagnosticsEngine) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CdcDiagnosticsEngine.ProtoReflect.Descriptor instead.
 func (*CdcDiagnosticsEngine) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{62}
+	return file_proto_geode_proto_rawDescGZIP(), []int{63}
 }
 
 func (x *CdcDiagnosticsEngine) GetIsRunning() bool {
@@ -5077,7 +5241,7 @@ type CdcMalformedSnapshot struct {
 
 func (x *CdcMalformedSnapshot) Reset() {
 	*x = CdcMalformedSnapshot{}
-	mi := &file_proto_geode_proto_msgTypes[63]
+	mi := &file_proto_geode_proto_msgTypes[64]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5089,7 +5253,7 @@ func (x *CdcMalformedSnapshot) String() string {
 func (*CdcMalformedSnapshot) ProtoMessage() {}
 
 func (x *CdcMalformedSnapshot) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[63]
+	mi := &file_proto_geode_proto_msgTypes[64]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5102,7 +5266,7 @@ func (x *CdcMalformedSnapshot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CdcMalformedSnapshot.ProtoReflect.Descriptor instead.
 func (*CdcMalformedSnapshot) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{63}
+	return file_proto_geode_proto_rawDescGZIP(), []int{64}
 }
 
 func (x *CdcMalformedSnapshot) GetCount() uint64 {
@@ -5131,7 +5295,7 @@ type CdcMalformedHash struct {
 
 func (x *CdcMalformedHash) Reset() {
 	*x = CdcMalformedHash{}
-	mi := &file_proto_geode_proto_msgTypes[64]
+	mi := &file_proto_geode_proto_msgTypes[65]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5143,7 +5307,7 @@ func (x *CdcMalformedHash) String() string {
 func (*CdcMalformedHash) ProtoMessage() {}
 
 func (x *CdcMalformedHash) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[64]
+	mi := &file_proto_geode_proto_msgTypes[65]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5156,7 +5320,7 @@ func (x *CdcMalformedHash) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CdcMalformedHash.ProtoReflect.Descriptor instead.
 func (*CdcMalformedHash) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{64}
+	return file_proto_geode_proto_rawDescGZIP(), []int{65}
 }
 
 func (x *CdcMalformedHash) GetCount() uint64 {
@@ -5211,7 +5375,7 @@ type CdcDiagnosticsResponse struct {
 
 func (x *CdcDiagnosticsResponse) Reset() {
 	*x = CdcDiagnosticsResponse{}
-	mi := &file_proto_geode_proto_msgTypes[65]
+	mi := &file_proto_geode_proto_msgTypes[66]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5223,7 +5387,7 @@ func (x *CdcDiagnosticsResponse) String() string {
 func (*CdcDiagnosticsResponse) ProtoMessage() {}
 
 func (x *CdcDiagnosticsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[65]
+	mi := &file_proto_geode_proto_msgTypes[66]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5236,7 +5400,7 @@ func (x *CdcDiagnosticsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CdcDiagnosticsResponse.ProtoReflect.Descriptor instead.
 func (*CdcDiagnosticsResponse) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{65}
+	return file_proto_geode_proto_rawDescGZIP(), []int{66}
 }
 
 func (x *CdcDiagnosticsResponse) GetMalformedChangeRecords() uint64 {
@@ -5361,7 +5525,7 @@ type CdcControlRequest struct {
 
 func (x *CdcControlRequest) Reset() {
 	*x = CdcControlRequest{}
-	mi := &file_proto_geode_proto_msgTypes[66]
+	mi := &file_proto_geode_proto_msgTypes[67]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5373,7 +5537,7 @@ func (x *CdcControlRequest) String() string {
 func (*CdcControlRequest) ProtoMessage() {}
 
 func (x *CdcControlRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[66]
+	mi := &file_proto_geode_proto_msgTypes[67]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5386,7 +5550,7 @@ func (x *CdcControlRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CdcControlRequest.ProtoReflect.Descriptor instead.
 func (*CdcControlRequest) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{66}
+	return file_proto_geode_proto_rawDescGZIP(), []int{67}
 }
 
 func (x *CdcControlRequest) GetAction() string {
@@ -5414,7 +5578,7 @@ type CdcControlResponse struct {
 
 func (x *CdcControlResponse) Reset() {
 	*x = CdcControlResponse{}
-	mi := &file_proto_geode_proto_msgTypes[67]
+	mi := &file_proto_geode_proto_msgTypes[68]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5426,7 +5590,7 @@ func (x *CdcControlResponse) String() string {
 func (*CdcControlResponse) ProtoMessage() {}
 
 func (x *CdcControlResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[67]
+	mi := &file_proto_geode_proto_msgTypes[68]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5439,7 +5603,7 @@ func (x *CdcControlResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CdcControlResponse.ProtoReflect.Descriptor instead.
 func (*CdcControlResponse) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{67}
+	return file_proto_geode_proto_rawDescGZIP(), []int{68}
 }
 
 func (x *CdcControlResponse) GetSuccess() bool {
@@ -5477,7 +5641,7 @@ type BackupRequest struct {
 
 func (x *BackupRequest) Reset() {
 	*x = BackupRequest{}
-	mi := &file_proto_geode_proto_msgTypes[68]
+	mi := &file_proto_geode_proto_msgTypes[69]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5489,7 +5653,7 @@ func (x *BackupRequest) String() string {
 func (*BackupRequest) ProtoMessage() {}
 
 func (x *BackupRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[68]
+	mi := &file_proto_geode_proto_msgTypes[69]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5502,7 +5666,7 @@ func (x *BackupRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BackupRequest.ProtoReflect.Descriptor instead.
 func (*BackupRequest) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{68}
+	return file_proto_geode_proto_rawDescGZIP(), []int{69}
 }
 
 func (x *BackupRequest) GetBackupType() string {
@@ -5541,7 +5705,7 @@ type BackupResponse struct {
 
 func (x *BackupResponse) Reset() {
 	*x = BackupResponse{}
-	mi := &file_proto_geode_proto_msgTypes[69]
+	mi := &file_proto_geode_proto_msgTypes[70]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5553,7 +5717,7 @@ func (x *BackupResponse) String() string {
 func (*BackupResponse) ProtoMessage() {}
 
 func (x *BackupResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[69]
+	mi := &file_proto_geode_proto_msgTypes[70]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5566,7 +5730,7 @@ func (x *BackupResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BackupResponse.ProtoReflect.Descriptor instead.
 func (*BackupResponse) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{69}
+	return file_proto_geode_proto_rawDescGZIP(), []int{70}
 }
 
 func (x *BackupResponse) GetSuccess() bool {
@@ -5629,7 +5793,7 @@ type RestoreRequest struct {
 
 func (x *RestoreRequest) Reset() {
 	*x = RestoreRequest{}
-	mi := &file_proto_geode_proto_msgTypes[70]
+	mi := &file_proto_geode_proto_msgTypes[71]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5641,7 +5805,7 @@ func (x *RestoreRequest) String() string {
 func (*RestoreRequest) ProtoMessage() {}
 
 func (x *RestoreRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[70]
+	mi := &file_proto_geode_proto_msgTypes[71]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5654,7 +5818,7 @@ func (x *RestoreRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RestoreRequest.ProtoReflect.Descriptor instead.
 func (*RestoreRequest) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{70}
+	return file_proto_geode_proto_rawDescGZIP(), []int{71}
 }
 
 func (x *RestoreRequest) GetTargetTime() string {
@@ -5691,7 +5855,7 @@ type RestoreResponse struct {
 
 func (x *RestoreResponse) Reset() {
 	*x = RestoreResponse{}
-	mi := &file_proto_geode_proto_msgTypes[71]
+	mi := &file_proto_geode_proto_msgTypes[72]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5703,7 +5867,7 @@ func (x *RestoreResponse) String() string {
 func (*RestoreResponse) ProtoMessage() {}
 
 func (x *RestoreResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[71]
+	mi := &file_proto_geode_proto_msgTypes[72]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5716,7 +5880,7 @@ func (x *RestoreResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RestoreResponse.ProtoReflect.Descriptor instead.
 func (*RestoreResponse) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{71}
+	return file_proto_geode_proto_rawDescGZIP(), []int{72}
 }
 
 func (x *RestoreResponse) GetSuccess() bool {
@@ -5768,7 +5932,7 @@ type UploadBackupRequest struct {
 
 func (x *UploadBackupRequest) Reset() {
 	*x = UploadBackupRequest{}
-	mi := &file_proto_geode_proto_msgTypes[72]
+	mi := &file_proto_geode_proto_msgTypes[73]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5780,7 +5944,7 @@ func (x *UploadBackupRequest) String() string {
 func (*UploadBackupRequest) ProtoMessage() {}
 
 func (x *UploadBackupRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[72]
+	mi := &file_proto_geode_proto_msgTypes[73]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5793,7 +5957,7 @@ func (x *UploadBackupRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UploadBackupRequest.ProtoReflect.Descriptor instead.
 func (*UploadBackupRequest) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{72}
+	return file_proto_geode_proto_rawDescGZIP(), []int{73}
 }
 
 func (x *UploadBackupRequest) GetSizeBytes() uint64 {
@@ -5835,7 +5999,7 @@ type UploadBackupResponse struct {
 
 func (x *UploadBackupResponse) Reset() {
 	*x = UploadBackupResponse{}
-	mi := &file_proto_geode_proto_msgTypes[73]
+	mi := &file_proto_geode_proto_msgTypes[74]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5847,7 +6011,7 @@ func (x *UploadBackupResponse) String() string {
 func (*UploadBackupResponse) ProtoMessage() {}
 
 func (x *UploadBackupResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_geode_proto_msgTypes[73]
+	mi := &file_proto_geode_proto_msgTypes[74]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5860,7 +6024,7 @@ func (x *UploadBackupResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UploadBackupResponse.ProtoReflect.Descriptor instead.
 func (*UploadBackupResponse) Descriptor() ([]byte, []int) {
-	return file_proto_geode_proto_rawDescGZIP(), []int{73}
+	return file_proto_geode_proto_rawDescGZIP(), []int{74}
 }
 
 func (x *UploadBackupResponse) GetSuccess() bool {
@@ -5884,6 +6048,117 @@ func (x *UploadBackupResponse) GetUploadPath() string {
 	return ""
 }
 
+// SONNY-1841: per-stream statement cancellation on the QUIC wire. Cancels the
+// in-flight statement on the target QUIC stream so it aborts and releases the
+// per-graph write lock instead of running to its ~120s deadline while the next
+// writer on another connection waits it out.
+type CancelRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Target QUIC stream id to cancel. 0 means "this stream" (self-cancel).
+	StreamId uint64 `protobuf:"varint,1,opt,name=stream_id,json=streamId,proto3" json:"stream_id,omitempty"`
+	// Optional session id, for parity/routing; ignored by the QUIC handler.
+	SessionId     string `protobuf:"bytes,2,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CancelRequest) Reset() {
+	*x = CancelRequest{}
+	mi := &file_proto_geode_proto_msgTypes[75]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CancelRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CancelRequest) ProtoMessage() {}
+
+func (x *CancelRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_geode_proto_msgTypes[75]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CancelRequest.ProtoReflect.Descriptor instead.
+func (*CancelRequest) Descriptor() ([]byte, []int) {
+	return file_proto_geode_proto_rawDescGZIP(), []int{75}
+}
+
+func (x *CancelRequest) GetStreamId() uint64 {
+	if x != nil {
+		return x.StreamId
+	}
+	return 0
+}
+
+func (x *CancelRequest) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+type CancelResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// True when a matching in-flight stream was found and its cancel flag set.
+	Cancelled     bool   `protobuf:"varint,1,opt,name=cancelled,proto3" json:"cancelled,omitempty"`
+	Message       string `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CancelResponse) Reset() {
+	*x = CancelResponse{}
+	mi := &file_proto_geode_proto_msgTypes[76]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CancelResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CancelResponse) ProtoMessage() {}
+
+func (x *CancelResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_geode_proto_msgTypes[76]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CancelResponse.ProtoReflect.Descriptor instead.
+func (*CancelResponse) Descriptor() ([]byte, []int) {
+	return file_proto_geode_proto_rawDescGZIP(), []int{76}
+}
+
+func (x *CancelResponse) GetCancelled() bool {
+	if x != nil {
+		return x.Cancelled
+	}
+	return false
+}
+
+func (x *CancelResponse) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
 var File_proto_geode_proto protoreflect.FileDescriptor
 
 const file_proto_geode_proto_rawDesc = "" +
@@ -5894,7 +6169,7 @@ const file_proto_geode_proto_rawDesc = "" +
 	"\x03msg\"E\n" +
 	"\fServerPacket\x12.\n" +
 	"\x04quic\x18\x01 \x01(\v2\x18.geode.QuicServerMessageH\x00R\x04quicB\x05\n" +
-	"\x03msg\"\xef\x05\n" +
+	"\x03msg\"\x9f\x06\n" +
 	"\x11QuicClientMessage\x12+\n" +
 	"\x05hello\x18\x01 \x01(\v2\x13.geode.HelloRequestH\x00R\x05hello\x121\n" +
 	"\aexecute\x18\x02 \x01(\v2\x15.geode.ExecuteRequestH\x00R\aexecute\x12(\n" +
@@ -5911,8 +6186,9 @@ const file_proto_geode_proto_rawDesc = "" +
 	"rollbackTo\x12.\n" +
 	"\x06backup\x18\f \x01(\v2\x14.geode.BackupRequestH\x00R\x06backup\x121\n" +
 	"\arestore\x18\r \x01(\v2\x15.geode.RestoreRequestH\x00R\arestore\x12A\n" +
-	"\rupload_backup\x18\x0e \x01(\v2\x1a.geode.UploadBackupRequestH\x00R\fuploadBackupB\x05\n" +
-	"\x03msg\"\xff\x05\n" +
+	"\rupload_backup\x18\x0e \x01(\v2\x1a.geode.UploadBackupRequestH\x00R\fuploadBackup\x12.\n" +
+	"\x06cancel\x18\x0f \x01(\v2\x14.geode.CancelRequestH\x00R\x06cancelB\x05\n" +
+	"\x03msg\"\xb0\x06\n" +
 	"\x11QuicServerMessage\x12,\n" +
 	"\x05hello\x18\x01 \x01(\v2\x14.geode.HelloResponseH\x00R\x05hello\x124\n" +
 	"\aexecute\x18\x02 \x01(\v2\x18.geode.ExecutionResponseH\x00R\aexecute\x12)\n" +
@@ -5929,7 +6205,8 @@ const file_proto_geode_proto_rawDesc = "" +
 	"rollbackTo\x12/\n" +
 	"\x06backup\x18\f \x01(\v2\x15.geode.BackupResponseH\x00R\x06backup\x122\n" +
 	"\arestore\x18\r \x01(\v2\x16.geode.RestoreResponseH\x00R\arestore\x12B\n" +
-	"\rupload_backup\x18\x0e \x01(\v2\x1b.geode.UploadBackupResponseH\x00R\fuploadBackupB\x05\n" +
+	"\rupload_backup\x18\x0e \x01(\v2\x1b.geode.UploadBackupResponseH\x00R\fuploadBackup\x12/\n" +
+	"\x06cancel\x18\x0f \x01(\v2\x15.geode.CancelResponseH\x00R\x06cancelB\x05\n" +
 	"\x03msg\"\xb4\x02\n" +
 	"\fHelloRequest\x12\x1a\n" +
 	"\busername\x18\x01 \x01(\tR\busername\x12\x1a\n" +
@@ -5992,14 +6269,23 @@ const file_proto_geode_proto_rawDesc = "" +
 	"\acolumns\x18\x01 \x03(\v2\x17.geode.ColumnDefinitionR\acolumns\":\n" +
 	"\x10ColumnDefinition\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
-	"\x04type\x18\x02 \x01(\tR\x04type\"y\n" +
+	"\x04type\x18\x02 \x01(\tR\x04type\"\xb3\x01\n" +
 	"\bDataPage\x12\x1e\n" +
 	"\x04rows\x18\x01 \x03(\v2\n" +
 	".geode.RowR\x04rows\x12\x14\n" +
 	"\x05final\x18\x02 \x01(\bR\x05final\x12\x18\n" +
 	"\aordered\x18\x03 \x01(\bR\aordered\x12\x1d\n" +
 	"\n" +
-	"order_keys\x18\x04 \x03(\tR\torderKeys\"+\n" +
+	"order_keys\x18\x04 \x03(\tR\torderKeys\x128\n" +
+	"\rupdate_counts\x18\x05 \x01(\v2\x13.geode.UpdateCountsR\fupdateCounts\"\xb3\x02\n" +
+	"\fUpdateCounts\x12#\n" +
+	"\rnodes_created\x18\x01 \x01(\x04R\fnodesCreated\x12#\n" +
+	"\rnodes_deleted\x18\x02 \x01(\x04R\fnodesDeleted\x123\n" +
+	"\x15relationships_created\x18\x03 \x01(\x04R\x14relationshipsCreated\x123\n" +
+	"\x15relationships_deleted\x18\x04 \x01(\x04R\x14relationshipsDeleted\x12%\n" +
+	"\x0eproperties_set\x18\x05 \x01(\x04R\rpropertiesSet\x12!\n" +
+	"\flabels_added\x18\x06 \x01(\x04R\vlabelsAdded\x12%\n" +
+	"\x0elabels_removed\x18\a \x01(\x04R\rlabelsRemoved\"+\n" +
 	"\x03Row\x12$\n" +
 	"\x06values\x18\x01 \x03(\v2\f.geode.ValueR\x06values\"\xf4\x04\n" +
 	"\x05Value\x12-\n" +
@@ -6225,14 +6511,16 @@ const file_proto_geode_proto_rawDesc = "" +
 	"\x05tx_id\x18\x02 \x01(\tR\x04txId\".\n" +
 	"\rCommitRequest\x12\x1d\n" +
 	"\n" +
-	"session_id\x18\x01 \x01(\tR\tsessionId\"*\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\"N\n" +
 	"\x0eCommitResponse\x12\x18\n" +
-	"\asuccess\x18\x01 \x01(\bR\asuccess\"0\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\"\n" +
+	"\x05error\x18\x02 \x01(\v2\f.geode.ErrorR\x05error\"0\n" +
 	"\x0fRollbackRequest\x12\x1d\n" +
 	"\n" +
-	"session_id\x18\x01 \x01(\tR\tsessionId\",\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\"P\n" +
 	"\x10RollbackResponse\x12\x18\n" +
-	"\asuccess\x18\x01 \x01(\bR\asuccess\"E\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\"\n" +
+	"\x05error\x18\x02 \x01(\v2\f.geode.ErrorR\x05error\"E\n" +
 	"\x10SavepointRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1d\n" +
 	"\n" +
@@ -6343,7 +6631,14 @@ const file_proto_geode_proto_rawDesc = "" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x12\x1f\n" +
 	"\vupload_path\x18\x03 \x01(\tR\n" +
-	"uploadPath*F\n" +
+	"uploadPath\"K\n" +
+	"\rCancelRequest\x12\x1b\n" +
+	"\tstream_id\x18\x01 \x01(\x04R\bstreamId\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x02 \x01(\tR\tsessionId\"H\n" +
+	"\x0eCancelResponse\x12\x1c\n" +
+	"\tcancelled\x18\x01 \x01(\bR\tcancelled\x12\x18\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage*F\n" +
 	"\aIntKind\x12\x18\n" +
 	"\x14INT_KIND_UNSPECIFIED\x10\x00\x12\a\n" +
 	"\x03INT\x10\x01\x12\f\n" +
@@ -6366,7 +6661,7 @@ const file_proto_geode_proto_rawDesc = "" +
 	"\tBytesKind\x12\x1a\n" +
 	"\x16BYTES_KIND_UNSPECIFIED\x10\x00\x12\t\n" +
 	"\x05BYTEA\x10\x01\x12\a\n" +
-	"\x03RAW\x10\x022\xf2\x03\n" +
+	"\x03RAW\x10\x022\xaf\x06\n" +
 	"\fGeodeService\x126\n" +
 	"\tHandshake\x12\x13.geode.HelloRequest\x1a\x14.geode.HelloResponse\x12<\n" +
 	"\aExecute\x12\x15.geode.ExecuteRequest\x1a\x18.geode.ExecutionResponse0\x01\x12/\n" +
@@ -6376,7 +6671,13 @@ const file_proto_geode_proto_rawDesc = "" +
 	"\bRollback\x12\x16.geode.RollbackRequest\x1a\x17.geode.RollbackResponse\x12P\n" +
 	"\x11GetCdcDiagnostics\x12\x1c.geode.CdcDiagnosticsRequest\x1a\x1d.geode.CdcDiagnosticsResponse\x12A\n" +
 	"\n" +
-	"ControlCdc\x12\x18.geode.CdcControlRequest\x1a\x19.geode.CdcControlResponseB\x19Z\x17geodedb.com/geode/protob\x06proto3"
+	"ControlCdc\x12\x18.geode.CdcControlRequest\x1a\x19.geode.CdcControlResponse\x12>\n" +
+	"\tSavepoint\x12\x17.geode.SavepointRequest\x1a\x18.geode.SavepointResponse\x12A\n" +
+	"\n" +
+	"RollbackTo\x12\x18.geode.RollbackToRequest\x1a\x19.geode.RollbackToResponse\x125\n" +
+	"\x06Backup\x12\x14.geode.BackupRequest\x1a\x15.geode.BackupResponse\x128\n" +
+	"\aRestore\x12\x15.geode.RestoreRequest\x1a\x16.geode.RestoreResponse\x12G\n" +
+	"\fUploadBackup\x12\x1a.geode.UploadBackupRequest\x1a\x1b.geode.UploadBackupResponseB\x19Z\x17geodedb.com/geode/protob\x06proto3"
 
 var (
 	file_proto_geode_proto_rawDescOnce sync.Once
@@ -6391,7 +6692,7 @@ func file_proto_geode_proto_rawDescGZIP() []byte {
 }
 
 var file_proto_geode_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_proto_geode_proto_msgTypes = make([]protoimpl.MessageInfo, 74)
+var file_proto_geode_proto_msgTypes = make([]protoimpl.MessageInfo, 77)
 var file_proto_geode_proto_goTypes = []any{
 	(IntKind)(0),                    // 0: geode.IntKind
 	(FloatKind)(0),                  // 1: geode.FloatKind
@@ -6412,172 +6713,190 @@ var file_proto_geode_proto_goTypes = []any{
 	(*SchemaDefinition)(nil),        // 16: geode.SchemaDefinition
 	(*ColumnDefinition)(nil),        // 17: geode.ColumnDefinition
 	(*DataPage)(nil),                // 18: geode.DataPage
-	(*Row)(nil),                     // 19: geode.Row
-	(*Value)(nil),                   // 20: geode.Value
-	(*NullValue)(nil),               // 21: geode.NullValue
-	(*IntValue)(nil),                // 22: geode.IntValue
-	(*DoubleValue)(nil),             // 23: geode.DoubleValue
-	(*StringValue)(nil),             // 24: geode.StringValue
-	(*DecimalValue)(nil),            // 25: geode.DecimalValue
-	(*BytesValue)(nil),              // 26: geode.BytesValue
-	(*ListValue)(nil),               // 27: geode.ListValue
-	(*MapEntry)(nil),                // 28: geode.MapEntry
-	(*MapValue)(nil),                // 29: geode.MapValue
-	(*NodeValue)(nil),               // 30: geode.NodeValue
-	(*EdgeValue)(nil),               // 31: geode.EdgeValue
-	(*PathValue)(nil),               // 32: geode.PathValue
-	(*ExtendedValue)(nil),           // 33: geode.ExtendedValue
-	(*Error)(nil),                   // 34: geode.Error
-	(*ExecutionMetrics)(nil),        // 35: geode.ExecutionMetrics
-	(*ExplainOp)(nil),               // 36: geode.ExplainOp
-	(*ExplainTotals)(nil),           // 37: geode.ExplainTotals
-	(*ExplainProperties)(nil),       // 38: geode.ExplainProperties
-	(*ExplainCalibrationEntry)(nil), // 39: geode.ExplainCalibrationEntry
-	(*ExplainCalibration)(nil),      // 40: geode.ExplainCalibration
-	(*ExplainPayload)(nil),          // 41: geode.ExplainPayload
-	(*ProfileOp)(nil),               // 42: geode.ProfileOp
-	(*ProfilePeakContributor)(nil),  // 43: geode.ProfilePeakContributor
-	(*ProfileTotals)(nil),           // 44: geode.ProfileTotals
-	(*ProfileSpills)(nil),           // 45: geode.ProfileSpills
-	(*ProfileMemory)(nil),           // 46: geode.ProfileMemory
-	(*ProfilePlannerEstimates)(nil), // 47: geode.ProfilePlannerEstimates
-	(*ProfileMemCurvePoint)(nil),    // 48: geode.ProfileMemCurvePoint
-	(*ProfileSetOp)(nil),            // 49: geode.ProfileSetOp
-	(*ProfilePayload)(nil),          // 50: geode.ProfilePayload
-	(*Heartbeat)(nil),               // 51: geode.Heartbeat
-	(*PingRequest)(nil),             // 52: geode.PingRequest
-	(*PingResponse)(nil),            // 53: geode.PingResponse
-	(*BeginRequest)(nil),            // 54: geode.BeginRequest
-	(*BeginResponse)(nil),           // 55: geode.BeginResponse
-	(*CommitRequest)(nil),           // 56: geode.CommitRequest
-	(*CommitResponse)(nil),          // 57: geode.CommitResponse
-	(*RollbackRequest)(nil),         // 58: geode.RollbackRequest
-	(*RollbackResponse)(nil),        // 59: geode.RollbackResponse
-	(*SavepointRequest)(nil),        // 60: geode.SavepointRequest
-	(*SavepointResponse)(nil),       // 61: geode.SavepointResponse
-	(*RollbackToRequest)(nil),       // 62: geode.RollbackToRequest
-	(*RollbackToResponse)(nil),      // 63: geode.RollbackToResponse
-	(*CdcDiagnosticsRequest)(nil),   // 64: geode.CdcDiagnosticsRequest
-	(*CdcDiagnosticsConfig)(nil),    // 65: geode.CdcDiagnosticsConfig
-	(*CdcDiagnosticsEngine)(nil),    // 66: geode.CdcDiagnosticsEngine
-	(*CdcMalformedSnapshot)(nil),    // 67: geode.CdcMalformedSnapshot
-	(*CdcMalformedHash)(nil),        // 68: geode.CdcMalformedHash
-	(*CdcDiagnosticsResponse)(nil),  // 69: geode.CdcDiagnosticsResponse
-	(*CdcControlRequest)(nil),       // 70: geode.CdcControlRequest
-	(*CdcControlResponse)(nil),      // 71: geode.CdcControlResponse
-	(*BackupRequest)(nil),           // 72: geode.BackupRequest
-	(*BackupResponse)(nil),          // 73: geode.BackupResponse
-	(*RestoreRequest)(nil),          // 74: geode.RestoreRequest
-	(*RestoreResponse)(nil),         // 75: geode.RestoreResponse
-	(*UploadBackupRequest)(nil),     // 76: geode.UploadBackupRequest
-	(*UploadBackupResponse)(nil),    // 77: geode.UploadBackupResponse
+	(*UpdateCounts)(nil),            // 19: geode.UpdateCounts
+	(*Row)(nil),                     // 20: geode.Row
+	(*Value)(nil),                   // 21: geode.Value
+	(*NullValue)(nil),               // 22: geode.NullValue
+	(*IntValue)(nil),                // 23: geode.IntValue
+	(*DoubleValue)(nil),             // 24: geode.DoubleValue
+	(*StringValue)(nil),             // 25: geode.StringValue
+	(*DecimalValue)(nil),            // 26: geode.DecimalValue
+	(*BytesValue)(nil),              // 27: geode.BytesValue
+	(*ListValue)(nil),               // 28: geode.ListValue
+	(*MapEntry)(nil),                // 29: geode.MapEntry
+	(*MapValue)(nil),                // 30: geode.MapValue
+	(*NodeValue)(nil),               // 31: geode.NodeValue
+	(*EdgeValue)(nil),               // 32: geode.EdgeValue
+	(*PathValue)(nil),               // 33: geode.PathValue
+	(*ExtendedValue)(nil),           // 34: geode.ExtendedValue
+	(*Error)(nil),                   // 35: geode.Error
+	(*ExecutionMetrics)(nil),        // 36: geode.ExecutionMetrics
+	(*ExplainOp)(nil),               // 37: geode.ExplainOp
+	(*ExplainTotals)(nil),           // 38: geode.ExplainTotals
+	(*ExplainProperties)(nil),       // 39: geode.ExplainProperties
+	(*ExplainCalibrationEntry)(nil), // 40: geode.ExplainCalibrationEntry
+	(*ExplainCalibration)(nil),      // 41: geode.ExplainCalibration
+	(*ExplainPayload)(nil),          // 42: geode.ExplainPayload
+	(*ProfileOp)(nil),               // 43: geode.ProfileOp
+	(*ProfilePeakContributor)(nil),  // 44: geode.ProfilePeakContributor
+	(*ProfileTotals)(nil),           // 45: geode.ProfileTotals
+	(*ProfileSpills)(nil),           // 46: geode.ProfileSpills
+	(*ProfileMemory)(nil),           // 47: geode.ProfileMemory
+	(*ProfilePlannerEstimates)(nil), // 48: geode.ProfilePlannerEstimates
+	(*ProfileMemCurvePoint)(nil),    // 49: geode.ProfileMemCurvePoint
+	(*ProfileSetOp)(nil),            // 50: geode.ProfileSetOp
+	(*ProfilePayload)(nil),          // 51: geode.ProfilePayload
+	(*Heartbeat)(nil),               // 52: geode.Heartbeat
+	(*PingRequest)(nil),             // 53: geode.PingRequest
+	(*PingResponse)(nil),            // 54: geode.PingResponse
+	(*BeginRequest)(nil),            // 55: geode.BeginRequest
+	(*BeginResponse)(nil),           // 56: geode.BeginResponse
+	(*CommitRequest)(nil),           // 57: geode.CommitRequest
+	(*CommitResponse)(nil),          // 58: geode.CommitResponse
+	(*RollbackRequest)(nil),         // 59: geode.RollbackRequest
+	(*RollbackResponse)(nil),        // 60: geode.RollbackResponse
+	(*SavepointRequest)(nil),        // 61: geode.SavepointRequest
+	(*SavepointResponse)(nil),       // 62: geode.SavepointResponse
+	(*RollbackToRequest)(nil),       // 63: geode.RollbackToRequest
+	(*RollbackToResponse)(nil),      // 64: geode.RollbackToResponse
+	(*CdcDiagnosticsRequest)(nil),   // 65: geode.CdcDiagnosticsRequest
+	(*CdcDiagnosticsConfig)(nil),    // 66: geode.CdcDiagnosticsConfig
+	(*CdcDiagnosticsEngine)(nil),    // 67: geode.CdcDiagnosticsEngine
+	(*CdcMalformedSnapshot)(nil),    // 68: geode.CdcMalformedSnapshot
+	(*CdcMalformedHash)(nil),        // 69: geode.CdcMalformedHash
+	(*CdcDiagnosticsResponse)(nil),  // 70: geode.CdcDiagnosticsResponse
+	(*CdcControlRequest)(nil),       // 71: geode.CdcControlRequest
+	(*CdcControlResponse)(nil),      // 72: geode.CdcControlResponse
+	(*BackupRequest)(nil),           // 73: geode.BackupRequest
+	(*BackupResponse)(nil),          // 74: geode.BackupResponse
+	(*RestoreRequest)(nil),          // 75: geode.RestoreRequest
+	(*RestoreResponse)(nil),         // 76: geode.RestoreResponse
+	(*UploadBackupRequest)(nil),     // 77: geode.UploadBackupRequest
+	(*UploadBackupResponse)(nil),    // 78: geode.UploadBackupResponse
+	(*CancelRequest)(nil),           // 79: geode.CancelRequest
+	(*CancelResponse)(nil),          // 80: geode.CancelResponse
 }
 var file_proto_geode_proto_depIdxs = []int32{
-	6,  // 0: geode.ClientPacket.quic:type_name -> geode.QuicClientMessage
-	7,  // 1: geode.ServerPacket.quic:type_name -> geode.QuicServerMessage
-	8,  // 2: geode.QuicClientMessage.hello:type_name -> geode.HelloRequest
-	10, // 3: geode.QuicClientMessage.execute:type_name -> geode.ExecuteRequest
-	12, // 4: geode.QuicClientMessage.pull:type_name -> geode.PullRequest
-	52, // 5: geode.QuicClientMessage.ping:type_name -> geode.PingRequest
-	64, // 6: geode.QuicClientMessage.cdc_diag:type_name -> geode.CdcDiagnosticsRequest
-	70, // 7: geode.QuicClientMessage.cdc_ctrl:type_name -> geode.CdcControlRequest
-	54, // 8: geode.QuicClientMessage.begin:type_name -> geode.BeginRequest
-	56, // 9: geode.QuicClientMessage.commit:type_name -> geode.CommitRequest
-	58, // 10: geode.QuicClientMessage.rollback:type_name -> geode.RollbackRequest
-	60, // 11: geode.QuicClientMessage.savepoint:type_name -> geode.SavepointRequest
-	62, // 12: geode.QuicClientMessage.rollback_to:type_name -> geode.RollbackToRequest
-	72, // 13: geode.QuicClientMessage.backup:type_name -> geode.BackupRequest
-	74, // 14: geode.QuicClientMessage.restore:type_name -> geode.RestoreRequest
-	76, // 15: geode.QuicClientMessage.upload_backup:type_name -> geode.UploadBackupRequest
-	9,  // 16: geode.QuicServerMessage.hello:type_name -> geode.HelloResponse
-	15, // 17: geode.QuicServerMessage.execute:type_name -> geode.ExecutionResponse
-	13, // 18: geode.QuicServerMessage.pull:type_name -> geode.PullResponse
-	53, // 19: geode.QuicServerMessage.ping:type_name -> geode.PingResponse
-	69, // 20: geode.QuicServerMessage.cdc_diag:type_name -> geode.CdcDiagnosticsResponse
-	71, // 21: geode.QuicServerMessage.cdc_ctrl:type_name -> geode.CdcControlResponse
-	55, // 22: geode.QuicServerMessage.begin:type_name -> geode.BeginResponse
-	57, // 23: geode.QuicServerMessage.commit:type_name -> geode.CommitResponse
-	59, // 24: geode.QuicServerMessage.rollback:type_name -> geode.RollbackResponse
-	61, // 25: geode.QuicServerMessage.savepoint:type_name -> geode.SavepointResponse
-	63, // 26: geode.QuicServerMessage.rollback_to:type_name -> geode.RollbackToResponse
-	73, // 27: geode.QuicServerMessage.backup:type_name -> geode.BackupResponse
-	75, // 28: geode.QuicServerMessage.restore:type_name -> geode.RestoreResponse
-	77, // 29: geode.QuicServerMessage.upload_backup:type_name -> geode.UploadBackupResponse
-	11, // 30: geode.ExecuteRequest.params:type_name -> geode.Param
-	20, // 31: geode.Param.value:type_name -> geode.Value
-	15, // 32: geode.PullResponse.response:type_name -> geode.ExecutionResponse
-	14, // 33: geode.ExecutionResponse.status:type_name -> geode.Status
-	16, // 34: geode.ExecutionResponse.schema:type_name -> geode.SchemaDefinition
-	18, // 35: geode.ExecutionResponse.page:type_name -> geode.DataPage
-	34, // 36: geode.ExecutionResponse.error:type_name -> geode.Error
-	35, // 37: geode.ExecutionResponse.metrics:type_name -> geode.ExecutionMetrics
-	41, // 38: geode.ExecutionResponse.explain:type_name -> geode.ExplainPayload
-	50, // 39: geode.ExecutionResponse.profile:type_name -> geode.ProfilePayload
-	51, // 40: geode.ExecutionResponse.heartbeat:type_name -> geode.Heartbeat
-	17, // 41: geode.SchemaDefinition.columns:type_name -> geode.ColumnDefinition
-	19, // 42: geode.DataPage.rows:type_name -> geode.Row
-	20, // 43: geode.Row.values:type_name -> geode.Value
-	21, // 44: geode.Value.null_val:type_name -> geode.NullValue
-	22, // 45: geode.Value.int_val:type_name -> geode.IntValue
-	23, // 46: geode.Value.double_val:type_name -> geode.DoubleValue
-	24, // 47: geode.Value.string_val:type_name -> geode.StringValue
-	25, // 48: geode.Value.decimal_val:type_name -> geode.DecimalValue
-	26, // 49: geode.Value.bytes_val:type_name -> geode.BytesValue
-	27, // 50: geode.Value.list_val:type_name -> geode.ListValue
-	29, // 51: geode.Value.map_val:type_name -> geode.MapValue
-	30, // 52: geode.Value.node_val:type_name -> geode.NodeValue
-	31, // 53: geode.Value.edge_val:type_name -> geode.EdgeValue
-	32, // 54: geode.Value.path_val:type_name -> geode.PathValue
-	33, // 55: geode.Value.ext_val:type_name -> geode.ExtendedValue
-	0,  // 56: geode.IntValue.kind:type_name -> geode.IntKind
-	1,  // 57: geode.DoubleValue.kind:type_name -> geode.FloatKind
-	2,  // 58: geode.StringValue.kind:type_name -> geode.StringKind
-	3,  // 59: geode.BytesValue.kind:type_name -> geode.BytesKind
-	20, // 60: geode.ListValue.values:type_name -> geode.Value
-	20, // 61: geode.MapEntry.value:type_name -> geode.Value
-	28, // 62: geode.MapValue.entries:type_name -> geode.MapEntry
-	28, // 63: geode.NodeValue.properties:type_name -> geode.MapEntry
-	28, // 64: geode.EdgeValue.properties:type_name -> geode.MapEntry
-	30, // 65: geode.PathValue.nodes:type_name -> geode.NodeValue
-	31, // 66: geode.PathValue.edges:type_name -> geode.EdgeValue
-	39, // 67: geode.ExplainCalibration.entries:type_name -> geode.ExplainCalibrationEntry
-	36, // 68: geode.ExplainPayload.ops:type_name -> geode.ExplainOp
-	37, // 69: geode.ExplainPayload.totals:type_name -> geode.ExplainTotals
-	38, // 70: geode.ExplainPayload.properties:type_name -> geode.ExplainProperties
-	40, // 71: geode.ExplainPayload.calibration:type_name -> geode.ExplainCalibration
-	42, // 72: geode.ProfilePayload.ops:type_name -> geode.ProfileOp
-	43, // 73: geode.ProfilePayload.peak_contributors:type_name -> geode.ProfilePeakContributor
-	44, // 74: geode.ProfilePayload.totals:type_name -> geode.ProfileTotals
-	45, // 75: geode.ProfilePayload.spills:type_name -> geode.ProfileSpills
-	46, // 76: geode.ProfilePayload.memory:type_name -> geode.ProfileMemory
-	47, // 77: geode.ProfilePayload.planner_estimates:type_name -> geode.ProfilePlannerEstimates
-	48, // 78: geode.ProfilePayload.mem_curve:type_name -> geode.ProfileMemCurvePoint
-	49, // 79: geode.ProfilePayload.setop:type_name -> geode.ProfileSetOp
-	65, // 80: geode.CdcDiagnosticsResponse.config:type_name -> geode.CdcDiagnosticsConfig
-	66, // 81: geode.CdcDiagnosticsResponse.engine:type_name -> geode.CdcDiagnosticsEngine
-	67, // 82: geode.CdcDiagnosticsResponse.malformed_snapshots:type_name -> geode.CdcMalformedSnapshot
-	68, // 83: geode.CdcDiagnosticsResponse.malformed_hashes:type_name -> geode.CdcMalformedHash
-	8,  // 84: geode.GeodeService.Handshake:input_type -> geode.HelloRequest
-	10, // 85: geode.GeodeService.Execute:input_type -> geode.ExecuteRequest
-	52, // 86: geode.GeodeService.Ping:input_type -> geode.PingRequest
-	54, // 87: geode.GeodeService.Begin:input_type -> geode.BeginRequest
-	56, // 88: geode.GeodeService.Commit:input_type -> geode.CommitRequest
-	58, // 89: geode.GeodeService.Rollback:input_type -> geode.RollbackRequest
-	64, // 90: geode.GeodeService.GetCdcDiagnostics:input_type -> geode.CdcDiagnosticsRequest
-	70, // 91: geode.GeodeService.ControlCdc:input_type -> geode.CdcControlRequest
-	9,  // 92: geode.GeodeService.Handshake:output_type -> geode.HelloResponse
-	15, // 93: geode.GeodeService.Execute:output_type -> geode.ExecutionResponse
-	53, // 94: geode.GeodeService.Ping:output_type -> geode.PingResponse
-	55, // 95: geode.GeodeService.Begin:output_type -> geode.BeginResponse
-	57, // 96: geode.GeodeService.Commit:output_type -> geode.CommitResponse
-	59, // 97: geode.GeodeService.Rollback:output_type -> geode.RollbackResponse
-	69, // 98: geode.GeodeService.GetCdcDiagnostics:output_type -> geode.CdcDiagnosticsResponse
-	71, // 99: geode.GeodeService.ControlCdc:output_type -> geode.CdcControlResponse
-	92, // [92:100] is the sub-list for method output_type
-	84, // [84:92] is the sub-list for method input_type
-	84, // [84:84] is the sub-list for extension type_name
-	84, // [84:84] is the sub-list for extension extendee
-	0,  // [0:84] is the sub-list for field type_name
+	6,   // 0: geode.ClientPacket.quic:type_name -> geode.QuicClientMessage
+	7,   // 1: geode.ServerPacket.quic:type_name -> geode.QuicServerMessage
+	8,   // 2: geode.QuicClientMessage.hello:type_name -> geode.HelloRequest
+	10,  // 3: geode.QuicClientMessage.execute:type_name -> geode.ExecuteRequest
+	12,  // 4: geode.QuicClientMessage.pull:type_name -> geode.PullRequest
+	53,  // 5: geode.QuicClientMessage.ping:type_name -> geode.PingRequest
+	65,  // 6: geode.QuicClientMessage.cdc_diag:type_name -> geode.CdcDiagnosticsRequest
+	71,  // 7: geode.QuicClientMessage.cdc_ctrl:type_name -> geode.CdcControlRequest
+	55,  // 8: geode.QuicClientMessage.begin:type_name -> geode.BeginRequest
+	57,  // 9: geode.QuicClientMessage.commit:type_name -> geode.CommitRequest
+	59,  // 10: geode.QuicClientMessage.rollback:type_name -> geode.RollbackRequest
+	61,  // 11: geode.QuicClientMessage.savepoint:type_name -> geode.SavepointRequest
+	63,  // 12: geode.QuicClientMessage.rollback_to:type_name -> geode.RollbackToRequest
+	73,  // 13: geode.QuicClientMessage.backup:type_name -> geode.BackupRequest
+	75,  // 14: geode.QuicClientMessage.restore:type_name -> geode.RestoreRequest
+	77,  // 15: geode.QuicClientMessage.upload_backup:type_name -> geode.UploadBackupRequest
+	79,  // 16: geode.QuicClientMessage.cancel:type_name -> geode.CancelRequest
+	9,   // 17: geode.QuicServerMessage.hello:type_name -> geode.HelloResponse
+	15,  // 18: geode.QuicServerMessage.execute:type_name -> geode.ExecutionResponse
+	13,  // 19: geode.QuicServerMessage.pull:type_name -> geode.PullResponse
+	54,  // 20: geode.QuicServerMessage.ping:type_name -> geode.PingResponse
+	70,  // 21: geode.QuicServerMessage.cdc_diag:type_name -> geode.CdcDiagnosticsResponse
+	72,  // 22: geode.QuicServerMessage.cdc_ctrl:type_name -> geode.CdcControlResponse
+	56,  // 23: geode.QuicServerMessage.begin:type_name -> geode.BeginResponse
+	58,  // 24: geode.QuicServerMessage.commit:type_name -> geode.CommitResponse
+	60,  // 25: geode.QuicServerMessage.rollback:type_name -> geode.RollbackResponse
+	62,  // 26: geode.QuicServerMessage.savepoint:type_name -> geode.SavepointResponse
+	64,  // 27: geode.QuicServerMessage.rollback_to:type_name -> geode.RollbackToResponse
+	74,  // 28: geode.QuicServerMessage.backup:type_name -> geode.BackupResponse
+	76,  // 29: geode.QuicServerMessage.restore:type_name -> geode.RestoreResponse
+	78,  // 30: geode.QuicServerMessage.upload_backup:type_name -> geode.UploadBackupResponse
+	80,  // 31: geode.QuicServerMessage.cancel:type_name -> geode.CancelResponse
+	11,  // 32: geode.ExecuteRequest.params:type_name -> geode.Param
+	21,  // 33: geode.Param.value:type_name -> geode.Value
+	15,  // 34: geode.PullResponse.response:type_name -> geode.ExecutionResponse
+	14,  // 35: geode.ExecutionResponse.status:type_name -> geode.Status
+	16,  // 36: geode.ExecutionResponse.schema:type_name -> geode.SchemaDefinition
+	18,  // 37: geode.ExecutionResponse.page:type_name -> geode.DataPage
+	35,  // 38: geode.ExecutionResponse.error:type_name -> geode.Error
+	36,  // 39: geode.ExecutionResponse.metrics:type_name -> geode.ExecutionMetrics
+	42,  // 40: geode.ExecutionResponse.explain:type_name -> geode.ExplainPayload
+	51,  // 41: geode.ExecutionResponse.profile:type_name -> geode.ProfilePayload
+	52,  // 42: geode.ExecutionResponse.heartbeat:type_name -> geode.Heartbeat
+	17,  // 43: geode.SchemaDefinition.columns:type_name -> geode.ColumnDefinition
+	20,  // 44: geode.DataPage.rows:type_name -> geode.Row
+	19,  // 45: geode.DataPage.update_counts:type_name -> geode.UpdateCounts
+	21,  // 46: geode.Row.values:type_name -> geode.Value
+	22,  // 47: geode.Value.null_val:type_name -> geode.NullValue
+	23,  // 48: geode.Value.int_val:type_name -> geode.IntValue
+	24,  // 49: geode.Value.double_val:type_name -> geode.DoubleValue
+	25,  // 50: geode.Value.string_val:type_name -> geode.StringValue
+	26,  // 51: geode.Value.decimal_val:type_name -> geode.DecimalValue
+	27,  // 52: geode.Value.bytes_val:type_name -> geode.BytesValue
+	28,  // 53: geode.Value.list_val:type_name -> geode.ListValue
+	30,  // 54: geode.Value.map_val:type_name -> geode.MapValue
+	31,  // 55: geode.Value.node_val:type_name -> geode.NodeValue
+	32,  // 56: geode.Value.edge_val:type_name -> geode.EdgeValue
+	33,  // 57: geode.Value.path_val:type_name -> geode.PathValue
+	34,  // 58: geode.Value.ext_val:type_name -> geode.ExtendedValue
+	0,   // 59: geode.IntValue.kind:type_name -> geode.IntKind
+	1,   // 60: geode.DoubleValue.kind:type_name -> geode.FloatKind
+	2,   // 61: geode.StringValue.kind:type_name -> geode.StringKind
+	3,   // 62: geode.BytesValue.kind:type_name -> geode.BytesKind
+	21,  // 63: geode.ListValue.values:type_name -> geode.Value
+	21,  // 64: geode.MapEntry.value:type_name -> geode.Value
+	29,  // 65: geode.MapValue.entries:type_name -> geode.MapEntry
+	29,  // 66: geode.NodeValue.properties:type_name -> geode.MapEntry
+	29,  // 67: geode.EdgeValue.properties:type_name -> geode.MapEntry
+	31,  // 68: geode.PathValue.nodes:type_name -> geode.NodeValue
+	32,  // 69: geode.PathValue.edges:type_name -> geode.EdgeValue
+	40,  // 70: geode.ExplainCalibration.entries:type_name -> geode.ExplainCalibrationEntry
+	37,  // 71: geode.ExplainPayload.ops:type_name -> geode.ExplainOp
+	38,  // 72: geode.ExplainPayload.totals:type_name -> geode.ExplainTotals
+	39,  // 73: geode.ExplainPayload.properties:type_name -> geode.ExplainProperties
+	41,  // 74: geode.ExplainPayload.calibration:type_name -> geode.ExplainCalibration
+	43,  // 75: geode.ProfilePayload.ops:type_name -> geode.ProfileOp
+	44,  // 76: geode.ProfilePayload.peak_contributors:type_name -> geode.ProfilePeakContributor
+	45,  // 77: geode.ProfilePayload.totals:type_name -> geode.ProfileTotals
+	46,  // 78: geode.ProfilePayload.spills:type_name -> geode.ProfileSpills
+	47,  // 79: geode.ProfilePayload.memory:type_name -> geode.ProfileMemory
+	48,  // 80: geode.ProfilePayload.planner_estimates:type_name -> geode.ProfilePlannerEstimates
+	49,  // 81: geode.ProfilePayload.mem_curve:type_name -> geode.ProfileMemCurvePoint
+	50,  // 82: geode.ProfilePayload.setop:type_name -> geode.ProfileSetOp
+	35,  // 83: geode.CommitResponse.error:type_name -> geode.Error
+	35,  // 84: geode.RollbackResponse.error:type_name -> geode.Error
+	66,  // 85: geode.CdcDiagnosticsResponse.config:type_name -> geode.CdcDiagnosticsConfig
+	67,  // 86: geode.CdcDiagnosticsResponse.engine:type_name -> geode.CdcDiagnosticsEngine
+	68,  // 87: geode.CdcDiagnosticsResponse.malformed_snapshots:type_name -> geode.CdcMalformedSnapshot
+	69,  // 88: geode.CdcDiagnosticsResponse.malformed_hashes:type_name -> geode.CdcMalformedHash
+	8,   // 89: geode.GeodeService.Handshake:input_type -> geode.HelloRequest
+	10,  // 90: geode.GeodeService.Execute:input_type -> geode.ExecuteRequest
+	53,  // 91: geode.GeodeService.Ping:input_type -> geode.PingRequest
+	55,  // 92: geode.GeodeService.Begin:input_type -> geode.BeginRequest
+	57,  // 93: geode.GeodeService.Commit:input_type -> geode.CommitRequest
+	59,  // 94: geode.GeodeService.Rollback:input_type -> geode.RollbackRequest
+	65,  // 95: geode.GeodeService.GetCdcDiagnostics:input_type -> geode.CdcDiagnosticsRequest
+	71,  // 96: geode.GeodeService.ControlCdc:input_type -> geode.CdcControlRequest
+	61,  // 97: geode.GeodeService.Savepoint:input_type -> geode.SavepointRequest
+	63,  // 98: geode.GeodeService.RollbackTo:input_type -> geode.RollbackToRequest
+	73,  // 99: geode.GeodeService.Backup:input_type -> geode.BackupRequest
+	75,  // 100: geode.GeodeService.Restore:input_type -> geode.RestoreRequest
+	77,  // 101: geode.GeodeService.UploadBackup:input_type -> geode.UploadBackupRequest
+	9,   // 102: geode.GeodeService.Handshake:output_type -> geode.HelloResponse
+	15,  // 103: geode.GeodeService.Execute:output_type -> geode.ExecutionResponse
+	54,  // 104: geode.GeodeService.Ping:output_type -> geode.PingResponse
+	56,  // 105: geode.GeodeService.Begin:output_type -> geode.BeginResponse
+	58,  // 106: geode.GeodeService.Commit:output_type -> geode.CommitResponse
+	60,  // 107: geode.GeodeService.Rollback:output_type -> geode.RollbackResponse
+	70,  // 108: geode.GeodeService.GetCdcDiagnostics:output_type -> geode.CdcDiagnosticsResponse
+	72,  // 109: geode.GeodeService.ControlCdc:output_type -> geode.CdcControlResponse
+	62,  // 110: geode.GeodeService.Savepoint:output_type -> geode.SavepointResponse
+	64,  // 111: geode.GeodeService.RollbackTo:output_type -> geode.RollbackToResponse
+	74,  // 112: geode.GeodeService.Backup:output_type -> geode.BackupResponse
+	76,  // 113: geode.GeodeService.Restore:output_type -> geode.RestoreResponse
+	78,  // 114: geode.GeodeService.UploadBackup:output_type -> geode.UploadBackupResponse
+	102, // [102:115] is the sub-list for method output_type
+	89,  // [89:102] is the sub-list for method input_type
+	89,  // [89:89] is the sub-list for extension type_name
+	89,  // [89:89] is the sub-list for extension extendee
+	0,   // [0:89] is the sub-list for field type_name
 }
 
 func init() { file_proto_geode_proto_init() }
@@ -6606,6 +6925,7 @@ func file_proto_geode_proto_init() {
 		(*QuicClientMessage_Backup)(nil),
 		(*QuicClientMessage_Restore)(nil),
 		(*QuicClientMessage_UploadBackup)(nil),
+		(*QuicClientMessage_Cancel)(nil),
 	}
 	file_proto_geode_proto_msgTypes[3].OneofWrappers = []any{
 		(*QuicServerMessage_Hello)(nil),
@@ -6622,6 +6942,7 @@ func file_proto_geode_proto_init() {
 		(*QuicServerMessage_Backup)(nil),
 		(*QuicServerMessage_Restore)(nil),
 		(*QuicServerMessage_UploadBackup)(nil),
+		(*QuicServerMessage_Cancel)(nil),
 	}
 	file_proto_geode_proto_msgTypes[4].OneofWrappers = []any{}
 	file_proto_geode_proto_msgTypes[5].OneofWrappers = []any{}
@@ -6634,7 +6955,7 @@ func file_proto_geode_proto_init() {
 		(*ExecutionResponse_Profile)(nil),
 		(*ExecutionResponse_Heartbeat)(nil),
 	}
-	file_proto_geode_proto_msgTypes[16].OneofWrappers = []any{
+	file_proto_geode_proto_msgTypes[17].OneofWrappers = []any{
 		(*Value_NullVal)(nil),
 		(*Value_IntVal)(nil),
 		(*Value_DoubleVal)(nil),
@@ -6649,7 +6970,7 @@ func file_proto_geode_proto_init() {
 		(*Value_PathVal)(nil),
 		(*Value_ExtVal)(nil),
 	}
-	file_proto_geode_proto_msgTypes[29].OneofWrappers = []any{
+	file_proto_geode_proto_msgTypes[30].OneofWrappers = []any{
 		(*ExtendedValue_Text)(nil),
 		(*ExtendedValue_Bytes)(nil),
 		(*ExtendedValue_IntVal)(nil),
@@ -6662,7 +6983,7 @@ func file_proto_geode_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_geode_proto_rawDesc), len(file_proto_geode_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   74,
+			NumMessages:   77,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -27,6 +27,11 @@ const (
 	GeodeService_Rollback_FullMethodName          = "/geode.GeodeService/Rollback"
 	GeodeService_GetCdcDiagnostics_FullMethodName = "/geode.GeodeService/GetCdcDiagnostics"
 	GeodeService_ControlCdc_FullMethodName        = "/geode.GeodeService/ControlCdc"
+	GeodeService_Savepoint_FullMethodName         = "/geode.GeodeService/Savepoint"
+	GeodeService_RollbackTo_FullMethodName        = "/geode.GeodeService/RollbackTo"
+	GeodeService_Backup_FullMethodName            = "/geode.GeodeService/Backup"
+	GeodeService_Restore_FullMethodName           = "/geode.GeodeService/Restore"
+	GeodeService_UploadBackup_FullMethodName      = "/geode.GeodeService/UploadBackup"
 )
 
 // GeodeServiceClient is the client API for GeodeService service.
@@ -43,6 +48,13 @@ type GeodeServiceClient interface {
 	Rollback(ctx context.Context, in *RollbackRequest, opts ...grpc.CallOption) (*RollbackResponse, error)
 	GetCdcDiagnostics(ctx context.Context, in *CdcDiagnosticsRequest, opts ...grpc.CallOption) (*CdcDiagnosticsResponse, error)
 	ControlCdc(ctx context.Context, in *CdcControlRequest, opts ...grpc.CallOption) (*CdcControlResponse, error)
+	// Savepoints inside the session's open transaction.
+	Savepoint(ctx context.Context, in *SavepointRequest, opts ...grpc.CallOption) (*SavepointResponse, error)
+	RollbackTo(ctx context.Context, in *RollbackToRequest, opts ...grpc.CallOption) (*RollbackToResponse, error)
+	// Server backup and restore; administrators only.
+	Backup(ctx context.Context, in *BackupRequest, opts ...grpc.CallOption) (*BackupResponse, error)
+	Restore(ctx context.Context, in *RestoreRequest, opts ...grpc.CallOption) (*RestoreResponse, error)
+	UploadBackup(ctx context.Context, in *UploadBackupRequest, opts ...grpc.CallOption) (*UploadBackupResponse, error)
 }
 
 type geodeServiceClient struct {
@@ -142,6 +154,56 @@ func (c *geodeServiceClient) ControlCdc(ctx context.Context, in *CdcControlReque
 	return out, nil
 }
 
+func (c *geodeServiceClient) Savepoint(ctx context.Context, in *SavepointRequest, opts ...grpc.CallOption) (*SavepointResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SavepointResponse)
+	err := c.cc.Invoke(ctx, GeodeService_Savepoint_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *geodeServiceClient) RollbackTo(ctx context.Context, in *RollbackToRequest, opts ...grpc.CallOption) (*RollbackToResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RollbackToResponse)
+	err := c.cc.Invoke(ctx, GeodeService_RollbackTo_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *geodeServiceClient) Backup(ctx context.Context, in *BackupRequest, opts ...grpc.CallOption) (*BackupResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BackupResponse)
+	err := c.cc.Invoke(ctx, GeodeService_Backup_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *geodeServiceClient) Restore(ctx context.Context, in *RestoreRequest, opts ...grpc.CallOption) (*RestoreResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RestoreResponse)
+	err := c.cc.Invoke(ctx, GeodeService_Restore_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *geodeServiceClient) UploadBackup(ctx context.Context, in *UploadBackupRequest, opts ...grpc.CallOption) (*UploadBackupResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UploadBackupResponse)
+	err := c.cc.Invoke(ctx, GeodeService_UploadBackup_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // GeodeServiceServer is the server API for GeodeService service.
 // All implementations must embed UnimplementedGeodeServiceServer
 // for forward compatibility.
@@ -156,6 +218,13 @@ type GeodeServiceServer interface {
 	Rollback(context.Context, *RollbackRequest) (*RollbackResponse, error)
 	GetCdcDiagnostics(context.Context, *CdcDiagnosticsRequest) (*CdcDiagnosticsResponse, error)
 	ControlCdc(context.Context, *CdcControlRequest) (*CdcControlResponse, error)
+	// Savepoints inside the session's open transaction.
+	Savepoint(context.Context, *SavepointRequest) (*SavepointResponse, error)
+	RollbackTo(context.Context, *RollbackToRequest) (*RollbackToResponse, error)
+	// Server backup and restore; administrators only.
+	Backup(context.Context, *BackupRequest) (*BackupResponse, error)
+	Restore(context.Context, *RestoreRequest) (*RestoreResponse, error)
+	UploadBackup(context.Context, *UploadBackupRequest) (*UploadBackupResponse, error)
 	mustEmbedUnimplementedGeodeServiceServer()
 }
 
@@ -189,6 +258,21 @@ func (UnimplementedGeodeServiceServer) GetCdcDiagnostics(context.Context, *CdcDi
 }
 func (UnimplementedGeodeServiceServer) ControlCdc(context.Context, *CdcControlRequest) (*CdcControlResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ControlCdc not implemented")
+}
+func (UnimplementedGeodeServiceServer) Savepoint(context.Context, *SavepointRequest) (*SavepointResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Savepoint not implemented")
+}
+func (UnimplementedGeodeServiceServer) RollbackTo(context.Context, *RollbackToRequest) (*RollbackToResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RollbackTo not implemented")
+}
+func (UnimplementedGeodeServiceServer) Backup(context.Context, *BackupRequest) (*BackupResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Backup not implemented")
+}
+func (UnimplementedGeodeServiceServer) Restore(context.Context, *RestoreRequest) (*RestoreResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Restore not implemented")
+}
+func (UnimplementedGeodeServiceServer) UploadBackup(context.Context, *UploadBackupRequest) (*UploadBackupResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method UploadBackup not implemented")
 }
 func (UnimplementedGeodeServiceServer) mustEmbedUnimplementedGeodeServiceServer() {}
 func (UnimplementedGeodeServiceServer) testEmbeddedByValue()                      {}
@@ -348,6 +432,96 @@ func _GeodeService_ControlCdc_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _GeodeService_Savepoint_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SavepointRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GeodeServiceServer).Savepoint(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: GeodeService_Savepoint_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GeodeServiceServer).Savepoint(ctx, req.(*SavepointRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _GeodeService_RollbackTo_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RollbackToRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GeodeServiceServer).RollbackTo(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: GeodeService_RollbackTo_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GeodeServiceServer).RollbackTo(ctx, req.(*RollbackToRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _GeodeService_Backup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BackupRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GeodeServiceServer).Backup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: GeodeService_Backup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GeodeServiceServer).Backup(ctx, req.(*BackupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _GeodeService_Restore_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RestoreRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GeodeServiceServer).Restore(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: GeodeService_Restore_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GeodeServiceServer).Restore(ctx, req.(*RestoreRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _GeodeService_UploadBackup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UploadBackupRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GeodeServiceServer).UploadBackup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: GeodeService_UploadBackup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GeodeServiceServer).UploadBackup(ctx, req.(*UploadBackupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // GeodeService_ServiceDesc is the grpc.ServiceDesc for GeodeService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -382,6 +556,26 @@ var GeodeService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ControlCdc",
 			Handler:    _GeodeService_ControlCdc_Handler,
+		},
+		{
+			MethodName: "Savepoint",
+			Handler:    _GeodeService_Savepoint_Handler,
+		},
+		{
+			MethodName: "RollbackTo",
+			Handler:    _GeodeService_RollbackTo_Handler,
+		},
+		{
+			MethodName: "Backup",
+			Handler:    _GeodeService_Backup_Handler,
+		},
+		{
+			MethodName: "Restore",
+			Handler:    _GeodeService_Restore_Handler,
+		},
+		{
+			MethodName: "UploadBackup",
+			Handler:    _GeodeService_UploadBackup_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
