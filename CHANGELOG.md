@@ -35,7 +35,9 @@ four tests that pin the engine version.
 
 - The load tests remove the data they registered before closing their SQL
   pools (SONNY-4775). Before, cleanup ran on a closed pool, reported "CLEANUP
-  INCOMPLETE" and left the fixtures for the next test.
+  INCOMPLETE" and left the fixtures for the next test. The sustained-ingest
+  test drops its own graph instead of deleting its 30,000 nodes, which takes
+  minutes on engines up to 0.8.25 (SONNY-6942).
 - The local-engine multiplex probes bind a graph in the connection HELLO and
   seed an admin passphrase the engine's password policy accepts (SONNY-4776).
   Against an engine with SONNY-1835 and SONNY-6331, a sibling stream on a
