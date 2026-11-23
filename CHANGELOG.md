@@ -7,7 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.2.2] - 2026-11-23
+
+Engine pin: **geode 0.8.22**. Also qualified against geode main 94f491235
+(v0.8.25-1478): the full integration suite with `-race` passes except the
+four tests that pin the engine version.
+
 ### Fixed
+
+- A result larger than one inline page no longer leaves unanswered PULL
+  responses on the pooled stream (SONNY-1324). The engine pushes pages
+  inline and also answers PULLs, so the next borrower of the stream read a
+  stale page and failed with "expected Execute response, got pull". Closing or
+  draining `Rows` now completes every outstanding paging request before the
+  stream goes back to the pool.
 
 - `sql.Result.RowsAffected()` now reports what an `Exec` changed instead of
   always 0 (SONNY-2822), so a conditional `MATCH ... SET` can tell a match from
@@ -17,6 +30,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   properties or labels, property assignments plus label changes. The per-kind
   counts are available from `(*geode.Result).UpdateCounts()`. Against an
   engine that sends no counts the result is 0, as before.
+
+### Tests
+
+- The load tests remove the data they registered before closing their SQL
+  pools (SONNY-4775). Before, cleanup ran on a closed pool, reported "CLEANUP
+  INCOMPLETE" and left the fixtures for the next test.
+- The local-engine multiplex probes bind a graph in the connection HELLO and
+  seed an admin passphrase the engine's password policy accepts (SONNY-4776).
+  Against an engine with SONNY-1835 and SONNY-6331, a sibling stream on a
+  connection that bound no graph is refused (08003), and a seed the policy
+  rejects forces a password reset (08P01).
 
 ### Changed
 
