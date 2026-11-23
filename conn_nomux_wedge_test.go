@@ -35,8 +35,7 @@ import (
 //
 // This test writes 30,000 twenty-property nodes, and on the shared engine CI
 // runs (one `services:` container for the whole job, not a fresh container per
-// test) its data could outlive it: cleanupLabel previously logged failures
-// without failing the test. Every later test that cleans the graph it runs
+// test) its data could outlive it. Every later test that cleans the graph it runs
 // in then inherits them — cleanupTestData's `MATCH (n) DETACH DELETE n`
 // (integration_test.go) is the one that pays, and it has the same fixed budget.
 // That is what turned pipeline 2855806396's QUIC lane red: TestDocker_CreateNode
@@ -56,6 +55,29 @@ const nomuxWedgeGraph = "nomuxwedge"
 // tenant; a repeated DSN key resolves to its last occurrence (applyQueryParams
 // in config.go), so appending is safe.
 func nomuxWedgeDSN() string { return sharedDSN + "&graph=" + nomuxWedgeGraph }
+
+// dropNomuxWedgeGraph drops nomuxWedgeGraph from a connection on the shared
+// graph (a pool bound to it would bind it again). The 30,000 nodes the test
+// writes go with the graph: one DETACH DELETE of them takes minutes on an
+// engine without SONNY-6942 (4m28s measured on 0.8.22), far past a cleanup
+// budget, while a drop does not depend on how many nodes the graph holds.
+func dropNomuxWedgeGraph(t *testing.T) {
+	t.Helper()
+	db, err := sql.Open("geode", sharedDSN)
+	if err != nil {
+		t.Errorf("open shared pool to drop graph %s: %v", nomuxWedgeGraph, err)
+		return
+	}
+	defer db.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	start := time.Now()
+	if _, err := db.ExecContext(ctx, "DROP GRAPH IF EXISTS "+nomuxWedgeGraph); err != nil {
+		t.Errorf("drop graph %s: %v", nomuxWedgeGraph, err)
+		return
+	}
+	t.Logf("dropped graph %s in %s", nomuxWedgeGraph, time.Since(start).Round(time.Millisecond))
+}
 
 // TestConn_SustainedSingleConnIngest_NoWedge is the in-repo reproduction for the
 // no-multiplex sustained-ingest wedge.
@@ -82,9 +104,14 @@ func TestConn_SustainedSingleConnIngest_NoWedge(t *testing.T) {
 		perBatchLimit = 20 * time.Second
 	)
 
+	// The graph goes, and the test's nodes with it, before the run (a failed
+	// earlier run's leftovers) and after the pool below is closed (cleanups
+	// run last-registered first).
+	dropNomuxWedgeGraph(t)
+	t.Cleanup(func() { dropNomuxWedgeGraph(t) })
+
 	db, err := sql.Open("geode", nomuxWedgeDSN())
 	require.NoError(t, err, "open db")
-	// Register pool closure first: fixture cleanup below must finish before it.
 	t.Cleanup(func() {
 		if err := db.Close(); err != nil {
 			t.Errorf("close sustained-ingest pool: %v", err)
@@ -100,9 +127,6 @@ func TestConn_SustainedSingleConnIngest_NoWedge(t *testing.T) {
 	pingCtx, pingCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	require.NoError(t, db.PingContext(pingCtx), "ping")
 	pingCancel()
-
-	t.Cleanup(func() { cleanupLabel(t, db, label) })
-	cleanupLabel(t, db, label)
 
 	var opsDone atomic.Int64
 
