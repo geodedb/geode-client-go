@@ -522,6 +522,37 @@ binding; the anchor is kept for the connection lifetime it exists to own.
 `TestIntegration_GRPCLargePushedResultFailsLoudly` gained an arm for 0.8.18's
 prompt typed `ResourceExhausted` and still fails hard on a silent truncation.
 
+## Rows affected
+
+`sql.Result.RowsAffected()` reports what a write changed, from the update
+counts the engine sends on the final page of every result
+(`DataPage.update_counts`, SONNY-2822). The engine reports what changed, not
+how many rows matched, so the driver applies one rule, modelled on the Neo4j
+JDBC driver's update count:
+
+- a statement that creates or deletes nodes or relationships reports the
+  number of nodes and relationships it created plus deleted;
+- otherwise (a `MATCH ... SET` or `REMOVE`) it reports the number of property
+  assignments plus label changes. A `SET` of one property over N rows reports
+  N, and 0 when nothing matched, so a conditional write can test it:
+
+```go
+res, err := db.ExecContext(ctx,
+    "MATCH (s:Session {id: ?}) WHERE s.version = ? SET s.version = ?", id, v, v+1)
+if err != nil {
+    return err
+}
+if n, _ := res.RowsAffected(); n == 0 {
+    return ErrConflict
+}
+```
+
+A `SET` of k properties over N rows reports N*k. For the exact per-kind
+counts, run the statement on the driver connection (`sql.Conn.Raw`) and read
+`(*geode.Result).UpdateCounts()`. An engine older than the first release with
+update counts (after 0.8.25) sends none; `RowsAffected()` then reports 0 and
+`UpdateCounts()` reports false.
+
 ## Transactions
 
 ```go

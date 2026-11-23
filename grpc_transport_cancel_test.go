@@ -119,6 +119,36 @@ func (*fakeGeodeClient) ControlCdc(
 	return nil, errFakeUnused
 }
 
+func (*fakeGeodeClient) Savepoint(
+	context.Context, *proto.SavepointRequest, ...grpc.CallOption,
+) (*proto.SavepointResponse, error) {
+	return nil, errFakeUnused
+}
+
+func (*fakeGeodeClient) RollbackTo(
+	context.Context, *proto.RollbackToRequest, ...grpc.CallOption,
+) (*proto.RollbackToResponse, error) {
+	return nil, errFakeUnused
+}
+
+func (*fakeGeodeClient) Backup(
+	context.Context, *proto.BackupRequest, ...grpc.CallOption,
+) (*proto.BackupResponse, error) {
+	return nil, errFakeUnused
+}
+
+func (*fakeGeodeClient) Restore(
+	context.Context, *proto.RestoreRequest, ...grpc.CallOption,
+) (*proto.RestoreResponse, error) {
+	return nil, errFakeUnused
+}
+
+func (*fakeGeodeClient) UploadBackup(
+	context.Context, *proto.UploadBackupRequest, ...grpc.CallOption,
+) (*proto.UploadBackupResponse, error) {
+	return nil, errFakeUnused
+}
+
 // newFakeGRPCTransport returns a GRPCTransport wired to a fake client. conn is
 // left nil, so only Close (which dereferences it) is off limits; the Close
 // test builds a real lazy transport instead.

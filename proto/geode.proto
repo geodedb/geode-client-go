@@ -13,6 +13,13 @@ service GeodeService {
   rpc Rollback(RollbackRequest) returns (RollbackResponse);
   rpc GetCdcDiagnostics(CdcDiagnosticsRequest) returns (CdcDiagnosticsResponse);
   rpc ControlCdc(CdcControlRequest) returns (CdcControlResponse);
+  // Savepoints inside the session's open transaction.
+  rpc Savepoint(SavepointRequest) returns (SavepointResponse);
+  rpc RollbackTo(RollbackToRequest) returns (RollbackToResponse);
+  // Server backup and restore; administrators only.
+  rpc Backup(BackupRequest) returns (BackupResponse);
+  rpc Restore(RestoreRequest) returns (RestoreResponse);
+  rpc UploadBackup(UploadBackupRequest) returns (UploadBackupResponse);
 }
 
 // ============================================================================
@@ -49,6 +56,12 @@ message QuicClientMessage {
     BackupRequest backup = 12;
     RestoreRequest restore = 13;
     UploadBackupRequest upload_backup = 14;
+    // SONNY-1841: per-stream statement cancellation. Backward-compatible
+    // addition (old clients simply never send it); existing tags 1-14 are
+    // unchanged. Honoured by aborting the target stream's in-flight statement
+    // so it releases the per-graph write lock instead of running to its own
+    // deadline.
+    CancelRequest cancel = 15;
   }
 }
 
@@ -68,6 +81,9 @@ message QuicServerMessage {
     BackupResponse backup = 12;
     RestoreResponse restore = 13;
     UploadBackupResponse upload_backup = 14;
+    // SONNY-1841: acknowledgement for a per-stream CANCEL. Backward-compatible
+    // addition; existing tags 1-14 are unchanged.
+    CancelResponse cancel = 15;
   }
 }
 
@@ -158,6 +174,22 @@ message DataPage {
   bool final = 2;
   bool ordered = 3;
   repeated string order_keys = 4;
+  // SONNY-2822: what the statement changed. Set on the final page
+  // (final = true) of every successful result, all zeros for a read; absent
+  // on other pages and from servers that predate it.
+  UpdateCounts update_counts = 5;
+}
+
+// SONNY-2822: per-statement update counts (openCypher / Bolt query
+// statistics semantics; see docs/BINARY_PROTOCOL.md "Update counts").
+message UpdateCounts {
+  uint64 nodes_created = 1;
+  uint64 nodes_deleted = 2;
+  uint64 relationships_created = 3;
+  uint64 relationships_deleted = 4;
+  uint64 properties_set = 5;
+  uint64 labels_added = 6;
+  uint64 labels_removed = 7;
 }
 
 message Row {
@@ -461,12 +493,18 @@ message CommitRequest {
 }
 message CommitResponse {
   bool success = 1;
+  // SONNY-3348 (round 19): why it failed (40000: rolled back; 40003: the
+  // rollback could not undo every change). Unset on success.
+  Error error = 2;
 }
 message RollbackRequest {
   string session_id = 1; // Required for gRPC; ignored for QUIC
 }
 message RollbackResponse {
   bool success = 1;
+  // SONNY-3348 (round 19): why it failed (40000: rolled back; 40003: the
+  // rollback could not undo every change). Unset on success.
+  Error error = 2;
 }
 message SavepointRequest {
   string name = 1;
@@ -590,4 +628,20 @@ message UploadBackupResponse {
   bool success = 1;
   string message = 2;
   string upload_path = 3;
+}
+
+// SONNY-1841: per-stream statement cancellation on the QUIC wire. Cancels the
+// in-flight statement on the target QUIC stream so it aborts and releases the
+// per-graph write lock instead of running to its ~120s deadline while the next
+// writer on another connection waits it out.
+message CancelRequest {
+  // Target QUIC stream id to cancel. 0 means "this stream" (self-cancel).
+  uint64 stream_id = 1;
+  // Optional session id, for parity/routing; ignored by the QUIC handler.
+  string session_id = 2;
+}
+message CancelResponse {
+  // True when a matching in-flight stream was found and its cancel flag set.
+  bool cancelled = 1;
+  string message = 2;
 }

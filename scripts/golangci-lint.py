@@ -8,7 +8,7 @@ import subprocess
 import sys
 import tempfile
 
-GO_VERSION = "1.27.3"
+GO_VERSION = "1.27.4"
 GOLANGCI_LINT_VERSION = "v2.15.0"
 
 
