@@ -26,6 +26,7 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"net/url"
 	"runtime"
 	"strings"
 	"sync"
@@ -75,8 +76,8 @@ func startMplxServerDSN(t *testing.T, poolSize, streamsPerConn int) string {
 	metricsPort := findFreeUDPPort(t, port+1, 3799)
 	startProbeServer(t, port, metricsPort, tmpDir)
 	return fmt.Sprintf(
-		"127.0.0.1:%d?insecure=true&user=geode&pass=seed&pool_size=%d&max_streams_per_conn=%d&max_streams=%d",
-		port, poolSize, streamsPerConn, poolSize*streamsPerConn,
+		"127.0.0.1:%d?insecure=true&user=geode&pass=%s&pool_size=%d&max_streams_per_conn=%d&max_streams=%d",
+		port, url.QueryEscape(testAdminPassphrase), poolSize, streamsPerConn, poolSize*streamsPerConn,
 	)
 }
 
@@ -282,7 +283,7 @@ func requireExactCounts(t *testing.T, dsn string, res *mplxResult) {
 	// Strip pool tuning so the verification uses a clean single connection.
 	vdsn := dsn
 	if idx := strings.Index(vdsn, "?"); idx >= 0 {
-		vdsn = vdsn[:idx] + "?insecure=true&user=geode&pass=seed"
+		vdsn = vdsn[:idx] + "?insecure=true&user=geode&pass=" + url.QueryEscape(testAdminPassphrase)
 	}
 	db, err := sql.Open("geode", vdsn)
 	require.NoError(t, err, "open verify db")
