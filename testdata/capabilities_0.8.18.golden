@@ -22,7 +22,7 @@ explain	true
 profile	true
 explain_policy	true
 sonny_profile_version	1
-read_only_covers_admin_ddl	false
+read_only_covers_admin_ddl	true
 strict_tenancy_production_default	false
 tenant_scope_fail_closed	false
 tenant_binding_server_verified	false

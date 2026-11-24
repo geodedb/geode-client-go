@@ -108,6 +108,16 @@ func runTestMain(m *testing.M) int {
 	// Manual-server fast path: no container needed.
 	if dsn := os.Getenv("GEODE_TEST_DSN"); dsn != "" {
 		sharedDSN = dsn
+		// Register the harness tenant here too, as the container path does.
+		// Since geode 0.8.26 (SONNY-6612) the engine refuses a session whose
+		// tenant is not registered (42501 TenantNotRegistered) as soon as the
+		// registry holds any tenant other than the default, and the cancel and
+		// tenancy tests register theirs. Unregistered, it-harness would work
+		// only until the first of them ran. The CALL runs unscoped, since a
+		// session bound to an unregistered tenant is refused even for it.
+		if err := ensureHarnessTenant(context.Background(), dsnWithoutTenant(dsn)); err != nil {
+			log.Fatalf("integration: failed to register harness tenant on the manual server: %v", err)
+		}
 		// A manual server may or may not carry a gRPC listener, and only the
 		// caller knows where it is. Taken verbatim, like GEODE_TEST_DSN.
 		grpcDSN = os.Getenv("GEODE_TEST_GRPC_DSN")
