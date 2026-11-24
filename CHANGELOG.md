@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Engine pin moved to **geode 0.8.26** (`geodedb/geode:0.8.26`, manifest-list
+  digest `sha256:8f85ece498ea49866fe78dfff7c35017703fef443d1f0a1e7a1217671a5855b2`),
+  the first release carrying the QUIC closeStream/packet-number fix (quic
+  v0.1.53+, SONNY-4379) behind the intermittent 08003 unbound-stream errors
+  (SONNY-3261).
+
 ## [v0.2.2] - 2026-11-23
 
 Engine pin: **geode 0.8.22**. Also qualified against geode main 94f491235
