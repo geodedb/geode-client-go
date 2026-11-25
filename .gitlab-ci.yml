@@ -164,7 +164,7 @@ proto-check:
   stage: integration
   image: golang:1.27.4
   services:
-    - name: geodedb/geode:0.8.26@sha256:8f85ece498ea49866fe78dfff7c35017703fef443d1f0a1e7a1217671a5855b2
+    - name: geodedb/geode:0.8.27@sha256:2c5a9b856ab7ba4b12e6bc88786a663c3321270eec308bde5f8f9028fa69bb85
       alias: geode
       command:
         - serve

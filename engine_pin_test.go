@@ -30,7 +30,7 @@ import (
 //
 // Never point this at a floating tag such as :latest. TestEnginePinIsImmutable
 // enforces that.
-const defaultGeodeImage = "geodedb/geode:0.8.26@sha256:8f85ece498ea49866fe78dfff7c35017703fef443d1f0a1e7a1217671a5855b2"
+const defaultGeodeImage = "geodedb/geode:0.8.27@sha256:2c5a9b856ab7ba4b12e6bc88786a663c3321270eec308bde5f8f9028fa69bb85"
 
 // pinnedEngineVersion is the exact Geode engine release this driver is
 // qualified against, as the engine reports it.
@@ -39,7 +39,7 @@ const defaultGeodeImage = "geodedb/geode:0.8.26@sha256:8f85ece498ea49866fe78dfff
 // geodedb/geode:0.8.26), so this constant carries it too. Compare the exact
 // string the engine returns rather than normalising it away: a change in the
 // reported format is itself a signal worth failing on.
-const pinnedEngineVersion = "v0.8.26"
+const pinnedEngineVersion = "v0.8.27"
 
 // TestEnginePinIsImmutable guards the engine pin without needing Docker: it
 // fails if the default image ever becomes a floating reference, or if the
