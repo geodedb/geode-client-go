@@ -16,7 +16,7 @@ DOCKER ?= docker
 # engine_pin_test.go, the integration:geode service in
 # .gitlab-ci.yml, and the .version field of ../geode/build.zig.zon.
 # Update all of them together.
-GEODE_IMAGE ?= geodedb/geode:0.8.26@sha256:8f85ece498ea49866fe78dfff7c35017703fef443d1f0a1e7a1217671a5855b2
+GEODE_IMAGE ?= geodedb/geode:0.8.27@sha256:2c5a9b856ab7ba4b12e6bc88786a663c3321270eec308bde5f8f9028fa69bb85
 GEODE_CONTAINER ?= geode-go-test
 # Dev-only HMAC key for the local container. Never used outside `make
 # docker-start`; the CI job and the testcontainers harness set their own.
